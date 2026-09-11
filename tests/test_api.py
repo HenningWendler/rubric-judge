@@ -8,7 +8,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import pytest
 from fastapi.testclient import TestClient
 
-from conftest import CASE, FakeJudge, use_judge
+from conftest import BATCH, BATCH_VERDICTS, CASE, FakeJudge, use_judge
 
 from rubric_eval.api import app, get_judge
 
@@ -23,7 +23,7 @@ def test_evaluate_serves_the_evaluation_of_the_case(client):
     body = client.post("/evaluate", json=CASE).json()
 
     assert body["score"] == pytest.approx(0.75)
-    assert [criterion["score"] for criterion in body["criteria"]] == [2.0, 0.0]
+    assert [verdict["score"] for verdict in body["criterion_results"]] == [2.0, 0.0]
 
 
 def test_criteria_must_not_be_empty(client):
@@ -86,12 +86,12 @@ def test_the_result_carries_every_published_field(client):
 
     body = client.post("/evaluate", json=CASE).json()
 
-    assert set(body) == {"score", "criteria"}
-    assert set(body["criteria"][0]) == {
+    assert set(body) == {"case_id", "score", "criterion_results"}
+    assert set(body["criterion_results"][0]) == {
         "criterion_id", "weight", "score", "is_present", "spread", "failed", "reasoning",
     }
-    assert body["criteria"][0]["weight"] == 3
-    assert body["criteria"][0]["spread"] == 0.0
+    assert body["criterion_results"][0]["weight"] == 3
+    assert body["criterion_results"][0]["spread"] == 0.0
 
 
 def test_health_answers_even_when_the_judge_is_unconfigured(unconfigured_client):
@@ -102,6 +102,77 @@ def test_health_answers_even_when_the_judge_is_unconfigured(unconfigured_client)
 def test_evaluate_fails_loudly_when_the_judge_is_unconfigured(unconfigured_client):
     """No silent fallback and no fake score: a missing key is a server fault, not a 0.0."""
     assert unconfigured_client.post("/evaluate", json=CASE).status_code == 500
+
+
+# --- POST /evaluate/batch -----------------------------------------------------------------
+
+
+def test_evaluate_batch_serves_every_case_and_the_run_metrics(client):
+    use_judge(FakeJudge(BATCH_VERDICTS))
+
+    body = client.post("/evaluate/batch", json=BATCH).json()
+
+    assert [case["case_id"] for case in body["case_results"]] == [1, 2, 3]
+    assert body["metrics"]["average_score"] == pytest.approx((0.75 + 0.5 + 0.0) / 3)
+
+
+def test_the_batch_result_carries_every_published_field(client):
+    """The result shape is a published interface — it may grow, never shrink."""
+    use_judge(FakeJudge(BATCH_VERDICTS))
+
+    body = client.post("/evaluate/batch", json=BATCH).json()
+
+    assert set(body) == {"metrics", "case_results"}
+    assert set(body["metrics"]) == {
+        "total_cases", "average_score", "median_score", "variance", "standard_deviation",
+        "average_criterion_score", "criteria_fulfillment_rate", "cases_with_score_zero",
+        "cases_with_score_zero_count", "weakest_cases_above_zero", "failed_criteria_count",
+    }
+    assert set(body["case_results"][0]) == {"case_id", "score", "criterion_results"}
+
+
+def test_a_batch_entry_is_serialized_exactly_like_a_single_evaluation(client):
+    """Both endpoints return a `CaseResult`, so the documents must be identical — not merely
+    similar. That is what lets a caller treat the two results interchangeably."""
+    use_judge(FakeJudge(BATCH_VERDICTS))
+
+    batched = client.post("/evaluate/batch", json=BATCH).json()["case_results"][0]
+    alone = client.post("/evaluate", json=CASE).json()
+
+    assert batched == alone
+
+
+def test_a_case_without_an_id_is_rejected(client):
+    """`Case.id` is mandatory on both paths, so one result shape serves both: every result
+    carries a meaningful `case_id` and nothing has to be reconciled later."""
+    use_judge(FakeJudge({}))
+    without_id = {key: value for key, value in CASE.items() if key != "id"}
+
+    assert client.post("/evaluate", json=without_id).status_code == 422
+
+
+def test_an_empty_batch_is_rejected(client):
+    use_judge(FakeJudge({}))
+    assert client.post("/evaluate/batch", json={"cases": []}).status_code == 422
+
+
+def test_duplicate_case_ids_are_rejected(client):
+    use_judge(FakeJudge({}))
+    duplicated = {"cases": [{**BATCH["cases"][0], "id": 5}, {**BATCH["cases"][1], "id": 5}]}
+
+    assert client.post("/evaluate/batch", json=duplicated).status_code == 422
+
+
+def test_one_invalid_case_rejects_the_whole_batch_before_any_call(client):
+    """Validation stays at the boundary: a batch is not partially judged and partially
+    refused, so nothing is paid for a run whose result would be incomplete anyway."""
+    use_judge(FakeJudge(BATCH_VERDICTS))
+    broken = {"cases": [BATCH["cases"][0], {**BATCH["cases"][1], "criteria": []}]}
+
+    response = client.post("/evaluate/batch", json=broken)
+
+    assert response.status_code == 422
+    assert response.json()["detail"][0]["loc"] == ["body", "cases", 1, "criteria"]
 
 
 # --- end to end: the real SDK against a stub OpenAI-compatible endpoint ---------------------
@@ -191,8 +262,8 @@ def test_evaluate_end_to_end_against_an_openai_compatible_endpoint(client, stub_
     body = client.post("/evaluate", json=CASE).json()
 
     assert body["score"] == pytest.approx(0.75)  # (3*2/2 + 1*0/2) / 4
-    assert body["criteria"][0]["reasoning"] == "Named literally."
-    assert body["criteria"][1]["reasoning"] == "Never stated."
+    assert body["criterion_results"][0]["reasoning"] == "Named literally."
+    assert body["criterion_results"][1]["reasoning"] == "Never stated."
 
 
 def test_the_judge_is_asked_exactly_as_configured(client, stub_endpoint):
@@ -223,7 +294,7 @@ def test_a_broken_reply_is_healed_over_the_wire(client, stub_endpoint):
     body = client.post("/evaluate", json={**CASE, "criteria": [CASE["criteria"][0]]}).json()
 
     assert body["score"] == pytest.approx(0.5)
-    assert body["criteria"][0]["failed"] is False
+    assert body["criterion_results"][0]["failed"] is False
     assert len(stub_endpoint.received) == 2
     assert "no JSON object" in stub_endpoint.received[1]["messages"][-1]["content"]
 
@@ -238,7 +309,7 @@ def test_an_unhealable_endpoint_costs_only_its_own_criterion(client, stub_endpoi
 
     body = client.post("/evaluate", json=CASE).json()
 
-    scored, failed = body["criteria"]
+    scored, failed = body["criterion_results"]
     assert scored["score"] == 2.0
     assert failed["failed"] is True
     assert "no valid answer in 3 attempts" in failed["reasoning"]
@@ -271,8 +342,8 @@ def test_a_rubric_larger_than_the_concurrency_limit_is_scored_completely(
 
     assert body["score"] == 1.0
     assert len(stub_endpoint.received) == 20
-    assert [result["criterion_id"] for result in body["criteria"]] == list(range(1, 21))
-    assert body["criteria"][7]["reasoning"] == "Covered by criterion 08."
+    assert [result["criterion_id"] for result in body["criterion_results"]] == list(range(1, 21))
+    assert body["criterion_results"][7]["reasoning"] == "Covered by criterion 08."
 
 
 def test_two_requests_in_two_event_loops_score_a_large_rubric_identically(stub_endpoint):
@@ -304,4 +375,21 @@ def test_two_requests_in_two_event_loops_score_a_large_rubric_identically(stub_e
             rounds.append(client.post("/evaluate", json=case).json())
 
     assert [body["score"] for body in rounds] == [1.0, 1.0]
-    assert [result["failed"] for body in rounds for result in body["criteria"]] == [False] * 40
+    verdicts = [verdict for body in rounds for verdict in body["criterion_results"]]
+    assert [verdict["failed"] for verdict in verdicts] == [False] * 40
+
+
+def test_a_nan_weight_is_rejected_instead_of_scoring_null(client):
+    """The sibling of `Infinity`: Python's JSON parser accepts the bare literal `NaN`, and a
+    `nan` weight poisons the weighted fold into a `nan` score that serializes as `null`. The
+    error table names it, so the boundary has to reject it."""
+    use_judge(FakeJudge({1: 2}))
+    body = (
+        '{"id": 1, "question": "q", "answer": "a",'
+        ' "criteria": [{"id": 1, "content": "x", "weight": NaN}]}'
+    )
+
+    response = client.post("/evaluate", content=body, headers={"content-type": "application/json"})
+
+    assert response.status_code == 422
+    assert "finite" in response.text

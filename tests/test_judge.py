@@ -2,7 +2,7 @@ import asyncio
 
 import pytest
 
-from rubric_eval import EvaluateRequest, evaluate_case
+from rubric_eval import Batch, Case, evaluate_batch, evaluate_case
 from rubric_eval.judge import JudgeConfig, OpenAIJudge, parse_verdict
 from rubric_eval.models import Criterion
 
@@ -421,7 +421,8 @@ async def test_the_limit_holds_across_several_cases_judged_at_once():
     """
     judge, fake = _judge(['Covered.\n{"score": 2}'] * 30, max_concurrent=8)
     five_cases = [
-        EvaluateRequest(
+        Case(
+            id=first,
             question="How do I report sick leave?",
             answer="Email hr@example.com before 10:00.",
             criteria=[
@@ -436,3 +437,103 @@ async def test_the_limit_holds_across_several_cases_judged_at_once():
 
     assert len(fake.calls) == 30
     assert fake.peak_in_flight == 8
+
+
+def _batch_of(case_count: int, criteria_per_case: int) -> Batch:
+    return Batch(
+        cases=[
+            {
+                "id": case_number,
+                "question": "How do I report sick leave?",
+                "answer": "Email hr@example.com before 10:00.",
+                "criteria": [
+                    {"id": number, "content": f"criterion {number}", "weight": 1}
+                    for number in range(criteria_per_case)
+                ],
+            }
+            for case_number in range(case_count)
+        ]
+    )
+
+
+async def test_a_batch_does_not_multiply_the_concurrency_limit_by_its_cases():
+    """The guardrail the batch could plausibly break: `evaluate_batch` fans out over the cases
+    *and* every case fans out over its criteria, so a naive implementation would put
+    cases x criteria calls in flight. The budget belongs to the judge, so it stays the same
+    eight whether 40 criteria come from one case or from five.
+    """
+    judge, fake = _judge(['Covered.\n{"score": 2}'] * 40, max_concurrent=8)
+
+    result = await evaluate_batch(judge, _batch_of(case_count=5, criteria_per_case=8))
+
+    assert len(fake.calls) == 40
+    assert fake.peak_in_flight == 8
+    assert result.metrics.average_score == 1.0
+
+
+async def test_two_batches_running_at_once_share_the_budget():
+    """Two HTTP requests, one shared judge: the second batch must queue on the same slots,
+    not open its own eight connections."""
+    judge, fake = _judge(['Covered.\n{"score": 2}'] * 40, max_concurrent=8)
+    two_batches = [_batch_of(case_count=2, criteria_per_case=10) for _ in range(2)]
+
+    await asyncio.gather(*(evaluate_batch(judge, batch) for batch in two_batches))
+
+    assert len(fake.calls) == 40
+    assert fake.peak_in_flight == 8
+
+
+async def test_a_batch_is_judged_concurrently_rather_than_case_after_case():
+    """A limit of 8 with 4 criteria per case only pays off if the cases overlap — awaiting
+    them one after another would cap the peak at 4 and make a run as slow as a for-loop."""
+    judge, fake = _judge(['Covered.\n{"score": 2}'] * 16, max_concurrent=8)
+
+    await evaluate_batch(judge, _batch_of(case_count=4, criteria_per_case=4))
+
+    assert fake.peak_in_flight == 8
+
+
+# --- what the judge is and is not told ------------------------------------------------------
+
+
+async def test_the_criterion_weight_never_reaches_the_judge():
+    """Documented as deliberate: a judge that knew how much a criterion counts could let that
+    importance leak into the score. Only `content` is sent, never the weight."""
+    judge, fake = _judge(['Covered.\n{"score": 2}'])
+    weighted = Criterion(id=1, content="Send an email", weight=7)
+
+    await judge.score("How?", "Send an email.", weighted)
+
+    sent = " ".join(message["content"] for message in fake.calls[0])
+    assert "Send an email" in sent
+    assert "7" not in sent
+
+
+async def test_a_custom_prompt_replaces_the_system_message():
+    """`OpenAIJudge(config, prompt=...)` is the documented way to bring your own wording. It
+    replaces the system message only — the per-criterion user message stays the bundled one."""
+    config = JudgeConfig(model="m", endpoint="http://x/v1", api_key="k")
+    judge = OpenAIJudge(config, prompt="Judge in Klingon.")
+    judge.client.chat.completions = FakeCompletions(['Covered.\n{"score": 2}'])
+
+    await judge.score("How?", "Send an email.", CRITERION)
+
+    system, user = judge.client.chat.completions.calls[0]
+    assert system == {"role": "system", "content": "Judge in Klingon."}
+    assert "Send an email" in user["content"]
+
+
+def test_an_empty_optional_environment_variable_falls_back_to_the_default(monkeypatch):
+    """An empty value counts as missing for the required variables, so it has to mean the
+    same for the optional ones — an exported but unset `MAX_CONCURRENT=` must not be read as
+    a limit of zero, which would be rejected and take the process down at startup."""
+    monkeypatch.setenv("RUBRIC_EVAL_JUDGE_ENDPOINT", "http://x/v1")
+    monkeypatch.setenv("RUBRIC_EVAL_JUDGE_API_KEY", "k")
+    monkeypatch.setenv("RUBRIC_EVAL_JUDGE_MODEL", "m")
+    monkeypatch.setenv("RUBRIC_EVAL_JUDGE_MAX_CONCURRENT", "")
+    monkeypatch.setenv("RUBRIC_EVAL_JUDGE_TEMPERATURE", "")
+
+    config = JudgeConfig.from_env()
+
+    assert config.max_concurrent == 8
+    assert config.temperature == 0.0

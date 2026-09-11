@@ -1,4 +1,5 @@
-"""Shared test doubles: one fake judge and one case, used by the domain and the HTTP tests."""
+"""Shared test doubles: one fake judge, one case and one batch, used by the domain and the
+HTTP tests alike — so a domain test and an HTTP test never describe *almost* the same input."""
 
 import pytest
 from fastapi.testclient import TestClient
@@ -7,6 +8,7 @@ from rubric_eval.api import app, get_judge
 from rubric_eval.judge import Verdict
 
 CASE = {
+    "id": 1,
     "question": "How do I report sick leave?",
     "answer": "Email hr@example.com before 10:00.",
     "criteria": [
@@ -14,8 +16,34 @@ CASE = {
         {"id": 2, "content": "State the expected last day", "weight": 1},
     ],
 }
-"""Two criteria weighted 3 and 1 — as JSON for the HTTP tests, as `EvaluateRequest(**CASE)`
-for the domain tests, so both describe literally the same case."""
+"""Two criteria weighted 3 and 1 — as JSON for the HTTP tests, as `Case(**CASE)` for the
+domain tests, so both describe literally the same case."""
+
+
+BATCH = {
+    "cases": [
+        CASE,
+        {
+            "id": 2,
+            "question": "How do I request vacation?",
+            "answer": "Ask your team lead.",
+            "criteria": [{"id": 21, "content": "Submit the request in the HR tool", "weight": 1}],
+        },
+        {
+            "id": 3,
+            "question": "Who approves overtime?",
+            "answer": "Nobody really knows.",
+            "criteria": [{"id": 31, "content": "The line manager approves it", "weight": 1}],
+        },
+    ]
+}
+"""Three cases whose criterion ids are unique across the whole batch, so one `FakeJudge`
+lookup table scores each criterion of each case separately. With `{1: 2, 2: 0, 21: 1, 31: 0}`
+the cases score 0.75, 0.5 and 0.0 — one strong, one partial, one total miss, which is what
+makes the run metrics say something."""
+
+BATCH_VERDICTS = {1: 2, 2: 0, 21: 1, 31: 0}
+"""The lookup table producing exactly those three scores."""
 
 
 class FakeJudge:
