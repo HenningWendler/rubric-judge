@@ -5,8 +5,10 @@ IDE shows them on hover, and `use_attribute_docstrings` copies them into the Ope
 schema, so the editor and `/docs` can never drift apart.
 """
 
+import math
 from collections import Counter
 from collections.abc import Iterable
+from enum import StrEnum
 from typing import Annotated
 
 from pydantic import (
@@ -28,6 +30,11 @@ several runs it is the majority rule applied to the averaged score."""
 WEAKEST_CASES_REPORTED = 5
 """How many of the weakest non-zero cases `RunMetrics` names by id — the shortlist to look
 at next, not a complete ranking."""
+
+SCORE_EQUALITY_TOLERANCE = 1e-9
+"""How close two scores have to be to count as unchanged in a comparison. Far above the
+float noise two runs accumulate summing the same weights in a different order, and far below
+the smallest score difference a rubric can actually produce."""
 
 
 def _duplicate_ids(ids: Iterable[int]) -> list[int]:
@@ -313,6 +320,344 @@ class BatchResult(DocumentedModel):
     metrics: RunMetrics
     """The aggregate over all cases of this run."""
 
-    case_results: list[CaseResult]
+    case_results: list[CaseResult] = Field(min_length=1)
     """One result per case of the batch, in request order. Each one is exactly what
-    `POST /evaluate` returns for that case."""
+    `POST /evaluate` returns for that case. At least one, for the same reason `Batch.cases`
+    needs one: `run_metrics` refuses to describe a distribution over no cases, so a run with
+    an empty list could never have been produced legitimately — and anything computed from
+    it later, a comparison above all, would be dividing by zero."""
+
+
+class ChangeStatus(StrEnum):
+    """Which way one score moved between two runs — the vocabulary of every comparison."""
+
+    IMPROVED = "improved"
+    """The candidate scored higher than the baseline, by more than `SCORE_EQUALITY_TOLERANCE`."""
+
+    STABLE = "stable"
+    """The two scores are equal within `SCORE_EQUALITY_TOLERANCE`."""
+
+    WORSENED = "worsened"
+    """The candidate scored lower than the baseline, by more than `SCORE_EQUALITY_TOLERANCE`."""
+
+
+def _change_status(score_delta: float) -> ChangeStatus:
+    """The one place a score delta becomes a verdict, so a criterion and a case can never
+    classify the same movement differently.
+
+    The tolerance is what keeps float noise out of the report: two runs that summed the same
+    weights in a different order can land on 0.7500000000000001 and 0.75, and exact equality
+    would file that as a regression.
+    """
+    if math.isclose(score_delta, 0.0, abs_tol=SCORE_EQUALITY_TOLERANCE):
+        return ChangeStatus.STABLE
+    return ChangeStatus.IMPROVED if score_delta > 0 else ChangeStatus.WORSENED
+
+
+class CriterionComparison(DocumentedModel):
+    """How one criterion of one case fared between two runs — the finest grain of a comparison.
+
+    Built by `between()`, never by hand, so `score_delta` and `status` cannot disagree.
+    """
+
+    criterion_id: int
+    """The `Criterion.id` both runs judged. Identical in both by construction: a comparison
+    of runs with different criterion ids is refused before any of this is computed."""
+
+    weight: float
+    """The criterion's weight, identical in both runs. Carried so a movement can be read
+    against how much it counted — a 2.0 swing on weight 1 next to nine criteria of weight 3
+    barely moves the case score."""
+
+    baseline_score: float
+    """What the baseline run's judge gave this criterion, on the raw 0..SCALE_MAX scale."""
+
+    candidate_score: float
+    """What the candidate run's judge gave it, same scale."""
+
+    score_delta: float
+    """`candidate_score - baseline_score`, so a positive number always means the candidate
+    did better. On the raw 0..SCALE_MAX scale, hence in [-SCALE_MAX, SCALE_MAX]."""
+
+    status: ChangeStatus
+    """`score_delta` as a verdict. Derived from the raw score, not from `is_present`: a
+    criterion that went from 1.0 to 2.0 moved the case score and is reported as improved."""
+
+    @classmethod
+    def between(
+        cls, baseline: CriterionResult, candidate: CriterionResult
+    ) -> "CriterionComparison":
+        """Compare the two verdicts one criterion got in two runs.
+
+        Args:
+            baseline: The verdict from the run being compared *against*.
+            candidate: The verdict from the run *under test*, for the same criterion id and
+                weight — `comparison.compare_runs` has already refused the runs otherwise.
+
+        Returns:
+            A `CriterionComparison` whose `score_delta` points from baseline to candidate and
+            whose `status` is derived from exactly that delta.
+
+        Example:
+            CriterionComparison.between(scored_one, scored_two).status   # ChangeStatus.IMPROVED
+        """
+        return cls(
+            criterion_id=candidate.criterion_id,
+            weight=candidate.weight,
+            baseline_score=baseline.score,
+            candidate_score=candidate.score,
+            score_delta=candidate.score - baseline.score,
+            status=_change_status(candidate.score - baseline.score),
+        )
+
+
+class CaseComparison(DocumentedModel):
+    """How one case fared between two runs, and which of its criteria are responsible.
+
+    Built by `between()`, never by hand.
+
+    Example:
+        case_comparison.score_delta               # +0.25 — the candidate answered better
+        case_comparison.criterion_comparisons[0]  # which criterion moved, and by how much
+    """
+
+    case_id: int
+    """The `Case.id` both runs evaluated."""
+
+    baseline_score: float
+    """The baseline run's weighted case score, in [0, 1]."""
+
+    candidate_score: float
+    """The candidate run's weighted case score, in [0, 1]."""
+
+    score_delta: float
+    """`candidate_score - baseline_score`, in [-1, 1]. Positive means the candidate is better,
+    which is the sign convention of every delta in a comparison."""
+
+    status: ChangeStatus
+    """`score_delta` as a verdict, with the same tolerance a criterion gets."""
+
+    criterion_comparisons: list[CriterionComparison] = Field(min_length=1)
+    """One entry per criterion of the case, ordered by `criterion_id`. At least one, because
+    a rubric cannot be empty. Named for what it holds, not for what went in."""
+
+    @classmethod
+    def between(cls, baseline: CaseResult, candidate: CaseResult) -> "CaseComparison":
+        """Compare the two results one case got in two runs.
+
+        Args:
+            baseline: The case result from the run being compared against.
+            candidate: The case result from the run under test, for the same case id and the
+                same rubric — `comparison.compare_runs` has already refused the runs otherwise.
+
+        Returns:
+            A `CaseComparison` carrying both scores, their delta and one
+            `CriterionComparison` per criterion, ordered by `criterion_id` so the list reads
+            the same whichever order the two runs happened to be stored in.
+
+        Example:
+            CaseComparison.between(weak_result, strong_result).status   # ChangeStatus.IMPROVED
+        """
+        return cls(
+            case_id=candidate.case_id,
+            baseline_score=baseline.score,
+            candidate_score=candidate.score,
+            score_delta=candidate.score - baseline.score,
+            status=_change_status(candidate.score - baseline.score),
+            criterion_comparisons=[
+                CriterionComparison.between(baseline_criterion, candidate_criterion)
+                for baseline_criterion, candidate_criterion in zip(
+                    _by_criterion_id(baseline), _by_criterion_id(candidate)
+                )
+            ],
+        )
+
+
+def _by_criterion_id(result: CaseResult) -> list[CriterionResult]:
+    """Both runs' verdicts brought into one order, so zipping them pairs the same criterion.
+    Rubric order is not enough: two runs may have been stored with their criteria in
+    different orders, and zipping those would compare unrelated verdicts."""
+    return sorted(result.criterion_results, key=lambda verdict: verdict.criterion_id)
+
+
+class RunMetricsDelta(DocumentedModel):
+    """`RunMetrics` of the candidate minus those of the baseline — one field per metric that
+    can meaningfully be subtracted.
+
+    Every delta points the same way: **positive means the candidate scored higher**. For the
+    two counting fields that reads backwards on purpose — a positive
+    `cases_with_score_zero_count_delta` means the candidate produced *more* total misses.
+
+    `total_cases` has no delta because a comparison of runs with different case sets is
+    refused, and the two id lists of `RunMetrics` have none because a set of ids does not
+    subtract — `ChangeSummary` reports the movement of cases instead.
+    """
+
+    average_score_delta: float
+    """Change in the mean case score, in [-1, 1]. The headline number of a comparison."""
+
+    median_score_delta: float
+    """Change in the median case score. Read next to the mean: a mean that rose while the
+    median stood still means a few cases improved, not the run as a whole."""
+
+    variance_delta: float
+    """Change in the sample variance of the case scores."""
+
+    standard_deviation_delta: float
+    """Change in the spread of the case scores. Negative means the candidate is more uniform
+    — which is an improvement or a regression depending on which way the mean went."""
+
+    average_criterion_score_delta: float
+    """Change in the unweighted mean judge score over all criteria, on the 0..SCALE_MAX
+    scale. Moves independently of `average_score_delta`, because it ignores both weights and
+    case boundaries."""
+
+    criteria_fulfillment_rate_delta: float
+    """Change in the mean share of criteria counting as covered, in [-1, 1]."""
+
+    cases_with_score_zero_count_delta: int
+    """Change in how many cases missed their rubric completely. **Negative is the good
+    direction here** — the candidate left fewer answers at zero."""
+
+    failed_criteria_count_delta: int
+    """Change in how many criteria got no usable verdict. Read this before any other delta:
+    anything but 0 means the two runs suffered different amounts of judge outage, and every
+    number above is then partly an artefact of that rather than of the answers."""
+
+
+class ChangeMagnitude(DocumentedModel):
+    """How large the moves on one side of a comparison were — improvements or regressions.
+
+    All three numbers carry the sign of their side, so a worsening's `largest` is the most
+    negative delta, not its absolute value. Every field is 0.0 when nothing moved that way,
+    which is the honest reading: a run where nothing got worse has no worsening to report.
+    """
+
+    largest: float
+    """The single biggest move on this side, or 0.0 if the side is empty."""
+
+    mean: float
+    """Arithmetic mean of the moves on this side — how much a typical one was worth."""
+
+    median: float
+    """Median of the moves. Far below the mean on the improvement side means one case
+    carries the win."""
+
+
+class ChangeSummary(DocumentedModel):
+    """Where a run moved, case by case: which cases went which way, and by how much.
+
+    The counterpart to `RunMetricsDelta`. That one says the average rose by 0.08; this one
+    says whether every case rose a little or three rose a lot while one collapsed.
+
+    Example:
+        summary.improved_case_ids[:3]   # [7, 3, 2] — the three biggest wins, in order
+        summary.worsening.largest       # -0.31     — the regression to read first
+    """
+
+    improved_case_ids: list[int]
+    """Ids of the cases the candidate scored higher on, **biggest improvement first**. The
+    list is complete rather than capped, so the top three are simply its first three."""
+
+    stable_case_ids: list[int]
+    """Ids of the cases whose score did not move beyond `SCORE_EQUALITY_TOLERANCE`, in id
+    order. A stable case score can still hide criteria that moved in opposite directions."""
+
+    worsened_case_ids: list[int]
+    """Ids of the cases the candidate scored lower on, **biggest regression first**. These
+    are the ones to read when an average went up and you want to know what it cost."""
+
+    improvement: ChangeMagnitude
+    """Size of the moves behind `improved_case_ids`, all positive."""
+
+    worsening: ChangeMagnitude
+    """Size of the moves behind `worsened_case_ids`, all negative."""
+
+    @computed_field
+    @property
+    def improved_case_count(self) -> int:
+        """Length of `improved_case_ids`. Derived, so count and list cannot contradict."""
+        return len(self.improved_case_ids)
+
+    @computed_field
+    @property
+    def stable_case_count(self) -> int:
+        """Length of `stable_case_ids`."""
+        return len(self.stable_case_ids)
+
+    @computed_field
+    @property
+    def worsened_case_count(self) -> int:
+        """Length of `worsened_case_ids`."""
+        return len(self.worsened_case_ids)
+
+    @computed_field
+    @property
+    def improvement_rate(self) -> float:
+        """Share of the run's cases that improved, in [0, 1]. This and the other two rates
+        sum to exactly 1.0, because every case lands in exactly one of the three lists."""
+        return self.improved_case_count / self._total_cases
+
+    @computed_field
+    @property
+    def stability_rate(self) -> float:
+        """Share of the run's cases that did not move, in [0, 1]."""
+        return self.stable_case_count / self._total_cases
+
+    @computed_field
+    @property
+    def worsening_rate(self) -> float:
+        """Share of the run's cases that got worse, in [0, 1]."""
+        return self.worsened_case_count / self._total_cases
+
+    @property
+    def _total_cases(self) -> int:
+        """Every case is in exactly one of the three lists, so they add up to the run — no
+        separate total to store and keep in sync. Never 0: `BatchResult` rejects a run with
+        no cases, so the three rates above can always be divided out."""
+        return self.improved_case_count + self.stable_case_count + self.worsened_case_count
+
+
+class Comparison(DocumentedModel):
+    """The input to `compare_runs`: two finished runs to hold against each other.
+
+    A named pair rather than two arguments on purpose. Both sides have the exact same type,
+    so a swapped pair of positional arguments would be impossible to detect and would invert
+    the sign of every number in the result.
+
+    Example:
+        Comparison(baseline=last_weeks_run, candidate=todays_run)
+    """
+
+    baseline: BatchResult
+    """The run being compared *against* — the state of things before your change."""
+
+    candidate: BatchResult
+    """The run *under test*. Every delta in the result is `candidate - baseline`, so a
+    positive number always means this one did better."""
+
+
+class ComparisonResult(DocumentedModel):
+    """What `compare_runs` returns: the same comparison at three grains.
+
+    `metrics_delta` says whether the run got better, `summary` says how that is distributed
+    over the cases, and `case_comparisons` says which criterion is responsible. A number at
+    any grain can always be traced down to the one below it.
+
+    Example:
+        comparison.metrics_delta.average_score_delta   # +0.084
+        comparison.summary.worsened_case_ids           # [5] — what the win cost
+        comparison.case_comparisons[0].criterion_comparisons[1].score_delta   # -2.0
+    """
+
+    metrics_delta: RunMetricsDelta
+    """Candidate minus baseline for every `RunMetrics` field that subtracts."""
+
+    summary: ChangeSummary
+    """How the movement is distributed over the cases: who won, who lost, by how much."""
+
+    case_comparisons: list[CaseComparison] = Field(min_length=1)
+    """One entry per case, ordered by `case_id`. At least one, because both compared runs
+    have at least one case. Both runs cover exactly the same cases —
+    that is checked before anything here is computed — so neither run's storage order is the
+    canonical one, and sorting by id gives a document that does not depend on either."""

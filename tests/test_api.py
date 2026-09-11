@@ -8,7 +8,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import pytest
 from fastapi.testclient import TestClient
 
-from conftest import BATCH, BATCH_VERDICTS, CASE, FakeJudge, use_judge
+from conftest import BATCH, BATCH_VERDICTS, CASE, FakeJudge, run_of, use_judge
 
 from rubric_eval.api import app, get_judge
 
@@ -393,3 +393,78 @@ def test_a_nan_weight_is_rejected_instead_of_scoring_null(client):
 
     assert response.status_code == 422
     assert "finite" in response.text
+
+
+def _runs(baseline, candidate) -> dict:
+    """A `/compare` body built from two runs, as JSON the way a caller would send it."""
+    return {
+        "baseline": baseline.model_dump(mode="json"),
+        "candidate": candidate.model_dump(mode="json"),
+    }
+
+
+def test_compare_serves_the_comparison_of_two_runs(client):
+    body = client.post("/compare", json=_runs(run_of({1: 0}), run_of({1: 2}))).json()
+
+    assert body["metrics_delta"]["average_score_delta"] == 1.0
+    assert body["summary"]["improved_case_ids"] == [1]
+    assert body["case_comparisons"][0]["criterion_comparisons"][0]["status"] == "improved"
+
+
+def test_the_comparison_carries_every_published_field(client):
+    """The result shape is a published interface — it may grow, never shrink."""
+    body = client.post("/compare", json=_runs(run_of({1: 0, 2: 2}), run_of({1: 2, 2: 0}))).json()
+
+    assert set(body) == {"metrics_delta", "summary", "case_comparisons"}
+    assert set(body["metrics_delta"]) == {
+        "average_score_delta", "median_score_delta", "variance_delta",
+        "standard_deviation_delta", "average_criterion_score_delta",
+        "criteria_fulfillment_rate_delta", "cases_with_score_zero_count_delta",
+        "failed_criteria_count_delta",
+    }
+    assert set(body["summary"]) == {
+        "improved_case_ids", "stable_case_ids", "worsened_case_ids", "improvement", "worsening",
+        "improved_case_count", "stable_case_count", "worsened_case_count",
+        "improvement_rate", "stability_rate", "worsening_rate",
+    }
+    assert set(body["summary"]["improvement"]) == {"largest", "mean", "median"}
+    assert set(body["case_comparisons"][0]) == {
+        "case_id", "baseline_score", "candidate_score", "score_delta", "status",
+        "criterion_comparisons",
+    }
+    assert set(body["case_comparisons"][0]["criterion_comparisons"][0]) == {
+        "criterion_id", "weight", "baseline_score", "candidate_score", "score_delta", "status",
+    }
+
+
+def test_a_batch_result_can_be_posted_straight_back_to_compare(client):
+    """The two endpoints have to fit together without reshaping: whatever `/evaluate/batch`
+    returned is a valid half of a `/compare` body, verbatim."""
+    use_judge(FakeJudge(BATCH_VERDICTS))
+    run = client.post("/evaluate/batch", json=BATCH).json()
+
+    response = client.post("/compare", json={"baseline": run, "candidate": run})
+
+    assert response.status_code == 200
+    assert response.json()["summary"]["stable_case_count"] == 3
+
+
+def test_incomparable_runs_are_rejected_with_the_reason(client):
+    response = client.post("/compare", json=_runs(run_of({1: 1}, {2: 1}), run_of({1: 1})))
+
+    assert response.status_code == 422
+    assert "cases only in the baseline: [2]" in response.json()["detail"]
+
+
+def test_compare_answers_even_when_the_judge_is_unconfigured(unconfigured_client):
+    """Pure computation: comparing stored runs must not need an API key."""
+    body = _runs(run_of({1: 0}), run_of({1: 2}))
+    assert unconfigured_client.post("/compare", json=body).status_code == 200
+
+
+def test_a_run_without_cases_is_rejected_rather_than_dividing_by_zero(client):
+    """An empty `case_results` was never producible — `run_metrics` refuses a run of no cases
+    — but it is postable, and the comparison rates would divide by it."""
+    run = run_of({1: 1}).model_dump(mode="json") | {"case_results": []}
+
+    assert client.post("/compare", json={"baseline": run, "candidate": run}).status_code == 422
