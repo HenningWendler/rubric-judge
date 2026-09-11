@@ -30,21 +30,10 @@ WEAKEST_CASES_REPORTED = 5
 at next, not a complete ranking."""
 
 
-def duplicate_ids(ids: Iterable[int]) -> list[int]:
-    """Find the ids that occur more than once.
-
-    Shared by the rubric and the batch, because both match results back to their input by
-    id and a repeat breaks both in exactly the same way.
-
-    Args:
-        ids: The ids to check, in any order. Consumed once, so a generator is fine.
-
-    Returns:
-        The repeated ids, sorted and each listed once. Empty when every id is unique —
-        which makes it directly usable as a validator condition.
-
-    Example:
-        duplicate_ids([3, 1, 3, 1, 2])   # [1, 3]
+def _duplicate_ids(ids: Iterable[int]) -> list[int]:
+    """One check for the rubric and the batch: both match results back to their input by id,
+    so a repeat breaks both the same way. Empty when every id is unique, which is what lets
+    it read as a validator condition.
     """
     counted = Counter(ids)
     return sorted(id_ for id_, count in counted.items() if count > 1)
@@ -196,7 +185,7 @@ class Case(DocumentedModel):
     def _reject_duplicate_criterion_ids(cls, criteria: list[Criterion]) -> list[Criterion]:
         """Every verdict is labelled with its `Criterion.id`, so a repeated id makes results
         ambiguous: a caller keying by id would drop one verdict or count another twice."""
-        if repeated := duplicate_ids(criterion.id for criterion in criteria):
+        if repeated := _duplicate_ids(criterion.id for criterion in criteria):
             raise ValueError(f"criterion ids must be unique, repeated: {repeated}")
         return criteria
 
@@ -249,7 +238,7 @@ class Batch(DocumentedModel):
     def _reject_duplicate_case_ids(cls, cases: list[Case]) -> list[Case]:
         """Same reason as for criterion ids: a repeated id makes the run metrics ambiguous,
         because `cases_with_score_zero` and the weakest-case shortlist name cases by id."""
-        if repeated := duplicate_ids(case.id for case in cases):
+        if repeated := _duplicate_ids(case.id for case in cases):
             raise ValueError(f"case ids must be unique, repeated: {repeated}")
         return cases
 

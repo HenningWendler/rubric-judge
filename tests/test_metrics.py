@@ -208,8 +208,8 @@ def test_presence_starts_exactly_at_the_threshold():
 
 
 def test_the_standard_deviation_is_the_square_root_of_the_variance():
-    """Both are computed from the scores independently; the README defines one as the root of
-    the other, so they must not be able to disagree."""
+    """The README defines one as the root of the other. `run_metrics` derives it that way, so
+    this guards against anyone computing the two from the scores independently again."""
     metrics = run_metrics(THREE_CASES)
 
     assert metrics.standard_deviation == pytest.approx(math.sqrt(metrics.variance))

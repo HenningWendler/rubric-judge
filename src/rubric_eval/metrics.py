@@ -4,7 +4,9 @@ Failed criteria count as 0 and stay in the denominator — a judge outage must l
 score visibly, not silently shrink the rubric.
 """
 
+import math
 import statistics
+from operator import attrgetter
 
 from rubric_eval.models import (
     SCALE_MAX,
@@ -88,12 +90,13 @@ def run_metrics(results: list[CaseResult]) -> RunMetrics:
     if not results:
         raise ValueError("run metrics need at least one case")
     scores = [result.score for result in results]
+    variance = _variance(scores)
     return RunMetrics(
         total_cases=len(results),
         average_score=statistics.mean(scores),
         median_score=statistics.median(scores),
-        variance=_variance(scores),
-        standard_deviation=_standard_deviation(scores),
+        variance=variance,
+        standard_deviation=math.sqrt(variance),
         average_criterion_score=statistics.mean(_every_criterion_score(results)),
         criteria_fulfillment_rate=statistics.mean(_fulfillment_rate_per_case(results)),
         cases_with_score_zero=_case_ids_scoring_zero(results),
@@ -103,12 +106,12 @@ def run_metrics(results: list[CaseResult]) -> RunMetrics:
 
 
 def _variance(scores: list[float]) -> float:
-    """A single case has no spread; `statistics.variance` would raise on it instead."""
+    """A single case has no spread; `statistics.variance` would raise on it instead.
+
+    The only place that rule lives: `standard_deviation` is the square root of what this
+    returns, so the two can never disagree about a one-case run.
+    """
     return statistics.variance(scores) if len(scores) > 1 else 0.0
-
-
-def _standard_deviation(scores: list[float]) -> float:
-    return statistics.stdev(scores) if len(scores) > 1 else 0.0
 
 
 def _every_criterion_score(results: list[CaseResult]) -> list[float]:
@@ -136,12 +139,10 @@ def _case_ids_scoring_zero(results: list[CaseResult]) -> list[int]:
 def _weakest_case_ids_above_zero(results: list[CaseResult]) -> list[int]:
     """The weakest cases that still scored something, weakest first. Cases at exactly 0 are
     reported separately, so this list does not fill up with them and hide the near misses."""
-    above_zero = sorted((result for result in results if result.score > 0), key=_score_of)
+    above_zero = sorted(
+        (result for result in results if result.score > 0), key=attrgetter("score")
+    )
     return [result.case_id for result in above_zero[:WEAKEST_CASES_REPORTED]]
-
-
-def _score_of(result: CaseResult) -> float:
-    return result.score
 
 
 def _failed_criteria_count(results: list[CaseResult]) -> int:

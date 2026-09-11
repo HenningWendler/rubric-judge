@@ -11,7 +11,7 @@ from fastapi import Depends, FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
-from rubric_eval.evaluation import evaluate_batch, evaluate_case
+from rubric_eval import evaluation
 from rubric_eval.judge import Judge, JudgeConfig, OpenAIJudge
 from rubric_eval.models import Batch, BatchResult, Case, CaseResult
 
@@ -66,7 +66,7 @@ async def health() -> dict[str, str]:
 
 
 @app.post("/evaluate", summary="Score one answer against its rubric")
-async def evaluate(case: Case, judge: Annotated[Judge, Depends(get_judge)]) -> CaseResult:
+async def evaluate_case(case: Case, judge: Annotated[Judge, Depends(get_judge)]) -> CaseResult:
     """Score one answer against its rubric — one LLM call per criterion, run in parallel.
 
     Send a `Case`: your `id`, the `question` that was asked, the `answer` your system
@@ -84,11 +84,11 @@ async def evaluate(case: Case, judge: Annotated[Judge, Depends(get_judge)]) -> C
     merely *down* does not fail the request: each criterion it could not answer for comes
     back with `failed: true` and `score: 0`, which lowers the case score visibly.
     """
-    return await evaluate_case(judge, case)
+    return await evaluation.evaluate_case(judge, case)
 
 
 @app.post("/evaluate/batch", summary="Score a catalog of answers and aggregate the run")
-async def evaluate_many(batch: Batch, judge: Annotated[Judge, Depends(get_judge)]) -> BatchResult:
+async def evaluate_batch(batch: Batch, judge: Annotated[Judge, Depends(get_judge)]) -> BatchResult:
     """Score a whole catalog of answers in one request and get metrics over the run.
 
     Send a `Batch`: a list of exactly the cases `POST /evaluate` takes, with unique ids.
@@ -108,4 +108,4 @@ async def evaluate_many(batch: Batch, judge: Annotated[Judge, Depends(get_judge)
     Concurrency is bounded by the judge, not by the batch: every case of this request shares
     one budget, and so does every other request in flight.
     """
-    return await evaluate_batch(judge, batch)
+    return await evaluation.evaluate_batch(judge, batch)
