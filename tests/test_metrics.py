@@ -1,7 +1,14 @@
+import statistics
+
 import pytest
 
-from rubric_eval.metrics import case_score
-from rubric_eval.models import Criterion, CriterionResult
+from rubric_eval.metrics import case_score, run_metrics
+from rubric_eval.models import (
+    WEAKEST_CASES_REPORTED,
+    CaseResult,
+    Criterion,
+    CriterionResult,
+)
 
 
 def _result(weight: float, score: float) -> CriterionResult:
@@ -47,7 +54,7 @@ def test_a_perfect_rubric_scores_exactly_one():
 
 
 def test_the_score_never_leaves_the_unit_interval():
-    """Mixed weights and scores stay inside [0, 1], the range `EvaluationResult.score` promises."""
+    """Mixed weights and scores stay inside [0, 1], the range `CaseResult.score` promises."""
     score = case_score([_result(0.001, 0), _result(1000, 1), _result(7, 2)])
     assert 0.0 <= score <= 1.0
 
@@ -64,3 +71,96 @@ def test_huge_weights_do_not_overflow_the_weight_sum():
     a `nan` score is serialized as `null` and breaks the declared result schema."""
     score = case_score([_result(1e308, 2), _result(1e308, 0)])
     assert score == pytest.approx(0.5)
+
+
+# --- run metrics: one batch folded into the numbers a run is judged by ---------------------
+
+
+def _case(case_id: int, *verdicts: CriterionResult) -> CaseResult:
+    return CaseResult(
+        case_id=case_id, score=case_score(list(verdicts)), criterion_results=list(verdicts)
+    )
+
+
+THREE_CASES = [
+    _case(1, _result(3, 2), _result(1, 0)),  # 0.75
+    _case(2, _result(1, 1)),  # 0.5
+    _case(3, _result(1, 0)),  # 0.0
+]
+
+
+def test_averages_the_case_scores_not_the_criteria():
+    """A case counts once, whatever the size of its rubric — otherwise one case with twenty
+    criteria would outvote nineteen cases with one."""
+    metrics = run_metrics(THREE_CASES)
+
+    assert metrics.total_cases == 3
+    assert metrics.average_score == pytest.approx((0.75 + 0.5 + 0.0) / 3)
+    assert metrics.median_score == pytest.approx(0.5)
+
+
+def test_a_single_case_has_no_spread_rather_than_erroring():
+    """`statistics.variance` raises on one value; a run of one case is a legitimate run."""
+    metrics = run_metrics([_case(1, _result(1, 2))])
+
+    assert metrics.variance == 0.0
+    assert metrics.standard_deviation == 0.0
+
+
+def test_the_spread_of_several_cases_is_reported():
+    metrics = run_metrics(THREE_CASES)
+
+    assert metrics.variance == pytest.approx(statistics.variance([0.75, 0.5, 0.0]))
+    assert metrics.standard_deviation == pytest.approx(statistics.stdev([0.75, 0.5, 0.0]))
+
+
+def test_the_average_criterion_score_ignores_weights_and_case_boundaries():
+    """Deliberately a different question than `average_score`: how the judge rates an average
+    single statement, on the raw 0-2 scale, not how good the average answer is."""
+    metrics = run_metrics(THREE_CASES)
+
+    assert metrics.average_criterion_score == pytest.approx((2 + 0 + 1 + 0) / 4)
+
+
+def test_the_fulfillment_rate_is_averaged_per_case_not_over_all_criteria():
+    """The one that would silently be wrong if the criteria were flattened first: a case with
+    a long rubric must not dominate the rate. Flattened this would be 10/11 ≈ 0.91."""
+    long_rubric = _case(1, *[_result(1, 2) for _ in range(10)])
+    one_miss = _case(2, _result(1, 0))
+
+    assert run_metrics([long_rubric, one_miss]).criteria_fulfillment_rate == pytest.approx(0.5)
+
+
+def test_cases_that_missed_the_rubric_completely_are_named_by_id():
+    metrics = run_metrics(THREE_CASES)
+
+    assert metrics.cases_with_score_zero == [3]
+    assert metrics.cases_with_score_zero_count == 1
+
+
+def test_the_weakest_cases_are_listed_weakest_first_and_exclude_the_zeros():
+    """Zero-score cases have their own list; mixing them in would fill the shortlist with
+    total misses and hide the near misses, which usually have a different cause."""
+    metrics = run_metrics(THREE_CASES)
+
+    assert metrics.weakest_cases_above_zero == [2, 1]
+
+
+def test_the_weakest_case_list_is_capped():
+    """A shortlist to read next, not a full ranking — the complete data is in `cases`."""
+    many = [_case(number, _result(1, 1)) for number in range(20)]
+
+    assert len(run_metrics(many).weakest_cases_above_zero) == WEAKEST_CASES_REPORTED
+
+
+def test_failed_criteria_are_counted_across_the_whole_run():
+    """The number to read before the average: it says how much of a bad run is the judge."""
+    outage = CriterionResult.unjudged(Criterion(id=9, content="x", weight=1), "judge down")
+    run = [_case(1, _result(1, 2), outage), _case(2, outage)]
+
+    assert run_metrics(run).failed_criteria_count == 2
+
+
+def test_an_empty_run_is_a_clear_error_not_a_division_by_zero():
+    with pytest.raises(ValueError, match="at least one case"):
+        run_metrics([])

@@ -51,14 +51,37 @@ class Judge(Protocol):
     flight; an own implementation that talks to a rate-limited service needs its own bound.
     """
 
-    async def score(self, question: str, answer: str, criterion: Criterion) -> Verdict: ...
+    async def score(self, question: str, answer: str, criterion: Criterion) -> Verdict:
+        """Decide how well one criterion is covered by one answer.
+
+        Args:
+            question: What was asked. Context only — an implementation must not score it.
+            answer: The answer under test, exactly as the caller supplied it. May be empty:
+                a system that returned nothing is a valid case that scores 0.
+            criterion: The single requirement to judge. Only `content` is meant to reach the
+                model; `weight` belongs to the scoring layer, and a judge that saw it could
+                let importance leak into the score.
+
+        Returns:
+            A `Verdict` whose `score` is an integer in 0..SCALE_MAX. Only the parser of
+            `OpenAIJudge` enforces that range, so an implementation that returns 5 pushes
+            the case score above 1.0 and nothing downstream will catch it.
+
+        Raises:
+            Anything, for an endpoint that cannot answer. `evaluation.py` turns it into one
+            criterion marked `failed` — so raising is the correct way to report an outage,
+            and returning a made-up 0 is not.
+        """
+        ...
 
 
 class JudgeConfig(DocumentedModel):
     """How to reach the judge model and how hard to try.
 
-    Built by hand in tests, from the environment in production:
+    Built from the environment in production, by hand in tests or when the settings come
+    from somewhere else.
 
+    Example:
         JudgeConfig.from_env()
         JudgeConfig(model="gpt-4o-mini", endpoint="https://api.openai.com/v1", api_key="sk-...")
     """
@@ -93,10 +116,23 @@ class JudgeConfig(DocumentedModel):
 
     @classmethod
     def from_env(cls) -> "JudgeConfig":
-        """Names *all* missing variables at once — fixing config one error per start is misery.
+        """Build the config from `RUBRIC_EVAL_JUDGE_*` environment variables.
 
-        Variables that are not set are not passed on, so the field defaults above stay the
-        single source of truth for them.
+        Reads `ENDPOINT`, `API_KEY`, `MODEL` (all required) plus `TEMPERATURE`,
+        `MAX_TOKENS`, `MAX_ATTEMPTS` and `MAX_CONCURRENT`, each prefixed
+        `RUBRIC_EVAL_JUDGE_`. A variable that is not set is not passed on at all, so the
+        field defaults above stay the single source of truth for the optional ones.
+
+        Returns:
+            A validated `JudgeConfig`. Numeric variables are parsed and range-checked by
+            Pydantic, so a typo cannot turn into a silently odd setting.
+
+        Raises:
+            RuntimeError: One or more required variables are missing or empty. The message
+                names *all* of them at once — fixing configuration one error per restart is
+                misery.
+            ValidationError: A numeric variable does not parse or is out of range. The
+                message names the offending setting.
         """
         required = (
             "RUBRIC_EVAL_JUDGE_ENDPOINT",
@@ -119,7 +155,29 @@ class JudgeConfig(DocumentedModel):
 
 
 def parse_verdict(reply: str) -> Verdict:
-    """Raise ValueError with the concrete cause — the message is fed back to the judge."""
+    """Pull the score and the argument out of one raw judge reply.
+
+    The judge reasons first and closes with a JSON object, so the *last* `{"score": ...}`
+    in the reply wins and everything before it is the reasoning.
+
+    Args:
+        reply: The model's message content, unmodified. Markdown fences, prose around the
+            object and several score objects are all tolerated.
+
+    Returns:
+        A `Verdict` with an integer score on the 0..SCALE_MAX scale and the text preceding
+        the object as `reasoning` (the whole reply, if it wrote nothing but the object).
+
+    Raises:
+        ValueError: No score object, unparseable JSON, or a score off the scale. **The
+            message is not for humans** — the retry loop sends it straight back to the model
+            as the correction, so rewording one means changing the prompt. The wordings live
+            in `prompt.py`.
+
+    Example:
+        parse_verdict('The answer names the address.\n{"score": 2}')
+        # Verdict(score=2, reasoning="The answer names the address.")
+    """
     score_object = _last_score_object(reply)
     score = _score_in(score_object)
     if not _is_on_scale(score):
@@ -154,12 +212,25 @@ def _reasoning_before(reply: str, score_object: re.Match[str]) -> str:
 
 
 class OpenAIJudge:
-    """A `Judge` backed by any OpenAI-compatible endpoint, throttled to
-    `JudgeConfig.max_concurrent` calls in flight.
+    """A `Judge` backed by any OpenAI-compatible endpoint — OpenAI, vLLM, Azure, Ollama,
+    Groq, OpenRouter — with self-healing retries and a concurrency limit.
 
-    Because one instance serves every request of the process (`api.get_judge` is cached),
-    that limit also holds across cases judged at the same time — ten parallel requests
-    share the slots instead of being allowed their own set each.
+    Build it **once** and share it. The `max_concurrent` budget belongs to the instance, so
+    one judge per case or per request would hand each of them its own full set of slots —
+    exactly the throttle it was configured to have. `api.get_judge` caches one for the whole
+    process for that reason.
+
+    Args:
+        config: Endpoint, credentials, model and the retry/throttle limits.
+        prompt: Replaces the bundled `JUDGE_EN` system prompt. Whatever you pass has to keep
+            two promises or every reply fails to parse: the model argues first and closes
+            with a single `{"score": 0|1|2}` object, and the prose scale stays 0..SCALE_MAX.
+            The user prompt and the retry complaints are not covered by this — they live in
+            `prompt.py`.
+
+    Example:
+        judge = OpenAIJudge(JudgeConfig.from_env())
+        verdict = await judge.score("How do I report sick leave?", answer, criterion)
     """
 
     def __init__(self, config: JudgeConfig, prompt: str | None = None):
@@ -197,6 +268,25 @@ class OpenAIJudge:
         }
 
     async def score(self, question: str, answer: str, criterion: Criterion) -> Verdict:
+        """Ask the model about one criterion, correcting it until the reply parses.
+
+        Not a blind retry: on an unusable reply the model is shown its own output plus the
+        concrete complaint, so attempt two answers a question rather than repeating one.
+
+        Args:
+            question: Context for the model; never scored.
+            answer: The answer under test.
+            criterion: The single requirement to judge — only its `content` is sent.
+
+        Returns:
+            A `Verdict` with a validated integer score and the model's argument for it.
+
+        Raises:
+            ValueError: No usable reply within `config.max_attempts`, naming the last
+                complaint. `evaluation.py` turns this into one `failed` criterion.
+            Exception: Whatever the `openai` SDK raises for a transport, auth or quota
+                problem, unchanged — it is contained one layer up, not here.
+        """
         conversation = self._opening_messages(question, answer, criterion)
         last_error: ValueError | None = None
         for _ in range(self.config.max_attempts):
@@ -236,7 +326,10 @@ class OpenAIJudge:
 
 
 def _correction(reply: str, error: ValueError) -> list[ChatMessage]:
-    """Show the judge its own broken reply plus the concrete complaint. That is the self-healing."""
+    """Show the judge its own broken reply plus the concrete complaint.
+
+    That pairing is the self-healing: the model is corrected, not merely asked again.
+    """
     return [
         {"role": "assistant", "content": reply},
         {"role": "user", "content": str(error)},

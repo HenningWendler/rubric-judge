@@ -113,7 +113,16 @@ NO_JSON_HINT = (
 
 
 def out_of_range_hint(score: float) -> str:
-    """Fed back when the judge answered with a number that is not on the scale."""
+    """The complaint for a score that is not on the scale — `3`, `-1`, `1.5`.
+
+    Args:
+        score: What the judge actually returned. Quoted back to it, because a model
+            corrects a number it can see far more reliably than an abstract rule.
+
+    Returns:
+        The message, phrased as an instruction: the parser raises it as a `ValueError` and
+        the retry loop sends that text to the model unchanged.
+    """
     return (
         f'You returned "score": {score}, which is not on the scale. '
         f"Reconsider and answer with {_ALLOWED_SCORES}."
@@ -121,7 +130,15 @@ def out_of_range_hint(score: float) -> str:
 
 
 def malformed_json_hint(error: Exception) -> str:
-    """Fed back when a `{"score": ...}` object was found but does not parse as valid JSON."""
+    """The complaint for a score object that was found but does not parse as valid JSON.
+
+    Args:
+        error: The parse failure, included verbatim so the model is told *what* is broken
+            (a trailing comma, a single quote) instead of merely that something is.
+
+    Returns:
+        The message, phrased as an instruction — see `out_of_range_hint`.
+    """
     return (
         f'Your score object could not be parsed ({error}). '
         f'End your reply with exactly one line of valid JSON like {{"score": 0}}, '
@@ -130,5 +147,16 @@ def malformed_json_hint(error: Exception) -> str:
 
 
 def criterion_prompt(question: str, answer: str, criterion: str) -> str:
-    """The user message: what was asked, what came back, and the one criterion to judge."""
+    """Build the user message: what was asked, what came back, one criterion to judge.
+
+    Args:
+        question: Context only — the system prompt tells the model not to score it.
+        answer: The answer under test, inserted unmodified.
+        criterion: The text of a single criterion. Its weight is deliberately *not* passed:
+            a judge that knew how much a criterion counts could let that leak into the score.
+
+    Returns:
+        The complete user message. One criterion per call is the whole design — a model
+        asked about five at once trades attention between them.
+    """
     return f"Question:\n{question}\n\nAnswer:\n{answer}\n\nCriterion:\n- {criterion}\n"
