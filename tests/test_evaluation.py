@@ -6,7 +6,7 @@ import pytest
 
 from conftest import BATCH, BATCH_VERDICTS, CASE, FakeJudge
 
-from rubric_eval import Batch, Case, evaluate_batch, evaluate_case
+from rubric_eval import Batch, Case, Verdict, evaluate_batch, evaluate_case
 
 THE_CASE = Case(**CASE)
 THE_BATCH = Batch(**BATCH)
@@ -207,3 +207,35 @@ async def test_an_empty_batch_is_rejected_before_any_judge_call():
     """An empty run has no meaningful metrics, and a 422 costs nothing."""
     with pytest.raises(ValueError):
         Batch(cases=[])
+
+
+class _JudgeByAnswer:
+    """Scores by the answer rather than by the criterion id — the shared-rubric case needs it,
+    because there the same criterion id appears in both cases."""
+
+    async def score(self, question, answer, criterion):
+        return Verdict(score=2 if "HR tool" in answer else 0, reasoning=answer)
+
+
+async def test_criterion_ids_may_repeat_across_the_cases_of_a_batch():
+    """Criterion ids are documented as unique *within* a case. Two cases written from the
+    same rubric template share them, and their verdicts still belong to their own case."""
+    shared_rubric = [{"id": 1, "content": "Submit it in the HR tool", "weight": 1}]
+    batch = Batch(cases=[
+        {"id": 1, "question": "q", "answer": "In the HR tool.", "criteria": shared_rubric},
+        {"id": 2, "question": "q", "answer": "No idea.", "criteria": shared_rubric},
+    ])
+
+    result = await evaluate_batch(_JudgeByAnswer(), batch)
+
+    assert [case.case_id for case in result.case_results] == [1, 2]
+    assert [case.score for case in result.case_results] == [1.0, 0.0]
+    assert result.metrics.cases_with_score_zero == [2]
+
+
+async def test_an_empty_question_is_accepted_because_it_is_never_scored():
+    """The question is context for the judge, not something the rubric holds against the
+    answer — so a case without one is valid rather than a 422."""
+    result = await evaluate_case(FakeJudge({1: 2, 2: 2}), Case(**{**CASE, "question": ""}))
+
+    assert result.score == 1.0

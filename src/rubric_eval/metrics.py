@@ -44,7 +44,8 @@ def case_score(results: list[CriterionResult]) -> float:
     reached_points = sum(
         weight * result.score / SCALE_MAX for weight, result in zip(weights, results)
     )
-    return reached_points / sum(weights)
+    reachable_points = sum(weights)
+    return reached_points / reachable_points
 
 
 def _weights_scaled_to_at_most_one(results: list[CriterionResult]) -> list[float]:
@@ -119,7 +120,7 @@ def _fulfillment_rate_per_case(results: list[CaseResult]) -> list[float]:
     """One rate per case, never one rate over all criteria: averaging the cases afterwards is
     what keeps a case with a 20-criteria rubric from outweighing nineteen short ones.
 
-    No division by zero to guard here — `Case.criteria` rejects an empty rubric.
+    No division by zero to guard here — `CaseResult.criterion_results` rejects an empty list.
     """
     return [
         sum(criterion.is_present for criterion in result.criterion_results)

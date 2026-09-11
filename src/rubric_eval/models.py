@@ -223,9 +223,10 @@ class CaseResult(DocumentedModel):
     """Weighted case score in [0, 1], see `metrics.case_score`. 1.0 means every criterion
     was fully covered."""
 
-    criterion_results: list[CriterionResult]
-    """One verdict per criterion of the case, in rubric order. Named for what it holds:
-    `criteria` would promise `Criterion` objects and deliver verdicts."""
+    criterion_results: list[CriterionResult] = Field(min_length=1)
+    """One verdict per criterion of the case, in rubric order. At least one, because
+    `Case.criteria` rejects an empty rubric and the metrics divide by this count. Named for
+    what it holds: `criteria` would promise `Criterion` objects and deliver verdicts."""
 
 
 class Batch(DocumentedModel):

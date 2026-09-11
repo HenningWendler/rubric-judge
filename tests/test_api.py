@@ -377,3 +377,19 @@ def test_two_requests_in_two_event_loops_score_a_large_rubric_identically(stub_e
     assert [body["score"] for body in rounds] == [1.0, 1.0]
     verdicts = [verdict for body in rounds for verdict in body["criterion_results"]]
     assert [verdict["failed"] for verdict in verdicts] == [False] * 40
+
+
+def test_a_nan_weight_is_rejected_instead_of_scoring_null(client):
+    """The sibling of `Infinity`: Python's JSON parser accepts the bare literal `NaN`, and a
+    `nan` weight poisons the weighted fold into a `nan` score that serializes as `null`. The
+    error table names it, so the boundary has to reject it."""
+    use_judge(FakeJudge({1: 2}))
+    body = (
+        '{"id": 1, "question": "q", "answer": "a",'
+        ' "criteria": [{"id": 1, "content": "x", "weight": NaN}]}'
+    )
+
+    response = client.post("/evaluate", content=body, headers={"content-type": "application/json"})
+
+    assert response.status_code == 422
+    assert "finite" in response.text

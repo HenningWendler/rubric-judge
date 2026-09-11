@@ -491,3 +491,49 @@ async def test_a_batch_is_judged_concurrently_rather_than_case_after_case():
     await evaluate_batch(judge, _batch_of(case_count=4, criteria_per_case=4))
 
     assert fake.peak_in_flight == 8
+
+
+# --- what the judge is and is not told ------------------------------------------------------
+
+
+async def test_the_criterion_weight_never_reaches_the_judge():
+    """Documented as deliberate: a judge that knew how much a criterion counts could let that
+    importance leak into the score. Only `content` is sent, never the weight."""
+    judge, fake = _judge(['Covered.\n{"score": 2}'])
+    weighted = Criterion(id=1, content="Send an email", weight=7)
+
+    await judge.score("How?", "Send an email.", weighted)
+
+    sent = " ".join(message["content"] for message in fake.calls[0])
+    assert "Send an email" in sent
+    assert "7" not in sent
+
+
+async def test_a_custom_prompt_replaces_the_system_message():
+    """`OpenAIJudge(config, prompt=...)` is the documented way to bring your own wording. It
+    replaces the system message only — the per-criterion user message stays the bundled one."""
+    config = JudgeConfig(model="m", endpoint="http://x/v1", api_key="k")
+    judge = OpenAIJudge(config, prompt="Judge in Klingon.")
+    judge.client.chat.completions = FakeCompletions(['Covered.\n{"score": 2}'])
+
+    await judge.score("How?", "Send an email.", CRITERION)
+
+    system, user = judge.client.chat.completions.calls[0]
+    assert system == {"role": "system", "content": "Judge in Klingon."}
+    assert "Send an email" in user["content"]
+
+
+def test_an_empty_optional_environment_variable_falls_back_to_the_default(monkeypatch):
+    """An empty value counts as missing for the required variables, so it has to mean the
+    same for the optional ones — an exported but unset `MAX_CONCURRENT=` must not be read as
+    a limit of zero, which would be rejected and take the process down at startup."""
+    monkeypatch.setenv("RUBRIC_EVAL_JUDGE_ENDPOINT", "http://x/v1")
+    monkeypatch.setenv("RUBRIC_EVAL_JUDGE_API_KEY", "k")
+    monkeypatch.setenv("RUBRIC_EVAL_JUDGE_MODEL", "m")
+    monkeypatch.setenv("RUBRIC_EVAL_JUDGE_MAX_CONCURRENT", "")
+    monkeypatch.setenv("RUBRIC_EVAL_JUDGE_TEMPERATURE", "")
+
+    config = JudgeConfig.from_env()
+
+    assert config.max_concurrent == 8
+    assert config.temperature == 0.0

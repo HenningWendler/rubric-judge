@@ -219,7 +219,7 @@ both paths — see [the vocabulary](#the-vocabulary).
 |---|---|---|---|
 | `case_id` | `int` | — | The `Case.id` this result belongs to |
 | `score` | `float` | `0.0 … 1.0` | The weighted case score, see [How scoring works](#how-scoring-works). `1.0` means every criterion fully covered |
-| `criterion_results` | `list[CriterionResult]` | — | One verdict per criterion, **in rubric order**, so it can be zipped with `Case.criteria` |
+| `criterion_results` | `list[CriterionResult]` | ≥ 1 entry | One verdict per criterion, **in rubric order**, so it can be zipped with `Case.criteria`. Never empty — a rubric has at least one criterion, so a result has at least one verdict |
 
 > Named `criterion_results`, not `criteria`: the list holds *verdicts*, one per criterion —
 > `Case.criteria` is the rubric, and one name must not mean two things.
@@ -626,7 +626,7 @@ field tables in [Reference](#reference). One text, never three — they cannot d
 .venv/bin/python -m pytest
 ```
 
-108 tests, no real LLM ever called. Mocked at two levels:
+122 tests, no real LLM ever called. Mocked at two levels:
 
 - **`FakeJudge`** ([conftest.py](tests/conftest.py)) replaces the `Judge` protocol and scores
   from a lookup table — `{1: 2, 2: ValueError("down")}` scores criterion 1 with a `2` and

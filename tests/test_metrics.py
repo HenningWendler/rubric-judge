@@ -1,9 +1,11 @@
+import math
 import statistics
 
 import pytest
 
 from rubric_eval.metrics import case_score, run_metrics
 from rubric_eval.models import (
+    PRESENCE_THRESHOLD,
     WEAKEST_CASES_REPORTED,
     CaseResult,
     Criterion,
@@ -164,3 +166,90 @@ def test_failed_criteria_are_counted_across_the_whole_run():
 def test_an_empty_run_is_a_clear_error_not_a_division_by_zero():
     with pytest.raises(ValueError, match="at least one case"):
         run_metrics([])
+
+
+def test_a_case_result_always_carries_at_least_one_verdict():
+    """`Case.criteria` rejects an empty rubric, so "one verdict per criterion" means at least
+    one verdict — and the fulfillment rate divides by exactly that count. Without the rule on
+    the *result* type, a run loaded back from disk reaches `run_metrics` as a division by
+    zero instead of a clean rejection."""
+    with pytest.raises(ValueError):
+        CaseResult(case_id=1, score=0.0, criterion_results=[])
+
+
+def test_a_run_loaded_back_from_stored_rows_is_aggregated_like_a_fresh_one():
+    """The documented use of `run_metrics`: case results read from a file, not from a judge.
+    They arrive as plain dicts, so the model is the only thing standing between a malformed
+    row and the formulas."""
+    rows = [
+        {"case_id": 1, "score": 0.75, "criterion_results": [
+            {"criterion_id": 1, "weight": 3.0, "score": 2.0, "is_present": True}]},
+        {"case_id": 2, "score": 0.0, "criterion_results": [
+            {"criterion_id": 1, "weight": 1.0, "score": 0.0, "is_present": False}]},
+    ]
+
+    metrics = run_metrics([CaseResult(**row) for row in rows])
+
+    assert metrics.average_score == pytest.approx(0.375)
+    assert metrics.cases_with_score_zero == [2]
+
+
+def test_the_readme_worked_example_scores_two_thirds():
+    """Weights 3/2/1 scored 2/1/0 reach 3.0 + 1.0 + 0.0 of 6 points — the example the README
+    and the `case_score` docstring both spell out, and the one a reader reproduces first."""
+    assert case_score([_result(3, 2), _result(2, 1), _result(1, 0)]) == pytest.approx(2 / 3)
+
+
+def test_presence_starts_exactly_at_the_threshold():
+    """`is_present` is documented as `score >= PRESENCE_THRESHOLD`, so the threshold itself
+    counts as present. A `>` would move the cut silently and only for averaged scores."""
+    assert _result(1, PRESENCE_THRESHOLD).is_present is True
+    assert _result(1, PRESENCE_THRESHOLD / 2).is_present is False
+
+
+def test_the_standard_deviation_is_the_square_root_of_the_variance():
+    """Both are computed from the scores independently; the README defines one as the root of
+    the other, so they must not be able to disagree."""
+    metrics = run_metrics(THREE_CASES)
+
+    assert metrics.standard_deviation == pytest.approx(math.sqrt(metrics.variance))
+
+
+def test_the_metrics_do_not_depend_on_the_order_of_the_case_results():
+    """Documented as order-irrelevant: every case counts once, whatever position it arrives
+    in. Only the id lists are allowed to be ordered, and they are ordered by score."""
+    forward = run_metrics(THREE_CASES)
+    backward = run_metrics(list(reversed(THREE_CASES)))
+
+    assert forward == backward
+
+
+def test_the_weakest_cases_are_the_weakest_of_the_run_not_the_first_five_found():
+    """The cap is a shortlist of the worst, not of the earliest — capping before sorting
+    would name whichever cases happened to arrive first."""
+    strongest_first = [_case(number, _result(1, 2)) for number in range(1, 4)]
+    weakest = [_case(number, _result(1, 0.2)) for number in range(90, 95)]
+
+    metrics = run_metrics(strongest_first + weakest)
+
+    assert metrics.weakest_cases_above_zero == [90, 91, 92, 93, 94]
+
+
+def test_the_readme_batch_example_reports_exactly_the_documented_numbers():
+    """Every number in the README is claimed to be reproducible verbatim. This is the run of
+    the documented two-case batch — one perfect answer, one total miss."""
+    metrics = run_metrics([_case(1, _result(3, 2)), _case(2, _result(1, 0))])
+
+    assert metrics.model_dump() == {
+        "total_cases": 2,
+        "average_score": 0.5,
+        "median_score": 0.5,
+        "variance": 0.5,
+        "standard_deviation": 0.7071067811865476,
+        "average_criterion_score": 1.0,
+        "criteria_fulfillment_rate": 0.5,
+        "cases_with_score_zero": [2],
+        "cases_with_score_zero_count": 1,
+        "weakest_cases_above_zero": [1],
+        "failed_criteria_count": 0,
+    }
