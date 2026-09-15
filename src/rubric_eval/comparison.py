@@ -14,15 +14,15 @@ from operator import attrgetter
 
 from rubric_eval.models import (
     BatchResult,
-    CaseComparison,
+    CaseComparisonResult,
     CaseResult,
     ChangeMagnitude,
     ChangeStatus,
     ChangeSummary,
-    Comparison,
     ComparisonResult,
     RunMetrics,
     RunMetricsDelta,
+    RunPair,
 )
 
 
@@ -36,28 +36,29 @@ class RunsNotComparableError(ValueError):
     """
 
 
-def compare_runs(comparison: Comparison) -> ComparisonResult:
+def compare_runs(run_pair: RunPair) -> ComparisonResult:
     """Compare two finished runs of the same catalog at three grains: run, case, criterion.
 
     Every delta is `candidate - baseline`, so a positive number always means the candidate
     did better — with the two counting fields of `RunMetricsDelta` as the documented
     exception, where fewer is better.
 
-    Takes a `Comparison` rather than two arguments because both sides have the same type:
+    Takes a `RunPair` rather than two arguments because both sides have the same type:
     a swapped pair would be undetectable and would silently invert the whole document.
 
     Args:
-        comparison: The `baseline` run to compare against and the `candidate` run under
+        run_pair: The `baseline` run to compare against and the `candidate` run under
             test. Both must cover the same case ids, the same criterion ids per case and the
             same weights — see Raises. Nothing else is required of them: results loaded back
             from stored JSON compare exactly like results just computed.
 
     Returns:
         A `ComparisonResult`. `metrics_delta` says whether the run got better, `summary` how
-        that is distributed over the cases, and `case_comparisons` — ordered by `case_id` —
-        which criterion is responsible. Read `metrics_delta.failed_criteria_count_delta`
-        first: anything but 0 means the two runs suffered different amounts of judge outage,
-        and every other number is then partly an artefact of that.
+        that is distributed over the cases, and `case_comparison_results` — ordered by
+        `case_id` — which criterion is responsible. Read
+        `metrics_delta.failed_criteria_count_delta` first: anything but 0 means the two runs
+        suffered different amounts of judge outage, and every other number is then partly an
+        artefact of that.
 
     Raises:
         RunsNotComparableError: A `ValueError`. The runs do not describe the same catalog.
@@ -66,27 +67,27 @@ def compare_runs(comparison: Comparison) -> ComparisonResult:
             than only the first, so one fix can address all of them.
 
     Example:
-        result = compare_runs(Comparison(baseline=last_weeks_run, candidate=todays_run))
+        result = compare_runs(RunPair(baseline=last_weeks_run, candidate=todays_run))
         result.metrics_delta.average_score_delta   # +0.084
         result.summary.worsened_case_ids           # [5] — what the win cost
         result.summary.improvement.largest         # +0.31
     """
-    _reject_incomparable_runs(comparison.baseline, comparison.candidate)
-    case_comparisons = _compare_cases(comparison.baseline, comparison.candidate)
+    _reject_incomparable_runs(run_pair.baseline, run_pair.candidate)
+    case_comparison_results = _compare_cases(run_pair.baseline, run_pair.candidate)
     return ComparisonResult(
-        metrics_delta=_metrics_delta(comparison.baseline.metrics, comparison.candidate.metrics),
-        summary=_summarize(case_comparisons),
-        case_comparisons=case_comparisons,
+        metrics_delta=_metrics_delta(run_pair.baseline.metrics, run_pair.candidate.metrics),
+        summary=_summarize(case_comparison_results),
+        case_comparison_results=case_comparison_results,
     )
 
 
-def _compare_cases(baseline: BatchResult, candidate: BatchResult) -> list[CaseComparison]:
+def _compare_cases(baseline: BatchResult, candidate: BatchResult) -> list[CaseComparisonResult]:
     """One comparison per case, ordered by id — neither run's storage order is canonical,
     so sorting by id gives a document that does not depend on either."""
     baseline_by_id = _case_results_by_id(baseline)
     candidate_by_id = _case_results_by_id(candidate)
     return [
-        CaseComparison.between(baseline_by_id[case_id], candidate_by_id[case_id])
+        CaseComparisonResult.between(baseline_by_id[case_id], candidate_by_id[case_id])
         for case_id in sorted(candidate_by_id)
     ]
 
@@ -121,12 +122,12 @@ def _metrics_delta(baseline: RunMetrics, candidate: RunMetrics) -> RunMetricsDel
     )
 
 
-def _summarize(case_comparisons: list[CaseComparison]) -> ChangeSummary:
+def _summarize(case_comparison_results: list[CaseComparisonResult]) -> ChangeSummary:
     """The case movements folded into the distribution they form: who moved which way, in
     order of how much, and how large those moves were on each side."""
-    improved = _ranked_by_movement(case_comparisons, ChangeStatus.IMPROVED)
-    worsened = _ranked_by_movement(case_comparisons, ChangeStatus.WORSENED)
-    stable = _with_status(case_comparisons, ChangeStatus.STABLE)
+    improved = _ranked_by_movement(case_comparison_results, ChangeStatus.IMPROVED)
+    worsened = _ranked_by_movement(case_comparison_results, ChangeStatus.WORSENED)
+    stable = _with_status(case_comparison_results, ChangeStatus.STABLE)
     return ChangeSummary(
         improved_case_ids=[case.case_id for case in improved],
         stable_case_ids=[case.case_id for case in stable],
@@ -137,22 +138,23 @@ def _summarize(case_comparisons: list[CaseComparison]) -> ChangeSummary:
 
 
 def _with_status(
-    case_comparisons: list[CaseComparison], status: ChangeStatus
-) -> list[CaseComparison]:
-    return [case for case in case_comparisons if case.status is status]
+    case_comparison_results: list[CaseComparisonResult], status: ChangeStatus
+) -> list[CaseComparisonResult]:
+    """One place to pick a side out, so the three lists of a summary are cut the same way."""
+    return [case for case in case_comparison_results if case.status is status]
 
 
 def _ranked_by_movement(
-    case_comparisons: list[CaseComparison], status: ChangeStatus
-) -> list[CaseComparison]:
+    case_comparison_results: list[CaseComparisonResult], status: ChangeStatus
+) -> list[CaseComparisonResult]:
     """One side of the comparison, biggest move first — for improvements the largest positive
     delta, for regressions the most negative one. Ordering the complete list this way is what
     makes a separate "top five" field unnecessary: the top five are its first five."""
-    moved = _with_status(case_comparisons, status)
+    moved = _with_status(case_comparison_results, status)
     return sorted(moved, key=attrgetter("score_delta"), reverse=status is ChangeStatus.IMPROVED)
 
 
-def _magnitude_of(moved_cases: list[CaseComparison]) -> ChangeMagnitude:
+def _magnitude_of(moved_cases: list[CaseComparisonResult]) -> ChangeMagnitude:
     """How large the moves on one side were. All zero for an empty side: `statistics.mean`
     raises on an empty list, and a run where nothing got worse has no worsening to report.
 
@@ -234,4 +236,6 @@ def _weight_differences(
 
 
 def _weights_by_criterion_id(result: CaseResult) -> dict[int, float]:
+    """Keyed by id because the two runs are checked criterion by criterion, not position by
+    position — the criteria of a stored result come in whatever order it was saved in."""
     return {verdict.criterion_id: verdict.weight for verdict in result.criterion_results}

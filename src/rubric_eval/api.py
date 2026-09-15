@@ -18,8 +18,8 @@ from rubric_eval.models import (
     BatchResult,
     Case,
     CaseResult,
-    Comparison,
     ComparisonResult,
+    RunPair,
 )
 
 app = FastAPI(title="rubric-eval", version="0.1.0")
@@ -119,10 +119,10 @@ async def evaluate_batch(batch: Batch, judge: Annotated[Judge, Depends(get_judge
 
 
 @app.post("/compare", summary="Hold two finished runs against each other")
-async def compare_runs(runs: Comparison) -> ComparisonResult:
+async def compare_runs(runs: RunPair) -> ComparisonResult:
     """Compare two runs of the same catalog — did your change help, where, and what did it cost.
 
-    Send a `Comparison`: the `baseline` run to compare against and the `candidate` run under
+    Send a `RunPair`: the `baseline` run to compare against and the `candidate` run under
     test, each one exactly the `BatchResult` document `POST /evaluate/batch` returned. Runs
     stored as JSON months apart compare just like runs produced a second ago.
 
@@ -130,7 +130,7 @@ async def compare_runs(runs: Comparison) -> ComparisonResult:
     for every run metric, so a positive number always means the candidate did better — except
     for the two counting fields, where fewer is better. `summary` says how that is distributed:
     which cases improved, stayed, or got worse, biggest movers first, and how large the moves
-    were on each side. `case_comparisons` goes down to the individual criterion.
+    were on each side. `case_comparison_results` goes down to the individual criterion.
 
     Read `metrics_delta.failed_criteria_count_delta` first. Anything but 0 means the two runs
     suffered different amounts of judge outage, and every other number is then partly an

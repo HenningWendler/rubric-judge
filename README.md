@@ -141,12 +141,12 @@ apart compare exactly like runs produced a second ago.
 
 ```python
 from pathlib import Path
-from rubric_eval import BatchResult, Comparison, compare_runs
+from rubric_eval import BatchResult, RunPair, compare_runs
 
 baseline = BatchResult.model_validate_json(Path("run_before.json").read_text())
 candidate = BatchResult.model_validate_json(Path("run_after.json").read_text())
 
-result = compare_runs(Comparison(baseline=baseline, candidate=candidate))
+result = compare_runs(RunPair(baseline=baseline, candidate=candidate))
 
 result.metrics_delta.average_score_delta   # +0.125  — the run got better on average
 result.metrics_delta.median_score_delta    # -0.125  — but the typical case did not
@@ -156,23 +156,26 @@ result.summary.worsening.largest           # -0.5
 ```
 
 Every delta is **candidate minus baseline**, so a positive number always means the candidate
-did better. `Comparison` is a named pair rather than two arguments on purpose: both sides
-have the same type, so a swapped pair would be undetectable and would invert every sign.
+did better. `compare_runs` takes a `RunPair` rather than two arguments on purpose: both
+sides have the same type, so a swapped pair would be undetectable and would invert every
+sign. Only what comes back carries `Result` in its name — `RunPair` is what you hand in.
 
 Drill down when a number needs explaining — run, case, criterion:
 
 ```python
-regressed = result.case_comparisons[2]
-regressed.case_id                              # 3
-regressed.baseline_score, regressed.candidate_score   # (1.0, 0.5)
-regressed.criterion_comparisons[0].score_delta        # -1.0  — the judge dropped it 2 → 1
-regressed.criterion_comparisons[0].status             # ChangeStatus.WORSENED
+regressed = result.case_comparison_results[2]
+regressed.case_id                                      # 3
+regressed.baseline_score, regressed.candidate_score    # (1.0, 0.5)
+
+dropped = regressed.criterion_comparison_results[0]
+dropped.score_delta                                    # -1.0  — the judge dropped it 2 → 1
+dropped.status                                         # ChangeStatus.WORSENED
 ```
 
 Comparing runs of **different** catalogs is refused rather than approximated:
 
 ```python
-compare_runs(Comparison(baseline=run_of_8_cases, candidate=run_of_7_cases))
+compare_runs(RunPair(baseline=run_of_8_cases, candidate=run_of_7_cases))
 # RunsNotComparableError: the runs are not comparable: cases only in the baseline: [6]
 ```
 
@@ -253,7 +256,7 @@ both paths — see [the vocabulary](#the-vocabulary).
 |---|---|---|---|
 | `cases` | `list[Case]` | yes | At least one. Case ids must be unique |
 
-#### `Comparison` — two finished runs to hold against each other
+#### `RunPair` — two finished runs to hold against each other
 
 | Field | Type | Required | Rules |
 |---|---|---|---|
@@ -283,7 +286,7 @@ impossible to detect and would invert the sign of every number in the result.
 |---|---|---|---|
 | `case_id` | `int` | — | The `Case.id` this result belongs to |
 | `score` | `float` | `0.0 … 1.0` | The weighted case score, see [How scoring works](#how-scoring-works). `1.0` means every criterion fully covered |
-| `criterion_results` | `list[CriterionResult]` | ≥ 1 entry | One verdict per criterion, **in rubric order**, so it can be zipped with `Case.criteria`. Never empty — a rubric has at least one criterion, so a result has at least one verdict |
+| `criterion_results` | `list[CriterionResult]` | ≥ 1 entry | One verdict per criterion, **in rubric order**, so it can be zipped with `Case.criteria`. Never empty — a rubric has at least one criterion, so a result has at least one verdict. Criterion ids must be unique: verdicts are paired by id when two runs are compared |
 
 > Named `criterion_results`, not `criteria`: the list holds *verdicts*, one per criterion —
 > `Case.criteria` is the rubric, and one name must not mean two things.
@@ -312,7 +315,7 @@ twenty criteria would outvote nineteen cases with one.
 | Field | Type | Meaning |
 |---|---|---|
 | `metrics` | `RunMetrics` | The aggregate over every case of the run |
-| `case_results` | `list[CaseResult]` | ≥ 1 entry. One per case, in request order — so any suspicious number can be traced back. Never empty: `run_metrics` refuses a run of no cases, so such a run was never producible |
+| `case_results` | `list[CaseResult]` | ≥ 1 entry. One per case, in request order — so any suspicious number can be traced back. Never empty: `run_metrics` refuses a run of no cases, so such a run was never producible. Case ids must be unique: cases are paired by id when two runs are compared |
 
 #### `ChangeStatus` — which way a score moved
 
@@ -329,7 +332,7 @@ Derived from the **raw score**, not from `is_present`: a criterion that went fro
 never crosses the presence threshold yet visibly moved the case score, so it is reported as
 improved.
 
-#### `CriterionComparison` — one criterion across two runs
+#### `CriterionComparisonResult` — one criterion across two runs
 
 | Field | Type | Range | Meaning |
 |---|---|---|---|
@@ -340,7 +343,7 @@ improved.
 | `score_delta` | `float` | `-2.0 … 2.0` | `candidate_score - baseline_score` |
 | `status` | `ChangeStatus` | — | That delta as a verdict |
 
-#### `CaseComparison` — one case across two runs
+#### `CaseComparisonResult` — one case across two runs
 
 | Field | Type | Range | Meaning |
 |---|---|---|---|
@@ -349,7 +352,7 @@ improved.
 | `candidate_score` | `float` | `0.0 … 1.0` | Its weighted score in the candidate run |
 | `score_delta` | `float` | `-1.0 … 1.0` | `candidate_score - baseline_score` |
 | `status` | `ChangeStatus` | — | That delta as a verdict |
-| `criterion_comparisons` | `list[CriterionComparison]` | ≥ 1 entry | One per criterion, **ordered by `criterion_id`** — so the list reads the same whichever order either run happened to be stored in |
+| `criterion_comparison_results` | `list[CriterionComparisonResult]` | ≥ 1 entry | One per criterion, **ordered by `criterion_id`** — so the list reads the same whichever order either run happened to be stored in |
 
 A case can be `"stable"` while its criteria moved hard in opposite directions. That is
 exactly why the criterion grain exists.
@@ -401,7 +404,7 @@ says whether every case rose a little or one rose a lot while another collapsed.
 | `worsened_case_count` | `int` | `>= 0` | Length of `worsened_case_ids` |
 | `improvement_rate` | `float` | `0 … 1` | Share of cases that improved |
 | `stability_rate` | `float` | `0 … 1` | Share that did not move |
-| `worsening_rate` | `float` | `0 … 1` | Share that got worse. The three rates sum to exactly `1.0` — every case lands in exactly one list |
+| `worsening_rate` | `float` | `0 … 1` | Share that got worse. Every case lands in exactly one list, so the three **counts** always add up to the run; the three rates are three separate divisions and sum to `1.0` only to within float rounding |
 
 #### `ComparisonResult` — one whole comparison
 
@@ -409,7 +412,7 @@ says whether every case rose a little or one rose a lot while another collapsed.
 |---|---|---|
 | `metrics_delta` | `RunMetricsDelta` | Whether the run got better |
 | `summary` | `ChangeSummary` | How that is distributed over the cases |
-| `case_comparisons` | `list[CaseComparison]` | Which criterion is responsible. **Ordered by `case_id`** — both runs cover the same cases, so neither one's storage order is canonical |
+| `case_comparison_results` | `list[CaseComparisonResult]` | Which criterion is responsible. **Ordered by `case_id`** — both runs cover the same cases, so neither one's storage order is canonical |
 
 ### Functions
 
@@ -437,7 +440,7 @@ def case_score(results: list[CriterionResult]) -> float
 The weighted formula alone, `→ [0, 1]`. Raises `ValueError` on an empty list.
 
 ```python
-def compare_runs(comparison: Comparison) -> ComparisonResult
+def compare_runs(run_pair: RunPair) -> ComparisonResult
 ```
 Holds two finished runs against each other at three grains — run, case, criterion. Pure
 computation: no judge, no network, no cost. Raises `RunsNotComparableError` — a `ValueError`
@@ -479,7 +482,7 @@ different order, far below the smallest difference a rubric can actually produce
 |---|---|---|---|
 | `POST` | `/evaluate` | a `Case` | a `CaseResult` |
 | `POST` | `/evaluate/batch` | a `Batch` | a `BatchResult` |
-| `POST` | `/compare` | a `Comparison` | a `ComparisonResult` |
+| `POST` | `/compare` | a `RunPair` | a `ComparisonResult` |
 | `GET` | `/health` | — | `{"status": "ok"}` |
 
 The JSON shapes are exactly the models above. `POST /evaluate/batch`:
@@ -550,10 +553,10 @@ fell `1.0 → 0.5` — the response, printed verbatim:
     "stability_rate": 0.3333333333333333,
     "worsening_rate": 0.3333333333333333
   },
-  "case_comparisons": [
+  "case_comparison_results": [
     { "case_id": 1, "baseline_score": 0.0, "candidate_score": 0.8750000000000001,
       "score_delta": 0.8750000000000001, "status": "improved",
-      "criterion_comparisons": [
+      "criterion_comparison_results": [
         { "criterion_id": 1, "weight": 3.0, "baseline_score": 0.0, "candidate_score": 2.0,
           "score_delta": 2.0, "status": "improved" },
         { "criterion_id": 2, "weight": 1.0, "baseline_score": 0.0, "candidate_score": 1.0,
@@ -583,7 +586,8 @@ Everything is validated **before** the first LLM call, so a malformed request co
 
 | Situation | Library | HTTP |
 |---|---|---|
-| `criteria` or `cases` empty; duplicate ids; `content` blank; `weight` `0`, negative, `Infinity` or `NaN`; missing field | `pydantic.ValidationError` | `422` |
+| `criteria`, `cases`, `criterion_results` or `case_results` empty; duplicate ids in any of them; `content` blank; `weight` `0`, negative, `Infinity` or `NaN`; missing field | `pydantic.ValidationError` | `422` |
+| A run posted to `/compare` whose numbers leave the ranges the [output tables](#outputs) give — a score off `0 … 2` or `0 … 1`, a non-positive weight, any `Infinity` or `NaN` | `pydantic.ValidationError` | `422` |
 | Two runs not comparable: different case ids, different criteria within a case, or different weights | `RunsNotComparableError` (a `ValueError`) naming **every** difference at once | `422` |
 | Judge not configured (missing env vars) | `RuntimeError` naming every missing variable | `500` |
 | Judge endpoint refused / timed out / out of quota | **contained** — that criterion gets `failed: true`, `score: 0`, cause in `reasoning` | `200` |
@@ -742,9 +746,13 @@ class MyJudge:
 
 Three responsibilities come with it:
 
-- **Staying on the scale.** `Verdict.score` must be an integer in `0..SCALE_MAX`. The model
-  type only checks that it is an `int` — the range is enforced by `OpenAIJudge`'s parser, so
-  a custom judge that returns `5` produces a case score above `1.0` and nothing will stop it.
+- **Staying on the scale.** `Verdict.score` must be an integer in `0..SCALE_MAX`. `Verdict`
+  itself only checks that it is an `int`, but `CriterionResult.score` is bounded, so a judge
+  returning `5` raises a `ValidationError` out of `evaluate_case()` rather than folding into a
+  case score above `1.0`. It fails loudly on purpose: an out-of-scale verdict is a bug in the
+  judge, and a bug must never come back as a plausible number (see
+  [Failure and load](#failure-and-load)). It is not contained as an outage — only what
+  `judge.score()` *raises* is.
 - **Throttling.** `evaluate_case()` hands out one task per criterion whatever the rubric's
   size, because only your implementation knows what your backend tolerates. `OpenAIJudge`
   bounds itself with `max_concurrent`; yours needs its own bound.
@@ -776,14 +784,15 @@ Three scales, each a pair of *what goes in* and *what comes back*:
 | one requirement | `Criterion` | `CriterionResult` |
 | one answer | `Case` | `CaseResult` |
 | a whole catalog | `Batch` | `BatchResult` |
-| two whole runs | `Comparison` | `ComparisonResult` |
+| two whole runs | `RunPair` | `ComparisonResult` |
 
 Plus `RunMetrics`, which is `BatchResult.metrics` and nothing else, and `Verdict`, which
 never leaves `judge.py`.
 
-Comparison repeats the same three scales one level up, and the names say so: a
-`CriterionComparison` sits inside a `CaseComparison` exactly as a `CriterionResult` sits
-inside a `CaseResult`.
+Comparing repeats the same three scales one level up, and the names say so: a
+`CriterionComparisonResult` sits inside a `CaseComparisonResult` exactly as a
+`CriterionResult` sits inside a `CaseResult`. **Only a produced type carries `Result`** —
+`RunPair` is what you hand in, everything ending in `Result` is what comes back.
 
 Two rules hold the naming together — worth knowing before adding a field:
 
@@ -860,7 +869,7 @@ field tables in [Reference](#reference). One text, never three — they cannot d
 .venv/bin/python -m pytest
 ```
 
-156 tests, no real LLM ever called. Mocked at two levels:
+168 tests, no real LLM ever called. Mocked at two levels:
 
 - **`FakeJudge`** ([conftest.py](tests/conftest.py)) replaces the `Judge` protocol and scores
   from a lookup table — `{1: 2, 2: ValueError("down")}` scores criterion 1 with a `2` and
@@ -873,8 +882,8 @@ field tables in [Reference](#reference). One text, never three — they cannot d
   `JudgeConfig.from_env()`, the real `openai` SDK, a real socket, reply parsing, the weighted
   fold. That is what proves the wire format and the self-healing retry.
 - **`run_of`** ([conftest.py](tests/conftest.py)) builds a finished `BatchResult` straight
-  from judge scores — `run_of({1: 2, 2: 0}, {21: 1})` is a two-case run. Comparison tests are
-  about the *difference* between two runs, so going through a judge and an event loop would
+  from judge scores — `run_of({1: 2, 2: 0}, {21: 1})` is a two-case run. Comparison tests
+  are about the *difference* between two runs, so going through a judge and an event loop would
   only stand between the test and the numbers it asserts on.
 
 | File | Covers |

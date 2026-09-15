@@ -83,24 +83,31 @@ class CriterionResult(DocumentedModel):
 
     Not built by hand — use `judged()` for an answered criterion and `unjudged()` for one
     the judge never delivered, so the derived fields stay consistent everywhere.
+
+    Every documented range is enforced, not merely described: a stored result is postable to
+    `/compare`, so this model is an *input* type there and the numbers below are arithmetic
+    a comparison depends on. `NaN` in particular would survive every computation, serialize
+    as JSON `null` where a float is promised, and classify as a regression.
     """
 
     criterion_id: int
     """The `Criterion.id` this verdict belongs to."""
 
-    weight: float
-    """Copy of `Criterion.weight`, so a result can be scored without the rubric at hand."""
+    weight: float = Field(gt=0, allow_inf_nan=False)
+    """Copy of `Criterion.weight`, so a result can be scored without the rubric at hand.
+    Positive and finite, exactly as the rubric it was copied from."""
 
-    score: float
+    score: float = Field(ge=0, le=SCALE_MAX, allow_inf_nan=False)
     """Judge score in [0, SCALE_MAX]: 2 fully covered, 1 partially, 0 not covered.
     A float rather than an int, so averaging several runs of the same criterion cannot
-    change the type."""
+    change the type. Off the scale it is refused rather than folded into a case score
+    above 1.0 that nothing downstream could recognize as wrong."""
 
     is_present: bool
     """Whether the criterion counts as covered at all: `score >= PRESENCE_THRESHOLD`.
     Derived here and never asked of the judge — one question less for it to get wrong."""
 
-    spread: float = 0.0
+    spread: float = Field(default=0.0, ge=0, allow_inf_nan=False)
     """Standard deviation of `score` across repeated judge runs. Stays 0.0 while every
     criterion is judged exactly once, which is the only mode implemented so far."""
 
@@ -215,14 +222,28 @@ class CaseResult(DocumentedModel):
     case_id: int
     """The `Case.id` this result belongs to."""
 
-    score: float
+    score: float = Field(ge=0, le=1, allow_inf_nan=False)
     """Weighted case score in [0, 1], see `metrics.case_score`. 1.0 means every criterion
-    was fully covered."""
+    was fully covered. Bounded for the same reason the verdict scores under it are: this
+    model is what `/compare` takes in, and every delta of a comparison subtracts it."""
 
     criterion_results: list[CriterionResult] = Field(min_length=1)
     """One verdict per criterion of the case, in rubric order. At least one, because
-    `Case.criteria` rejects an empty rubric and the metrics divide by this count. Named for
-    what it holds: `criteria` would promise `Criterion` objects and deliver verdicts."""
+    `Case.criteria` rejects an empty rubric and the metrics divide by this count. Ids have to
+    be unique, exactly as in the rubric this came from. Named for what it holds: `criteria`
+    would promise `Criterion` objects and deliver verdicts."""
+
+    @field_validator("criterion_results")
+    @classmethod
+    def _reject_duplicate_criterion_ids(
+        cls, criterion_results: list[CriterionResult]
+    ) -> list[CriterionResult]:
+        """`Case.criteria` already rejects repeated ids, so `evaluate_case` can never produce
+        them — but a stored result is postable to `/compare`, which keys verdicts by id to
+        pair the two runs up and would silently drop one of a repeated pair."""
+        if repeated := _duplicate_ids(verdict.criterion_id for verdict in criterion_results):
+            raise ValueError(f"criterion ids must be unique, repeated: {repeated}")
+        return criterion_results
 
 
 class Batch(DocumentedModel):
@@ -256,32 +277,37 @@ class RunMetrics(DocumentedModel):
 
     Every case counts once, whatever the size of its rubric — a case with 20 criteria must
     not outweigh nineteen cases with one.
+
+    The documented ranges are enforced rather than described, for the same reason they are on
+    the result models above: a stored run is postable to `/compare`, where every one of these
+    numbers is subtracted from its counterpart.
     """
 
-    total_cases: int
-    """How many cases the metrics were computed from."""
+    total_cases: int = Field(ge=1)
+    """How many cases the metrics were computed from. At least one: a run of no cases has no
+    distribution to describe, which is why `run_metrics` refuses one."""
 
-    average_score: float
+    average_score: float = Field(ge=0, le=1, allow_inf_nan=False)
     """Arithmetic mean of the case scores — the single number a run is usually reported by."""
 
-    median_score: float
+    median_score: float = Field(ge=0, le=1, allow_inf_nan=False)
     """Middle case score. Next to the mean it shows skew: far above it means a few
     catastrophic cases drag an otherwise solid run down."""
 
-    variance: float
+    variance: float = Field(ge=0, allow_inf_nan=False)
     """Sample variance of the case scores, 0.0 for a single case (which has no spread)."""
 
-    standard_deviation: float
+    standard_deviation: float = Field(ge=0, allow_inf_nan=False)
     """Square root of `variance`, in the same unit as the scores. Small means the system is
     uniformly good or bad; large means it depends heavily on the question."""
 
-    average_criterion_score: float
+    average_criterion_score: float = Field(ge=0, le=SCALE_MAX, allow_inf_nan=False)
     """Mean judge score over *all* criteria of all cases, on the raw 0..SCALE_MAX scale and
     unweighted. Unlike `average_score` it ignores both weights and case boundaries, so it
     answers "how well does the judge rate an average statement" rather than "how good is the
     average answer"."""
 
-    criteria_fulfillment_rate: float
+    criteria_fulfillment_rate: float = Field(ge=0, le=1, allow_inf_nan=False)
     """Mean share of criteria counting as covered (`is_present`) per case, in [0, 1].
     Averaged per case first, so a long rubric does not dominate the rate."""
 
@@ -294,7 +320,7 @@ class RunMetrics(DocumentedModel):
     weakest first. Listed apart from `cases_with_score_zero` because a total miss and a
     partial answer usually have different causes."""
 
-    failed_criteria_count: int
+    failed_criteria_count: int = Field(ge=0)
     """How many criteria across the whole run got no usable verdict and were counted as 0.
     Anything above 0 means the run is depressed by judge outages, not only by the answers —
     read it before the average."""
@@ -325,7 +351,19 @@ class BatchResult(DocumentedModel):
     `POST /evaluate` returns for that case. At least one, for the same reason `Batch.cases`
     needs one: `run_metrics` refuses to describe a distribution over no cases, so a run with
     an empty list could never have been produced legitimately — and anything computed from
-    it later, a comparison above all, would be dividing by zero."""
+    it later, a comparison above all, would be dividing by zero. Case ids have to be unique,
+    for the same reason they do in `Batch.cases`."""
+
+    @field_validator("case_results")
+    @classmethod
+    def _reject_duplicate_case_ids(cls, case_results: list[CaseResult]) -> list[CaseResult]:
+        """`Batch.cases` already rejects repeated ids, so `evaluate_batch` can never produce
+        them — but a stored run is postable to `/compare`, which keys cases by id to pair the
+        two runs up. A repeated id would silently drop a case there and report deltas over
+        fewer cases than `metrics` describes, with a 200."""
+        if repeated := _duplicate_ids(result.case_id for result in case_results):
+            raise ValueError(f"case ids must be unique, repeated: {repeated}")
+        return case_results
 
 
 class ChangeStatus(StrEnum):
@@ -354,7 +392,7 @@ def _change_status(score_delta: float) -> ChangeStatus:
     return ChangeStatus.IMPROVED if score_delta > 0 else ChangeStatus.WORSENED
 
 
-class CriterionComparison(DocumentedModel):
+class CriterionComparisonResult(DocumentedModel):
     """How one criterion of one case fared between two runs — the finest grain of a comparison.
 
     Built by `between()`, never by hand, so `score_delta` and `status` cannot disagree.
@@ -386,7 +424,7 @@ class CriterionComparison(DocumentedModel):
     @classmethod
     def between(
         cls, baseline: CriterionResult, candidate: CriterionResult
-    ) -> "CriterionComparison":
+    ) -> "CriterionComparisonResult":
         """Compare the two verdicts one criterion got in two runs.
 
         Args:
@@ -395,30 +433,31 @@ class CriterionComparison(DocumentedModel):
                 weight — `comparison.compare_runs` has already refused the runs otherwise.
 
         Returns:
-            A `CriterionComparison` whose `score_delta` points from baseline to candidate and
+            A `CriterionComparisonResult` whose `score_delta` points from baseline to candidate and
             whose `status` is derived from exactly that delta.
 
         Example:
-            CriterionComparison.between(scored_one, scored_two).status   # ChangeStatus.IMPROVED
+            CriterionComparisonResult.between(before, after).status   # ChangeStatus.IMPROVED
         """
+        score_delta = candidate.score - baseline.score
         return cls(
             criterion_id=candidate.criterion_id,
             weight=candidate.weight,
             baseline_score=baseline.score,
             candidate_score=candidate.score,
-            score_delta=candidate.score - baseline.score,
-            status=_change_status(candidate.score - baseline.score),
+            score_delta=score_delta,
+            status=_change_status(score_delta),
         )
 
 
-class CaseComparison(DocumentedModel):
+class CaseComparisonResult(DocumentedModel):
     """How one case fared between two runs, and which of its criteria are responsible.
 
     Built by `between()`, never by hand.
 
     Example:
         case_comparison.score_delta               # +0.25 — the candidate answered better
-        case_comparison.criterion_comparisons[0]  # which criterion moved, and by how much
+        case_comparison.criterion_comparison_results[0]  # which criterion moved, and by how much
     """
 
     case_id: int
@@ -437,12 +476,12 @@ class CaseComparison(DocumentedModel):
     status: ChangeStatus
     """`score_delta` as a verdict, with the same tolerance a criterion gets."""
 
-    criterion_comparisons: list[CriterionComparison] = Field(min_length=1)
+    criterion_comparison_results: list[CriterionComparisonResult] = Field(min_length=1)
     """One entry per criterion of the case, ordered by `criterion_id`. At least one, because
     a rubric cannot be empty. Named for what it holds, not for what went in."""
 
     @classmethod
-    def between(cls, baseline: CaseResult, candidate: CaseResult) -> "CaseComparison":
+    def between(cls, baseline: CaseResult, candidate: CaseResult) -> "CaseComparisonResult":
         """Compare the two results one case got in two runs.
 
         Args:
@@ -451,32 +490,37 @@ class CaseComparison(DocumentedModel):
                 same rubric — `comparison.compare_runs` has already refused the runs otherwise.
 
         Returns:
-            A `CaseComparison` carrying both scores, their delta and one
-            `CriterionComparison` per criterion, ordered by `criterion_id` so the list reads
+            A `CaseComparisonResult` carrying both scores, their delta and one
+            `CriterionComparisonResult` per criterion, ordered by `criterion_id` so the list reads
             the same whichever order the two runs happened to be stored in.
 
         Example:
-            CaseComparison.between(weak_result, strong_result).status   # ChangeStatus.IMPROVED
+            CaseComparisonResult.between(weak, strong).status   # ChangeStatus.IMPROVED
         """
+        score_delta = candidate.score - baseline.score
         return cls(
             case_id=candidate.case_id,
             baseline_score=baseline.score,
             candidate_score=candidate.score,
-            score_delta=candidate.score - baseline.score,
-            status=_change_status(candidate.score - baseline.score),
-            criterion_comparisons=[
-                CriterionComparison.between(baseline_criterion, candidate_criterion)
+            score_delta=score_delta,
+            status=_change_status(score_delta),
+            criterion_comparison_results=[
+                CriterionComparisonResult.between(baseline_criterion, candidate_criterion)
                 for baseline_criterion, candidate_criterion in zip(
-                    _by_criterion_id(baseline), _by_criterion_id(candidate)
+                    _criterion_results_in_id_order(baseline),
+                    _criterion_results_in_id_order(candidate),
+                    strict=True,
                 )
             ],
         )
 
 
-def _by_criterion_id(result: CaseResult) -> list[CriterionResult]:
+def _criterion_results_in_id_order(result: CaseResult) -> list[CriterionResult]:
     """Both runs' verdicts brought into one order, so zipping them pairs the same criterion.
     Rubric order is not enough: two runs may have been stored with their criteria in
-    different orders, and zipping those would compare unrelated verdicts."""
+    different orders, and zipping those would compare unrelated verdicts. Zipped `strict`,
+    so a caller reaching `CaseComparisonResult.between` past `compare_runs` gets a crash rather
+    than a silently truncated comparison."""
     return sorted(result.criterion_results, key=lambda verdict: verdict.criterion_id)
 
 
@@ -594,8 +638,13 @@ class ChangeSummary(DocumentedModel):
     @computed_field
     @property
     def improvement_rate(self) -> float:
-        """Share of the run's cases that improved, in [0, 1]. This and the other two rates
-        sum to exactly 1.0, because every case lands in exactly one of the three lists."""
+        """Share of the run's cases that improved, in [0, 1].
+
+        Every case lands in exactly one of the three lists, so the three *counts* always add
+        up to the run exactly. The three rates are three separate divisions, so they add up
+        to 1.0 only to within float rounding — six cases split 1 / 4 / 1 sum to
+        0.9999999999999999. Compare the counts when an exact total is what you need.
+        """
         return self.improved_case_count / self._total_cases
 
     @computed_field
@@ -618,7 +667,7 @@ class ChangeSummary(DocumentedModel):
         return self.improved_case_count + self.stable_case_count + self.worsened_case_count
 
 
-class Comparison(DocumentedModel):
+class RunPair(DocumentedModel):
     """The input to `compare_runs`: two finished runs to hold against each other.
 
     A named pair rather than two arguments on purpose. Both sides have the exact same type,
@@ -626,7 +675,7 @@ class Comparison(DocumentedModel):
     the sign of every number in the result.
 
     Example:
-        Comparison(baseline=last_weeks_run, candidate=todays_run)
+        RunPair(baseline=last_weeks_run, candidate=todays_run)
     """
 
     baseline: BatchResult
@@ -641,13 +690,13 @@ class ComparisonResult(DocumentedModel):
     """What `compare_runs` returns: the same comparison at three grains.
 
     `metrics_delta` says whether the run got better, `summary` says how that is distributed
-    over the cases, and `case_comparisons` says which criterion is responsible. A number at
-    any grain can always be traced down to the one below it.
+    over the cases, and `case_comparison_results` says which criterion is responsible. A
+    number at any grain can always be traced down to the one below it.
 
     Example:
-        comparison.metrics_delta.average_score_delta   # +0.084
-        comparison.summary.worsened_case_ids           # [5] — what the win cost
-        comparison.case_comparisons[0].criterion_comparisons[1].score_delta   # -2.0
+        result.metrics_delta.average_score_delta   # +0.084
+        result.summary.worsened_case_ids           # [5] — what the win cost
+        result.case_comparison_results[0].criterion_comparison_results[1].score_delta  # -2.0
     """
 
     metrics_delta: RunMetricsDelta
@@ -656,8 +705,8 @@ class ComparisonResult(DocumentedModel):
     summary: ChangeSummary
     """How the movement is distributed over the cases: who won, who lost, by how much."""
 
-    case_comparisons: list[CaseComparison] = Field(min_length=1)
+    case_comparison_results: list[CaseComparisonResult] = Field(min_length=1)
     """One entry per case, ordered by `case_id`. At least one, because both compared runs
-    have at least one case. Both runs cover exactly the same cases —
-    that is checked before anything here is computed — so neither run's storage order is the
-    canonical one, and sorting by id gives a document that does not depend on either."""
+    have at least one case. Both runs cover exactly the same cases — that is checked before
+    anything here is computed — so neither run's storage order is the canonical one, and
+    sorting by id gives a document that does not depend on either."""
