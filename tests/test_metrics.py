@@ -1,3 +1,4 @@
+import itertools
 import math
 import statistics
 
@@ -13,8 +14,14 @@ from rubric_eval.models import (
 )
 
 
+_NEXT_CRITERION_ID = itertools.count(1)
+
+
 def _result(weight: float, score: float) -> CriterionResult:
-    return CriterionResult.judged(Criterion(id=1, content="x", weight=weight), score, None)
+    """A verdict written as weight and score alone — the only two things the formulas read.
+    The id is handed out fresh each call, because a `CaseResult` rejects a repeated one."""
+    criterion = Criterion(id=next(_NEXT_CRITERION_ID), content="x", weight=weight)
+    return CriterionResult.judged(criterion, score, None)
 
 
 def test_weights_the_scores_and_normalizes_to_one():

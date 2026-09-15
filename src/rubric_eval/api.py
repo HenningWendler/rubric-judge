@@ -1,4 +1,4 @@
-"""Thin HTTP wrapper around the library: three endpoints and the judge wiring, no domain logic.
+"""Thin HTTP wrapper around the library: four endpoints and the judge wiring, no domain logic.
 
 Stateless: no catalog, no run ids, no persistence. Everything that decides *what* a score
 means lives in `evaluation.py` and below.
@@ -7,13 +7,20 @@ means lives in `evaluation.py` and below.
 from functools import lru_cache
 from typing import Annotated
 
-from fastapi import Depends, FastAPI, Request
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
-from rubric_eval import evaluation
+from rubric_eval import comparison, evaluation
 from rubric_eval.judge import Judge, JudgeConfig, OpenAIJudge
-from rubric_eval.models import Batch, BatchResult, Case, CaseResult
+from rubric_eval.models import (
+    Batch,
+    BatchResult,
+    Case,
+    CaseResult,
+    ComparisonResult,
+    RunPair,
+)
 
 app = FastAPI(title="rubric-eval", version="0.1.0")
 
@@ -109,3 +116,36 @@ async def evaluate_batch(batch: Batch, judge: Annotated[Judge, Depends(get_judge
     one budget, and so does every other request in flight.
     """
     return await evaluation.evaluate_batch(judge, batch)
+
+
+@app.post("/compare", summary="Hold two finished runs against each other")
+async def compare_runs(runs: RunPair) -> ComparisonResult:
+    """Compare two runs of the same catalog — did your change help, where, and what did it cost.
+
+    Send a `RunPair`: the `baseline` run to compare against and the `candidate` run under
+    test, each one exactly the `BatchResult` document `POST /evaluate/batch` returned. Runs
+    stored as JSON months apart compare just like runs produced a second ago.
+
+    Returns a `ComparisonResult` at three grains. `metrics_delta` holds `candidate - baseline`
+    for every run metric, so a positive number always means the candidate did better — except
+    for the two counting fields, where fewer is better. `summary` says how that is distributed:
+    which cases improved, stayed, or got worse, biggest movers first, and how large the moves
+    were on each side. `case_comparison_results` goes down to the individual criterion.
+
+    Read `metrics_delta.failed_criteria_count_delta` first. Anything but 0 means the two runs
+    suffered different amounts of judge outage, and every other number is then partly an
+    artefact of that rather than of the answers.
+
+    **422** if a body is invalid, or if the two runs are not comparable — different case ids,
+    different criteria within a case, or different weights. The message names every difference
+    at once, so one fix can address all of them. Comparing runs with different weights is
+    refused rather than approximated: the weights are the denominator each case score is
+    normalized by, so scores computed under different ones do not subtract.
+
+    No judge is involved: this endpoint is pure computation and answers correctly even when
+    the service has no API key configured.
+    """
+    try:
+        return comparison.compare_runs(runs)
+    except comparison.RunsNotComparableError as incomparable:
+        raise HTTPException(status_code=422, detail=str(incomparable)) from incomparable

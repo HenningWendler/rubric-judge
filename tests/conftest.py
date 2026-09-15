@@ -1,11 +1,14 @@
-"""Shared test doubles: one fake judge, one case and one batch, used by the domain and the
-HTTP tests alike — so a domain test and an HTTP test never describe *almost* the same input."""
+"""Shared test doubles: one fake judge, one case, one batch and one run builder, used by the
+domain and the HTTP tests alike — so a domain test and an HTTP test never describe *almost*
+the same input."""
 
 import pytest
 from fastapi.testclient import TestClient
 
 from rubric_eval.api import app, get_judge
 from rubric_eval.judge import Verdict
+from rubric_eval.metrics import case_score, run_metrics
+from rubric_eval.models import BatchResult, CaseResult, Criterion, CriterionResult
 
 CASE = {
     "id": 1,
@@ -85,3 +88,34 @@ def unconfigured_client(monkeypatch):
 def use_judge(judge: FakeJudge) -> None:
     """Point the app's `get_judge` dependency at a fake for the duration of one test."""
     app.dependency_overrides[get_judge] = lambda: judge
+
+
+def run_of(*scores_per_case: dict[int, float]) -> BatchResult:
+    """A finished `BatchResult` built straight from judge scores, no judge and no async.
+
+    One mapping per case: `run_of({1: 2, 2: 0}, {21: 1})` is a two-case run whose first case
+    has criteria 1 and 2 scored 2 and 0. Case ids count from 1, weights are all 1, so two
+    runs built this way are always comparable and every score is easy to predict by hand.
+
+    Comparison tests are about the *difference* between two runs, so building them through
+    `evaluate_batch` and a `FakeJudge` would only add an event loop between the test and the
+    numbers it is asserting on.
+    """
+    case_results = [
+        CaseResult(
+            case_id=case_id,
+            score=case_score(_verdicts(scores)),
+            criterion_results=_verdicts(scores),
+        )
+        for case_id, scores in enumerate(scores_per_case, start=1)
+    ]
+    return BatchResult(metrics=run_metrics(case_results), case_results=case_results)
+
+
+def _verdicts(scores: dict[int, float]) -> list[CriterionResult]:
+    """One verdict per criterion id, all weighted 1 — weights are what `run_of` keeps boring
+    so that a comparison test reads as scores in and deltas out."""
+    return [
+        CriterionResult.judged(Criterion(id=criterion_id, content="x", weight=1), score, None)
+        for criterion_id, score in scores.items()
+    ]
