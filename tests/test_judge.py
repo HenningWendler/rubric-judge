@@ -4,7 +4,8 @@ import pytest
 
 from rubric_eval import Batch, Case, evaluate_batch, evaluate_case
 from rubric_eval.judge import JudgeConfig, OpenAIJudge, parse_verdict
-from rubric_eval.models import Criterion
+from rubric_eval.prompt import JUDGE_EN
+from rubric_eval.models import DEFAULT_SCALE, Criterion, Scale
 
 
 def test_parses_reasoning_and_score():
@@ -537,3 +538,111 @@ def test_an_empty_optional_environment_variable_falls_back_to_the_default(monkey
 
     assert config.max_concurrent == 8
     assert config.temperature == 0.0
+
+
+# --- the scale the judge declares ----------------------------------------------------------
+
+
+TEN_POINT = Scale(maximum=10, presence_threshold=5)
+
+
+def test_the_parser_accepts_what_the_given_scale_allows():
+    assert parse_verdict('Reasoning.\n{"score": 7}', TEN_POINT).score == 7
+
+
+def test_the_parser_still_refuses_what_that_scale_does_not_reach():
+    with pytest.raises(ValueError, match="not on the scale"):
+        parse_verdict('Reasoning.\n{"score": 11}', TEN_POINT)
+
+
+def test_a_bigger_scale_is_still_integral():
+    """More levels is a finer grid, not a continuous one — the judge picks a level."""
+    with pytest.raises(ValueError, match="not on the scale"):
+        parse_verdict('Reasoning.\n{"score": 7.5}', TEN_POINT)
+
+
+def test_the_complaints_quote_the_scale_that_was_asked_for():
+    """A judge told "answer with 0, 1 or 2" while working on a ten-point scale would correct
+    itself into a wrong grade, so the hint is derived from the scale, never from a constant."""
+    with pytest.raises(ValueError, match=r"0, 1, 2, 3, 4, 5, 6, 7, 8, 9 or 10"):
+        parse_verdict('Reasoning.\n{"score": 11}', TEN_POINT)
+    with pytest.raises(ValueError, match=r"0, 1, 2, 3, 4, 5, 6, 7, 8, 9 or 10"):
+        parse_verdict("no json here", TEN_POINT)
+
+
+def test_a_binary_scale_is_offered_as_two_choices_not_as_a_list_of_one():
+    with pytest.raises(ValueError, match=r"using 0 or 1"):
+        parse_verdict("no json here", Scale(maximum=1, presence_threshold=1))
+
+
+def test_the_parser_reads_the_default_scale_when_none_is_named():
+    """The bundled prompt describes exactly that scale, so it is the only safe default."""
+    assert parse_verdict('Reasoning.\n{"score": 2}').score == 2
+    with pytest.raises(ValueError, match="not on the scale"):
+        parse_verdict('Reasoning.\n{"score": 3}')
+
+
+def test_a_judge_on_the_default_scale_needs_no_prompt_of_its_own():
+    judge, _ = _judge([])
+    assert judge.scale == DEFAULT_SCALE
+
+
+def test_a_scale_that_describes_no_levels_needs_a_prompt_of_its_own():
+    """Nothing to instruct the model with: the bundled prompt spells 0-2 out in prose and in
+    its examples, and keeping it while the parser checks against 0..10 would fail every
+    reply, one wasted call at a time."""
+    config = JudgeConfig(model="m", endpoint="http://x/v1", api_key="k")
+    with pytest.raises(ValueError, match="describes no levels"):
+        OpenAIJudge(config, scale=TEN_POINT)
+
+
+def test_a_scale_that_describes_its_levels_needs_no_prompt_at_all():
+    """The whole point of the descriptions: a custom scale is five lines, not a rewritten
+    prompt."""
+    config = JudgeConfig(model="m", endpoint="http://x/v1", api_key="k")
+    described = Scale(
+        maximum=10,
+        presence_threshold=5,
+        level_descriptions={grade: f"Level {grade} of ten." for grade in range(11)},
+    )
+    judge = OpenAIJudge(config, scale=described)
+
+    assert judge.scale == described
+    assert "Use this 0-10 scale:" in judge.system_prompt
+    assert "Example:" not in judge.system_prompt
+
+
+def test_a_custom_scale_with_a_custom_prompt_is_the_supported_way():
+    config = JudgeConfig(model="m", endpoint="http://x/v1", api_key="k")
+    judge = OpenAIJudge(config, prompt="Grade 0 to 10.", scale=TEN_POINT)
+    assert judge.scale == TEN_POINT
+    assert judge.system_prompt == "Grade 0 to 10."
+
+
+def test_a_rebuilt_default_scale_still_gets_the_bundled_prompt_with_its_examples():
+    """Scales compare by value, so an equal scale built by hand is the default one — and the
+    worked examples, which belong to that scale alone, come with it."""
+    config = JudgeConfig(model="m", endpoint="http://x/v1", api_key="k")
+    rebuilt = Scale(
+        maximum=2,
+        presence_threshold=0.5,
+        level_descriptions=dict(DEFAULT_SCALE.level_descriptions),
+    )
+    assert OpenAIJudge(config, scale=rebuilt).system_prompt == JUDGE_EN
+
+
+def test_a_custom_prompt_on_the_default_scale_stays_allowed():
+    config = JudgeConfig(model="m", endpoint="http://x/v1", api_key="k")
+    assert OpenAIJudge(config, prompt="Grade it.").system_prompt == "Grade it."
+
+
+async def test_the_judge_scores_and_self_heals_on_its_own_scale():
+    config = JudgeConfig(model="m", endpoint="http://x/v1", api_key="k")
+    judge = OpenAIJudge(config, prompt="Grade 0 to 10.", scale=TEN_POINT)
+    fake = FakeCompletions(['Reasoning.\n{"score": 12}', 'Corrected.\n{"score": 8}'])
+    judge.client.chat.completions = fake
+
+    verdict = await judge.score("How?", "Send an email.", CRITERION)
+
+    assert verdict.score == 8
+    assert "0, 1, 2, 3, 4, 5, 6, 7, 8, 9 or 10" in fake.calls[1][-1]["content"]

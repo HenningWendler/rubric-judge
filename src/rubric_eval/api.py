@@ -35,7 +35,11 @@ def get_judge() -> Judge:
     set of slots instead of sharing one budget.
 
     Returns:
-        The process-wide `OpenAIJudge`, configured from the environment.
+        The process-wide `OpenAIJudge`, configured from the environment and grading on
+        `DEFAULT_SCALE`. The scale is not an environment setting on purpose: it carries a
+        sentence per grade, and prose does not belong in a variable meant for a URL or a key.
+        A service that has to grade differently builds its own judge and overrides this
+        dependency.
 
     Raises:
         RuntimeError: The judge cannot be configured; the message names every missing
@@ -80,8 +84,16 @@ async def evaluate_case(case: Case, judge: Annotated[Judge, Depends(get_judge)])
     produced, and the `criteria` a good answer has to satisfy, each with a positive weight.
 
     Returns a `CaseResult`: your id echoed as `case_id`, one `criterion_results` entry per
-    criterion (score 0/1/2, whether it counts as present, and the judge's reasoning), and
-    `score` — the weighted fold of all of them, normalized to 0..1.
+    criterion, and `score` — the weighted fold of all of them, normalized to 0..1.
+
+    The case carries the `scale` its grades were given on — the maximum, the threshold
+    `is_present` is cut at, and what each grade means in words — so a stored result still
+    explains itself months later. By default that is 0..2: 2 fully covered, 1 partially,
+    0 not covered.
+
+    Each `criterion_results` entry holds the judge's **raw** grade on that scale, whether it
+    counts as present, and the judge's reasoning. Read a grade against the scale; `score` is
+    normalized precisely so that it can be read without one.
 
     **422** if the body is invalid — an empty rubric, duplicate criterion ids, a blank
     `content`, or a weight that is not positive and finite. Validation happens before the
@@ -136,11 +148,12 @@ async def compare_runs(runs: RunPair) -> ComparisonResult:
     suffered different amounts of judge outage, and every other number is then partly an
     artefact of that rather than of the answers.
 
-    **422** if a body is invalid, or if the two runs are not comparable — different case ids,
-    different criteria within a case, or different weights. The message names every difference
-    at once, so one fix can address all of them. Comparing runs with different weights is
-    refused rather than approximated: the weights are the denominator each case score is
-    normalized by, so scores computed under different ones do not subtract.
+    **422** if a body is invalid, or if the two runs are not comparable — a different grading
+    scale, different case ids, different criteria within a case, or different weights. The
+    message names every difference at once, so one fix can address all of them. Comparing
+    runs with different weights or scales is refused rather than approximated: the weights are
+    the denominator each case score is normalized by and the scale is the unit every raw
+    criterion score is in, so numbers computed under different ones do not subtract.
 
     No judge is involved: this endpoint is pure computation and answers correctly even when
     the service has no API key configured.

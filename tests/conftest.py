@@ -8,7 +8,14 @@ from fastapi.testclient import TestClient
 from rubric_eval.api import app, get_judge
 from rubric_eval.judge import Verdict
 from rubric_eval.metrics import case_score, run_metrics
-from rubric_eval.models import BatchResult, CaseResult, Criterion, CriterionResult
+from rubric_eval.models import (
+    DEFAULT_SCALE,
+    BatchResult,
+    CaseResult,
+    Criterion,
+    CriterionResult,
+    Scale,
+)
 
 CASE = {
     "id": 1,
@@ -51,10 +58,14 @@ BATCH_VERDICTS = {1: 2, 2: 0, 21: 1, 31: 0}
 
 class FakeJudge:
     """Scores from a lookup table: `{1: 2, 2: ValueError("down")}` scores criterion 1 with a
-    2 and lets the judge die on criterion 2. No LLM, no network, no retries."""
+    2 and lets the judge die on criterion 2. No LLM, no network, no retries.
 
-    def __init__(self, by_criterion: dict[int, int | Exception]):
+    Carries a `scale` like every `Judge` does, so a test can hand the evaluation layer a
+    judge that grades 0..10 without an endpoint that grades 0..10 existing anywhere."""
+
+    def __init__(self, by_criterion: dict[int, int | Exception], scale: Scale = DEFAULT_SCALE):
         self.by_criterion = by_criterion
+        self.scale = scale
 
     async def score(self, question, answer, criterion) -> Verdict:
         outcome = self.by_criterion[criterion.id]
@@ -90,12 +101,13 @@ def use_judge(judge: FakeJudge) -> None:
     app.dependency_overrides[get_judge] = lambda: judge
 
 
-def run_of(*scores_per_case: dict[int, float]) -> BatchResult:
+def run_of(*scores_per_case: dict[int, float], scale: Scale = DEFAULT_SCALE) -> BatchResult:
     """A finished `BatchResult` built straight from judge scores, no judge and no async.
 
     One mapping per case: `run_of({1: 2, 2: 0}, {21: 1})` is a two-case run whose first case
     has criteria 1 and 2 scored 2 and 0. Case ids count from 1, weights are all 1, so two
     runs built this way are always comparable and every score is easy to predict by hand.
+    `scale` grades the whole run on something other than the bundled 0..2.
 
     Comparison tests are about the *difference* between two runs, so building them through
     `evaluate_batch` and a `FakeJudge` would only add an event loop between the test and the
@@ -104,18 +116,21 @@ def run_of(*scores_per_case: dict[int, float]) -> BatchResult:
     case_results = [
         CaseResult(
             case_id=case_id,
-            score=case_score(_verdicts(scores)),
-            criterion_results=_verdicts(scores),
+            score=case_score(_verdicts(scores, scale), scale),
+            scale=scale,
+            criterion_results=_verdicts(scores, scale),
         )
         for case_id, scores in enumerate(scores_per_case, start=1)
     ]
     return BatchResult(metrics=run_metrics(case_results), case_results=case_results)
 
 
-def _verdicts(scores: dict[int, float]) -> list[CriterionResult]:
+def _verdicts(scores: dict[int, float], scale: Scale = DEFAULT_SCALE) -> list[CriterionResult]:
     """One verdict per criterion id, all weighted 1 — weights are what `run_of` keeps boring
     so that a comparison test reads as scores in and deltas out."""
     return [
-        CriterionResult.judged(Criterion(id=criterion_id, content="x", weight=1), score, None)
+        CriterionResult.judged(
+            Criterion(id=criterion_id, content="x", weight=1), score, None, scale
+        )
         for criterion_id, score in scores.items()
     ]

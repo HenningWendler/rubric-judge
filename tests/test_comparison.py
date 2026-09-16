@@ -433,7 +433,8 @@ def _with_failed_criterion(run: BatchResult, criterion_id: int) -> BatchResult:
             result,
             [
                 CriterionResult.unjudged(
-                    Criterion(id=verdict.criterion_id, content="x", weight=verdict.weight), "down"
+                    Criterion(id=verdict.criterion_id, content="x", weight=verdict.weight),
+                    "down",
                 )
                 if verdict.criterion_id == criterion_id
                 else verdict
@@ -449,6 +450,7 @@ def _rebuilt(result: CaseResult, criterion_results: list[CriterionResult]) -> Ca
     """A case result re-scored from changed verdicts, so its `score` never lies about them."""
     return CaseResult(
         case_id=result.case_id,
-        score=case_score(criterion_results),
+        score=case_score(criterion_results, result.scale),
+        scale=result.scale,
         criterion_results=criterion_results,
     )

@@ -7,7 +7,7 @@ from pydantic import ValidationError
 
 from conftest import BATCH, BATCH_VERDICTS, CASE, FakeJudge
 
-from rubric_eval import Batch, Case, Verdict, evaluate_batch, evaluate_case
+from rubric_eval import DEFAULT_SCALE, Batch, Case, Verdict, evaluate_batch, evaluate_case
 
 THE_CASE = Case(**CASE)
 THE_BATCH = Batch(**BATCH)
@@ -104,6 +104,8 @@ async def test_cancellation_is_not_swallowed_by_the_failure_containment():
     plausible-looking 0.0 with every criterion marked failed."""
 
     class CancellingJudge:
+        scale = DEFAULT_SCALE
+
         async def score(self, question, answer, criterion):
             raise asyncio.CancelledError
 
@@ -148,13 +150,16 @@ async def test_a_verdict_off_the_scale_is_refused_rather_than_folded_into_the_sc
     2. That is a bug in the judge, not an outage, and it lands on the loud side of the same
     line: contained failures are the ones `judge.score()` *raises*, while an out-of-scale
     verdict it returns would otherwise fold into a case score above 1.0 — a number no reader
-    downstream could tell from a real one."""
+    downstream could tell from a real one. The complaint names the criterion and the scale,
+    not the case score it would have produced."""
 
     class OffScaleJudge:
+        scale = DEFAULT_SCALE
+
         async def score(self, question, answer, criterion) -> Verdict:
             return Verdict(score=5, reasoning="way past the top of the scale")
 
-    with pytest.raises(ValidationError, match="less than or equal to 2"):
+    with pytest.raises(ValueError, match=r"criteria \[1, 2\] scored above the scale 0\.\.2"):
         await evaluate_case(OffScaleJudge(), THE_CASE)
 
 
@@ -228,6 +233,8 @@ async def test_an_empty_batch_is_rejected_before_any_judge_call():
 class _JudgeByAnswer:
     """Scores by the answer rather than by the criterion id — the shared-rubric case needs it,
     because there the same criterion id appears in both cases."""
+
+    scale = DEFAULT_SCALE
 
     async def score(self, question, answer, criterion):
         return Verdict(score=2 if "HR tool" in answer else 0, reasoning=answer)

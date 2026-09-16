@@ -13,12 +13,13 @@ from typing import Protocol
 from openai import AsyncOpenAI
 from pydantic import Field
 
-from rubric_eval.models import SCALE_MAX, Criterion, DocumentedModel
+from rubric_eval.models import DEFAULT_SCALE, Criterion, DocumentedModel, Scale
 from rubric_eval.prompt import (
     JUDGE_EN,
-    NO_JSON_HINT,
     criterion_prompt,
+    judge_prompt,
     malformed_json_hint,
+    no_json_hint,
     out_of_range_hint,
 )
 
@@ -33,7 +34,7 @@ class Verdict(DocumentedModel):
     """One parsed and validated judge reply, for exactly one criterion."""
 
     score: int
-    """Score on the integral 0..SCALE_MAX scale — already checked to be on it."""
+    """Score on the integral scale the judge works on — already checked to be on it."""
 
     reasoning: str
     """The judge's argument: everything it wrote before the closing JSON object."""
@@ -51,6 +52,12 @@ class Judge(Protocol):
     flight; an own implementation that talks to a rate-limited service needs its own bound.
     """
 
+    scale: Scale
+    """The grading scale this judge answers on, and the reason a custom judge is not tied to
+    0..2: every verdict it produces is stored with this scale, `case_score` normalizes by its
+    maximum and `is_present` uses its threshold. A judge without it is a broken program —
+    `evaluation.py` lets the resulting `AttributeError` through rather than scoring 0."""
+
     async def score(self, question: str, answer: str, criterion: Criterion) -> Verdict:
         """Decide how well one criterion is covered by one answer.
 
@@ -63,9 +70,10 @@ class Judge(Protocol):
                 let importance leak into the score.
 
         Returns:
-            A `Verdict` whose `score` is an integer in 0..SCALE_MAX. Only the parser of
-            `OpenAIJudge` enforces that range, so an implementation that returns 5 pushes
-            the case score above 1.0 and nothing downstream will catch it.
+            A `Verdict` whose `score` is an integer in 0..`scale.maximum`. An implementation
+            that returns more is refused when the `CriterionResult` is built, so a judge
+            disagreeing with its own declared scale fails loudly instead of pushing the case
+            score above 1.0.
 
         Raises:
             Anything, for an endpoint that cannot answer. `evaluation.py` turns it into one
@@ -154,7 +162,7 @@ class JudgeConfig(DocumentedModel):
         return cls(**{field: value for field, value in settings.items() if value})
 
 
-def parse_verdict(reply: str) -> Verdict:
+def parse_verdict(reply: str, scale: Scale = DEFAULT_SCALE) -> Verdict:
     """Pull the score and the argument out of one raw judge reply.
 
     The judge reasons first and closes with a JSON object, so the *last* `{"score": ...}`
@@ -163,10 +171,13 @@ def parse_verdict(reply: str) -> Verdict:
     Args:
         reply: The model's message content, unmodified. Markdown fences, prose around the
             object and several score objects are all tolerated.
+        scale: What counts as a valid grade, and what the complaints offer the judge instead
+            of an invalid one. Defaults to the scale `prompt.JUDGE_EN` describes, which is
+            the only one a reply can be assumed to be on when none is named.
 
     Returns:
-        A `Verdict` with an integer score on the 0..SCALE_MAX scale and the text preceding
-        the object as `reasoning` (the whole reply, if it wrote nothing but the object).
+        A `Verdict` with an integer score on `scale` and the text preceding the object as
+        `reasoning` (the whole reply, if it wrote nothing but the object).
 
     Raises:
         ValueError: No score object, unparseable JSON, or a score off the scale. **The
@@ -178,32 +189,35 @@ def parse_verdict(reply: str) -> Verdict:
         parse_verdict('The answer names the address.\n{"score": 2}')
         # Verdict(score=2, reasoning="The answer names the address.")
     """
-    score_object = _last_score_object(reply)
-    score = _score_in(score_object)
-    if not _is_on_scale(score):
-        raise ValueError(out_of_range_hint(score))
+    score_object = _last_score_object(reply, scale)
+    score = _score_in(score_object, scale)
+    if not _is_on(scale, score):
+        raise ValueError(out_of_range_hint(score, scale))
     return Verdict(score=int(score), reasoning=_reasoning_before(reply, score_object))
 
 
-def _last_score_object(reply: str) -> re.Match[str]:
+def _last_score_object(reply: str, scale: Scale) -> re.Match[str]:
     matches = list(_SCORE_OBJECT.finditer(reply))
     if not matches:
-        raise ValueError(NO_JSON_HINT)
+        raise ValueError(no_json_hint(scale))
     return matches[-1]
 
 
-def _score_in(score_object: re.Match[str]) -> float:
+def _score_in(score_object: re.Match[str], scale: Scale) -> float:
     """Raise ValueError with a concrete hint if the object does not parse as valid JSON —
     the retry loop feeds that hint back to the judge instead of guessing at a broken reply."""
     try:
         return float(json.loads(score_object.group(0))["score"])
     except (ValueError, KeyError, TypeError) as error:  # JSONDecodeError is a ValueError
-        raise ValueError(malformed_json_hint(error)) from error
+        raise ValueError(malformed_json_hint(error, scale)) from error
 
 
-def _is_on_scale(score: float) -> bool:
-    """The scale is integral: 1.5 is a judge ignoring the instruction, not a finer grade."""
-    return score.is_integer() and 0 <= score <= SCALE_MAX
+def _is_on(scale: Scale, score: float) -> bool:
+    """A reply is on the scale when it named one of the scale's own grades — read from
+    `Scale.grades`, so the parser cannot disagree with the prompt about whether the top grade
+    counts. Every scale is integral: 1.5 is a judge ignoring the instruction, not a finer
+    grade, because more levels means a finer grid to pick from, never a continuous one."""
+    return score.is_integer() and int(score) in scale.grades
 
 
 def _reasoning_before(reply: str, score_object: re.Match[str]) -> str:
@@ -222,20 +236,35 @@ class OpenAIJudge:
 
     Args:
         config: Endpoint, credentials, model and the retry/throttle limits.
-        prompt: Replaces the bundled `JUDGE_EN` system prompt. Whatever you pass has to keep
-            two promises or every reply fails to parse: the model argues first and closes
-            with a single `{"score": 0|1|2}` object, and the prose scale stays 0..SCALE_MAX.
-            The user prompt and the retry complaints are not covered by this — they live in
-            `prompt.py`.
+        prompt: Replaces the system prompt. Whatever you pass has to keep two promises or
+            every reply fails to parse: the model argues first and closes with a single
+            `{"score": <grade>}` object, and the prose scale it describes is `scale`. The
+            user prompt and the retry complaints are not covered by this — they are derived
+            from `scale` in `prompt.py`.
+        scale: The grading scale this judge answers on. When it describes its levels, the
+            prompt is written from it by `prompt.judge_prompt` and `prompt` can be left out;
+            when it does not, there is nothing to instruct the model with — see Raises.
+
+    Raises:
+        ValueError: `scale` describes no levels and no `prompt` was given. Refused at
+            construction rather than at the first reply: a model told 0-2 while its answers
+            are checked against 0..10 fails every criterion of every case, one paid call at
+            a time, and the run still comes back looking like a bad system.
 
     Example:
         judge = OpenAIJudge(JudgeConfig.from_env())
         verdict = await judge.score("How do I report sick leave?", answer, criterion)
+
+        ten_point = Scale(maximum=10, presence_threshold=5, level_descriptions={...})
+        finer = OpenAIJudge(config, scale=ten_point)      # prompt written from the scale
     """
 
-    def __init__(self, config: JudgeConfig, prompt: str | None = None):
+    def __init__(
+        self, config: JudgeConfig, prompt: str | None = None, scale: Scale = DEFAULT_SCALE
+    ):
         self.config = config
-        self.system_prompt = prompt or JUDGE_EN
+        self.scale = scale
+        self.system_prompt = prompt or _prompt_for(scale)
         self.client = AsyncOpenAI(base_url=config.endpoint, api_key=config.api_key)
         self._slots_per_loop: dict[asyncio.AbstractEventLoop, asyncio.Semaphore] = {}
         #: One throttle per event loop, see `free_call_slots`.
@@ -292,7 +321,7 @@ class OpenAIJudge:
         for _ in range(self.config.max_attempts):
             reply = await self._ask(conversation)
             try:
-                return parse_verdict(reply)
+                return parse_verdict(reply, self.scale)
             except ValueError as error:
                 last_error = error
                 conversation = conversation + _correction(reply, error)
@@ -323,6 +352,16 @@ class OpenAIJudge:
                 max_completion_tokens=self.config.max_tokens,
             )
         return response.choices[0].message.content or ""
+
+
+def _prompt_for(scale: Scale) -> str:
+    """The system prompt a judge gets when it brings none of its own.
+
+    `JUDGE_EN` for the bundled scale rather than `judge_prompt(scale)`, because the bundled
+    worked examples close on grades of 0, 1 and 2 and belong to that scale alone. Every other
+    described scale gets the generated instructions without them.
+    """
+    return JUDGE_EN if scale == DEFAULT_SCALE else judge_prompt(scale)
 
 
 def _correction(reply: str, error: ValueError) -> list[ChatMessage]:

@@ -37,7 +37,8 @@ async def evaluate_case(judge: Judge, case: Case) -> CaseResult:
         judge: Scores one criterion at a time. It also owns the concurrency limit: this
             function starts one task per criterion whatever the rubric's size, because only
             the implementation knows what its backend tolerates. Build one judge and share
-            it — a judge per call would multiply its budget by the number of callers.
+            it — a judge per call would multiply its budget by the number of callers. Its
+            `scale` decides how the raw scores are read, and is stored on the result.
         case: Question, answer under test and rubric. Pydantic has already guaranteed at
             least one criterion, unique criterion ids and positive finite weights, so
             nothing here re-checks them.
@@ -52,6 +53,8 @@ async def evaluate_case(judge: Judge, case: Case) -> CaseResult:
         Whatever the judge raises from `_BUGS_NOT_OUTAGES` — a broken program must not be
         reported as a plausible score. `asyncio.CancelledError` propagates as well, so a
         disconnected client aborts the work instead of billing a full evaluation for it.
+        AttributeError for a judge that declares no `scale`, and ValueError for one that
+        grades above its own — both are bugs in the judge, not outages of its endpoint.
         Endpoint failures are *not* raised; see `_judge_criterion`.
 
     Example:
@@ -67,7 +70,12 @@ async def evaluate_case(judge: Judge, case: Case) -> CaseResult:
     results = await asyncio.gather(
         *(_judge_criterion(judge, case, criterion) for criterion in case.criteria)
     )
-    return CaseResult(case_id=case.id, score=case_score(results), criterion_results=results)
+    return CaseResult(
+        case_id=case.id,
+        score=case_score(results, judge.scale),
+        scale=judge.scale,
+        criterion_results=results,
+    )
 
 
 async def evaluate_batch(judge: Judge, batch: Batch) -> BatchResult:
@@ -115,14 +123,18 @@ async def _judge_criterion(judge: Judge, case: Case, criterion: Criterion) -> Cr
     This is where the failure policy lives: an endpoint that refuses, times out, runs out of
     quota or never produces a parseable reply costs exactly one criterion, which then counts
     as 0 and keeps its weight. A bug re-raises instead (see `_BUGS_NOT_OUTAGES`).
+
+    The scale is read up front, outside the containment, so a judge that declares none fails
+    as the program error it is rather than as an outage that happens to score 0.
     """
+    scale = judge.scale
     try:
         verdict = await judge.score(case.question, case.answer, criterion)
     except _BUGS_NOT_OUTAGES:
         raise
     except Exception as error:  # noqa: BLE001 — a dead judge must not kill the whole case
         return CriterionResult.unjudged(criterion, _describe(error))
-    return CriterionResult.judged(criterion, verdict.score, verdict.reasoning)
+    return CriterionResult.judged(criterion, verdict.score, verdict.reasoning, scale)
 
 
 def _describe(error: Exception) -> str:
