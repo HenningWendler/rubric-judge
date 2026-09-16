@@ -24,7 +24,7 @@ from rubric_eval.models import (
     RunMetrics,
     RunMetricsDelta,
     RunPair,
-    reworded_grades,
+    reworded_grades_clause,
 )
 
 
@@ -207,7 +207,7 @@ def _scale_differences(baseline: BatchResult, candidate: BatchResult) -> list[st
         return []
     return [
         f"the runs were judged on different scales: baseline {baseline.scale}, "
-        f"candidate {candidate.scale}{reworded_grades([baseline.scale, candidate.scale])}"
+        f"candidate {candidate.scale}{reworded_grades_clause([baseline.scale, candidate.scale])}"
     ]
 
 

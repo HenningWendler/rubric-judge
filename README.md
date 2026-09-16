@@ -509,8 +509,10 @@ when your settings come from elsewhere:
 JudgeConfig(model="qwen3:8b", endpoint="http://localhost:11434/v1", api_key="ollama")
 ```
 
-Constants, if you need to compute against them: `DEFAULT_SCALE`
-(`Scale(maximum=2, presence_threshold=0.5)`), `WEAKEST_CASES_REPORTED = 5`,
+Constants, if you need to compute against them: `DEFAULT_SCALE` (`maximum=2`,
+`presence_threshold=0.5`, **plus** the three level descriptions the bundled prompt is written
+from — they are part of the scale's identity, so `Scale(maximum=2, presence_threshold=0.5)`
+is a *different*, undescribed scale and is not equal to it), `WEAKEST_CASES_REPORTED = 5`,
 `SCORE_EQUALITY_TOLERANCE = 1e-9` (how close two scores must be to count as unchanged in a
 comparison — far above the float noise two runs accumulate summing the same weights in a
 different order, far below the smallest difference a rubric can actually produce).
@@ -557,10 +559,15 @@ The JSON shapes are exactly the models above. `POST /evaluate/batch`:
       "criterion_results": [
         { "criterion_id": 1, "weight": 3.0, "score": 2.0, "is_present": true,
           "spread": 0.0, "failed": false, "reasoning": "The answer instructs …" } ] },
-    { "case_id": 2, "score": 0.0, "criterion_results": [ … ] }
+    { "case_id": 2, "score": 0.0, "scale": { … }, "criterion_results": [ … ] }
   ]
 }
 ```
+
+Every `case_results` entry carries its own `scale` — the cases of one run are all judged by
+one judge, so they all repeat the same one. It is a field you may *omit when posting* a
+stored run back to `/compare`, where it then reads as `DEFAULT_SCALE`; it is never absent
+from a response.
 
 A `case_results[i]` entry is **the same document** `POST /evaluate` returns for that case —
 the same type, not a similar one — so the two endpoints cannot disagree.

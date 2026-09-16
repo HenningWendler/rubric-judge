@@ -202,12 +202,12 @@ def one_scale_of(scales: Iterable[Scale]) -> Scale:
         raise ValueError(
             "all cases of a run must be judged on one scale, got: "
             + ", ".join(sorted(str(scale) for scale in distinct))
-            + reworded_grades(distinct)
+            + reworded_grades_clause(distinct)
         )
     return distinct[0]
 
 
-def reworded_grades(scales: list[Scale]) -> str:
+def reworded_grades_clause(scales: list[Scale]) -> str:
     """The clause that explains scales which print alike but are not the same scale.
 
     `Scale.__str__` names the maximum and the threshold, so scales differing only in what they
@@ -224,18 +224,20 @@ def reworded_grades(scales: list[Scale]) -> str:
         differently and the message therefore already says what differs.
 
     Example:
-        reworded_grades([DEFAULT_SCALE, reworded])
+        reworded_grades_clause([DEFAULT_SCALE, default_with_a_reworded_two])
         # " — same grades, but the wording of [2] differs"
     """
     if len({str(scale) for scale in scales}) > 1:
         return ""
-    described = {grade for scale in scales for grade in scale.level_descriptions}
-    reworded = sorted(
+    described_grades = {grade for scale in scales for grade in scale.level_descriptions}
+    reworded_grades = sorted(
         grade
-        for grade in described
+        for grade in described_grades
         if len({scale.level_descriptions.get(grade) for scale in scales}) > 1
     )
-    return f" — same grades, but the wording of {reworded} differs" if reworded else ""
+    if not reworded_grades:
+        return ""
+    return f" — same grades, but the wording of {reworded_grades} differs"
 
 
 def scores_must_fit(criterion_results: list["CriterionResult"], scale: Scale) -> None:
