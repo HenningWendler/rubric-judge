@@ -565,7 +565,8 @@ async def evaluate_batch(judge: Judge, batch: Batch) -> BatchResult
 ```
 Judges every case concurrently and adds `RunMetrics`, plus one `LabelMetrics` per label the
 cases carry. A fan-out over `evaluate_case` and nothing else, so the two paths cannot drift
-apart. It does not select cases — hand it the batch you want.
+apart. Which cases run is the batch's own business: it judges `batch.selected_cases`, so a
+whole catalog plus a `label_filter` runs the subset and records what picked it.
 
 ```python
 def filter_cases_by_labels(cases: list[Case], selection: list[list[str]]) -> list[Case]
@@ -574,8 +575,10 @@ The cases a selection covers — any group, every label of it. The same rule
 `Batch.selected_cases` runs by and the buckets bucket by, so "the run selected by `table`"
 and "the `table` bucket of the full run" are the same cases. You rarely need it to *run* a
 subset; reach for it to see what a selection would pick first. No match is an empty list,
-never an exception — `Batch` is what refuses to run one. Raises `TypeError` for a flat
-`["table"]`, which would otherwise compare characters and quietly return the wrong cases.
+never an exception — `Batch` is what refuses to run one. The selection itself is held to the
+same rules as `Batch.label_filter`, so a preview and the run it previews can never pick
+different cases. Raises `TypeError` for a flat `["table"]`, which would otherwise compare
+characters and quietly return the wrong cases.
 
 ```python
 def run_metrics(results: list[CaseResult]) -> RunMetrics
@@ -815,8 +818,8 @@ Everything is validated **before** the first LLM call, so a malformed request co
 | `criteria`, `cases`, `criterion_results` or `case_results` empty; duplicate ids in any of them; `content` blank; `weight` `0`, negative, `Infinity` or `NaN`; missing field | `pydantic.ValidationError` | `422` |
 | A run posted to `/compare` whose numbers leave the ranges the [output tables](#outputs) give — a score above its own `scale.maximum` or off `0 … 1`, a non-positive weight, any `Infinity` or `NaN` | `pydantic.ValidationError` | `422` |
 | A run whose cases name more than one `scale`; a verdict whose `is_present` contradicts its own score | `pydantic.ValidationError` | `422` |
-| A blank label, or the same label twice on one case | `pydantic.ValidationError` | `422` |
-| The same group twice in a `label_filter`, in any order | `pydantic.ValidationError` | `422` |
+| A blank label, or the same label twice — on one case, or in one group of a selection | `pydantic.ValidationError` | `422` |
+| The same group twice in a selection, in any order — in a `label_filter` or in `filter_cases_by_labels()` | `pydantic.ValidationError` | `422` |
 | A `Batch` whose `label_filter` matches no case at all | `pydantic.ValidationError` naming the labels the batch does carry, with counts | `422` |
 | A stored `BatchResult` whose `label_filter` does not describe the cases it holds | `pydantic.ValidationError` naming the offending case ids | `422` |
 | A flat `["table"]` where a selection is expected — to `filter_cases_by_labels()`, or in a request body | `TypeError` naming both readings you may have meant | `422` (schema) |
@@ -830,8 +833,10 @@ Everything is validated **before** the first LLM call, so a malformed request co
 | A bug in the program (`TypeError`, `AttributeError`, `NameError`, `ImportError`, `RuntimeError`) | re-raised | `500` |
 | Request cancelled (client disconnect, shutdown) | `asyncio.CancelledError` propagates | — |
 
-The `422` body names only *where* and *what*, never the value that was sent — so it stays
-serializable and the API never mirrors arbitrary request content back:
+The `422` body carries only `loc`, `msg` and `type`. Pydantic's own `input` is dropped, so
+the body always stays serializable — `Infinity` and `NaN` are literals the JSON parser accepts
+but the writer refuses, and echoing a rejected `"weight": Infinity` back would turn a clean
+client error into a `500`:
 
 ```json
 { "detail": [ { "loc": ["body", "criteria", 0, "weight"],
@@ -1226,7 +1231,7 @@ field tables in [Reference](#reference). One text, never three — they cannot d
 .venv/bin/python -m pytest
 ```
 
-304 tests, no real LLM ever called. Mocked at two levels:
+308 tests, no real LLM ever called. Mocked at two levels:
 
 - **`FakeJudge`** ([conftest.py](tests/conftest.py)) replaces the `Judge` protocol and scores
   from a lookup table — `{1: 2, 2: ValueError("down")}` scores criterion 1 with a `2` and

@@ -17,6 +17,7 @@ from pydantic import (
     ConfigDict,
     Field,
     StringConstraints,
+    TypeAdapter,
     computed_field,
     field_validator,
     model_validator,
@@ -97,6 +98,13 @@ grammar is needed — one more level of list is the whole feature:
 Negation is deliberately absent: "table but not images" cannot be written, and adding it
 would mean either a second field or a sigil inside a label, neither of which has been asked
 for yet."""
+
+
+read_label_selection = TypeAdapter(LabelSelection).validate_python
+"""The same rule, applied to a selection pydantic has not been through — the one
+`filter_cases_by_labels` takes straight from a caller rather than off a `Batch` field. Without
+it a label with a stray space would match nothing where the identical selection on a `Batch`
+matches two cases, and the preview would contradict the run it previews."""
 
 
 class DocumentedModel(BaseModel):

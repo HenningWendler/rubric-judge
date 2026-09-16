@@ -22,6 +22,7 @@ from rubric_eval.models import (
     Criterion,
     CriterionResult,
     matches_label_selection,
+    read_label_selection,
 )
 
 #: Errors that mean *this program* is wrong, not that the judge's endpoint is having a bad
@@ -152,6 +153,9 @@ def filter_cases_by_labels(cases: list[Case], selection: list[list[str]]) -> lis
     A filter, and it behaves like one: no match is an empty list, not an exception, so it
     composes. `Batch` is what refuses to *run* an empty selection.
 
+    The selection is read as the `LabelSelection` a `Batch` would read it as, so a preview and
+    the run it previews can never pick different cases.
+
     Args:
         cases: The catalog to select from; returned in its own order, never reordered.
         selection: Groups of required labels, read as an OR of ANDs. Empty selects every
@@ -159,6 +163,13 @@ def filter_cases_by_labels(cases: list[Case], selection: list[list[str]]) -> lis
 
     Returns:
         The matching cases, empty when none match.
+
+    Raises:
+        TypeError: For a flat `["table"]`, which would otherwise compare *characters* and
+            quietly return the wrong cases — the message names both readings you may have
+            meant.
+        pydantic.ValidationError: For a selection a `Batch` would refuse too — a blank label,
+            or the same group twice.
 
     Example:
         filter_cases_by_labels(catalog, [["table", "split_infos"], ["agentic"]])
@@ -169,6 +180,7 @@ def filter_cases_by_labels(cases: list[Case], selection: list[list[str]]) -> lis
             f"{[list(selection)]} to require all of them, or "
             f"{[[label] for label in selection]} to require any of them"
         )
+    selection = read_label_selection(selection)
     return [case for case in cases if matches_label_selection(case.labels, selection)]
 
 

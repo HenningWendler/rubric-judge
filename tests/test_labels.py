@@ -139,6 +139,41 @@ def test_a_flat_list_of_labels_is_refused_rather_than_read_as_characters():
         filter_cases_by_labels(CATALOG, ["table"])
 
 
+def test_a_selection_is_read_the_same_way_however_its_labels_are_spaced():
+    """`filter_cases_by_labels` is documented as the *preview* of what a `Batch` would run, so
+    the two have to agree on what a label is. A case's labels are stripped on the way in, so a
+    selection's have to be too — otherwise a label copied out of a spreadsheet with a trailing
+    space previews as "nothing matches" and then runs two cases."""
+    padded = [["  table  "]]
+
+    assert [case.id for case in filter_cases_by_labels(CATALOG, padded)] == [
+        case.id for case in Batch(cases=CATALOG, label_filter=padded).selected_cases
+    ] == [1, 2]
+
+
+def test_a_preview_refuses_the_selections_a_batch_refuses():
+    """The other half of reading it the same way: a selection a `Batch` would never accept has
+    no cases it "would pick", so answering one would be inventing a result."""
+    with pytest.raises(ValidationError, match="label groups must be unique"):
+        filter_cases_by_labels(CATALOG, [["table"], ["table"]])
+    with pytest.raises(ValidationError):
+        filter_cases_by_labels(CATALOG, [[""]])
+
+
+def test_an_empty_group_asks_for_nothing_and_so_selects_everything():
+    """A group is every label of it, and a group of no labels asks nothing — so every case
+    carries all of it. The same reading `[]` gets, one level down."""
+    assert filter_cases_by_labels(CATALOG, [[]]) == CATALOG
+    assert Batch(cases=CATALOG, label_filter=[[]]).selected_cases == CATALOG
+
+
+def test_an_empty_group_beside_a_real_one_widens_the_selection_to_everything():
+    """The OR is what makes it widen rather than narrow: `table OR nothing-required` is every
+    case, not the table cases. Worth pinning, because an empty group is what an accidentally
+    empty list of labels looks like, and it selects the whole catalog in silence."""
+    assert Batch(cases=CATALOG, label_filter=[["table"], []]).selected_cases == CATALOG
+
+
 def test_the_filter_keeps_the_catalog_order():
     shuffled = [case_with(3, ["table"]), case_with(1, ["table"]), case_with(2, ["table"])]
 
