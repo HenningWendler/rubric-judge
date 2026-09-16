@@ -95,6 +95,10 @@ async def evaluate_case(case: Case, judge: Annotated[Judge, Depends(get_judge)])
     counts as present, and the judge's reasoning. Read a grade against the scale; `score` is
     normalized precisely so that it can be read without one.
 
+    Any `labels` you send come back untouched on the result. They are never shown to the
+    judge and cannot move a score — they exist to slice a batch (see `POST /evaluate/batch`).
+    A requirement the answer must actually meet belongs in `criteria`.
+
     **422** if the body is invalid — an empty rubric, duplicate criterion ids, a blank
     `content`, or a weight that is not positive and finite. Validation happens before the
     first LLM call, so a rejected request costs nothing.
@@ -117,12 +121,26 @@ async def evaluate_batch(batch: Batch, judge: Annotated[Judge, Depends(get_judge
     average, median, spread, criteria fulfillment, which cases scored zero, the weakest
     cases above zero, and how many criteria the judge failed to answer.
 
-    Synchronous: the response arrives when the last case is done. Sizing the request is
-    therefore yours to do — the whole catalog is one HTTP timeout.
+    **Labels.** Tag your cases (`"labels": ["table"]`) and `label_metrics` reports that whole
+    set of numbers again for each label on its own — the breakdown that tells a generally
+    mediocre system apart from one that is fine except on tables. A case counts in every
+    bucket it carries a label for, so the buckets overlap.
+
+    **Running only part of a catalog.** Send the whole thing plus a `label_filter`, an **OR
+    of ANDs**: `[["table", "split_infos"], ["agentic"]]` runs the cases carrying both `table`
+    and `split_infos`, plus the cases carrying `agentic`. One group is a plain AND, several
+    one-label groups are a plain OR, and an absent `label_filter` runs everything. It comes
+    back on the response, so a stored run still says which subset it is.
+
+    Synchronous: the response arrives when the last selected case is done. Sizing the request
+    is therefore yours to do — the whole catalog is one HTTP timeout, whether or not a
+    `label_filter` narrows what is judged.
 
     **422** on the single-case rules, plus an empty `cases` or duplicate case ids. One
     invalid case rejects the whole batch: a run that is partly judged and partly refused
-    would produce metrics nobody can compare.
+    would produce metrics nobody can compare. Also **422** when `label_filter` matches no
+    case at all — the message lists the labels your batch does carry, with counts, because
+    that is nearly always a typo.
 
     Concurrency is bounded by the judge, not by the batch: every case of this request shares
     one budget, and so does every other request in flight.
@@ -148,9 +166,16 @@ async def compare_runs(runs: RunPair) -> ComparisonResult:
     suffered different amounts of judge outage, and every other number is then partly an
     artefact of that rather than of the answers.
 
+    `label_metrics_deltas` repeats `metrics_delta` for each label the cases carry, which is
+    what says whether an average that rose did so by fixing one kind of case or by lifting
+    all of them. `label_filter` is not compared: two runs covering the same case ids are
+    comparable however each was selected.
+
     **422** if a body is invalid, or if the two runs are not comparable — a different grading
-    scale, different case ids, different criteria within a case, or different weights. The
-    message names every difference at once, so one fix can address all of them. Comparing
+    scale, different case ids, different criteria within a case, different weights, or a case
+    whose labels changed between the runs (which would put different cases in the two buckets
+    of the same name). The message names every difference at once, so one fix can address all
+    of them. Comparing
     runs with different weights or scales is refused rather than approximated: the weights are
     the denominator each case score is normalized by and the scale is the unit every raw
     criterion score is in, so numbers computed under different ones do not subtract.

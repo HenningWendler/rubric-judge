@@ -4,10 +4,11 @@ Pure computation over two `BatchResult` documents — no judge, no network, no c
 saved to disk months apart compare exactly like runs produced a second ago.
 
 One entry point, `compare_runs`, and one hard rule underneath it: two runs are comparable
-only if they were judged on the same scale and cover the same cases with the same rubric and
-the same weights. Different weights make the case scores non-commensurable, a different scale
-makes the raw criterion scores so, and a delta between either would look like a result while
-meaning nothing.
+only if they were judged on the same scale and cover the same cases with the same rubric, the
+same weights and the same labels. Different weights make the case scores non-commensurable, a
+different scale makes the raw criterion scores so, changed labels make the per-label buckets
+hold different cases on each side, and a delta between any of them would look like a result
+while meaning nothing.
 """
 
 import statistics
@@ -21,6 +22,8 @@ from rubric_eval.models import (
     ChangeStatus,
     ChangeSummary,
     ComparisonResult,
+    LabelMetrics,
+    LabelMetricsDelta,
     RunMetrics,
     RunMetricsDelta,
     RunPair,
@@ -51,28 +54,33 @@ def compare_runs(run_pair: RunPair) -> ComparisonResult:
     Args:
         run_pair: The `baseline` run to compare against and the `candidate` run under
             test. Both must have been judged on the same scale and must cover the same case
-            ids, the same criterion ids per case and the same weights — see Raises. Nothing
-            else is required of them: results loaded back from stored JSON compare exactly
-            like results just computed.
+            ids, the same criterion ids per case, the same weights and the same labels per
+            case — see Raises. Nothing else is required of them: results loaded back from
+            stored JSON compare exactly like results just computed.
 
     Returns:
         A `ComparisonResult`. `metrics_delta` says whether the run got better, `summary` how
-        that is distributed over the cases, and `case_comparison_results` — ordered by
-        `case_id` — which criterion is responsible. Read
-        `metrics_delta.failed_criteria_count_delta` first: anything but 0 means the two runs
-        suffered different amounts of judge outage, and every other number is then partly an
-        artefact of that.
+        that is distributed over the cases, `label_metrics_deltas` which *kind* of case moved,
+        and `case_comparison_results` — ordered by `case_id` — which criterion is responsible.
+        Read `metrics_delta.failed_criteria_count_delta` first: anything but 0 means the two
+        runs suffered different amounts of judge outage, and every other number is then partly
+        an artefact of that.
+
+        `label_filter` is deliberately *not* compared: two runs covering the same case ids are
+        comparable however each of them was selected, and two different filters can legitimately
+        arrive at the same cases.
 
     Raises:
         RunsNotComparableError: A `ValueError`. The runs do not describe the same catalog,
             or were not judged on the same scale. The message names every difference found —
             a differing scale, cases present on only one side, criteria that differ within a
-            shared case, and weights that changed — rather than only the first, so one fix
-            can address all of them.
+            shared case, weights that changed, and labels that changed — rather than only the
+            first, so one fix can address all of them.
 
     Example:
         result = compare_runs(RunPair(baseline=last_weeks_run, candidate=todays_run))
         result.metrics_delta.average_score_delta   # +0.084
+        result.label_metrics_deltas[0].label       # "agentic_search"
         result.summary.worsened_case_ids           # [5] — what the win cost
         result.summary.improvement.largest         # +0.31
     """
@@ -81,6 +89,7 @@ def compare_runs(run_pair: RunPair) -> ComparisonResult:
     return ComparisonResult(
         metrics_delta=_metrics_delta(run_pair.baseline.metrics, run_pair.candidate.metrics),
         summary=_summarize(case_comparison_results),
+        label_metrics_deltas=_label_metrics_deltas(run_pair.baseline, run_pair.candidate),
         case_comparison_results=case_comparison_results,
     )
 
@@ -124,6 +133,33 @@ def _metrics_delta(baseline: RunMetrics, candidate: RunMetrics) -> RunMetricsDel
             candidate.failed_criteria_count - baseline.failed_criteria_count
         ),
     )
+
+
+def _label_metrics_deltas(
+    baseline: BatchResult, candidate: BatchResult
+) -> list[LabelMetricsDelta]:
+    """One delta per label, in the alphabetical order both breakdowns already carry.
+
+    Pairing by label needs no intersection: the comparability check has guaranteed that every
+    case carries the same labels in both runs, and `BatchResult` has guaranteed that each
+    breakdown covers exactly the labels its cases carry — so the two label sets are equal, and
+    zipping them pairs like with like.
+    """
+    return [
+        LabelMetricsDelta(
+            label=baseline_bucket.label,
+            metrics_delta=_metrics_delta(baseline_bucket.metrics, candidate_bucket.metrics),
+        )
+        for baseline_bucket, candidate_bucket in zip(
+            _buckets_by_label(baseline), _buckets_by_label(candidate), strict=True
+        )
+    ]
+
+
+def _buckets_by_label(run: BatchResult) -> list[LabelMetrics]:
+    """Sorted here as well as at the source, so the zip above pairs by label rather than by
+    trusting the storage order of a run that was read back from JSON."""
+    return sorted(run.label_metrics, key=attrgetter("label"))
 
 
 def _summarize(case_comparison_results: list[CaseComparisonResult]) -> ChangeSummary:
@@ -187,7 +223,7 @@ def _reject_incomparable_runs(baseline: BatchResult, candidate: BatchResult) -> 
 def _differences_between(baseline: BatchResult, candidate: BatchResult) -> list[str]:
     """Everything that stops these two runs from being compared, in reading order: first the
     scale, which invalidates everything under it, then the cases that are missing on one side,
-    then the rubric changes inside the shared ones."""
+    then the rubric and label changes inside the shared ones."""
     baseline_by_id = _case_results_by_id(baseline)
     candidate_by_id = _case_results_by_id(candidate)
     differences = _scale_differences(baseline, candidate)
@@ -196,7 +232,23 @@ def _differences_between(baseline: BatchResult, candidate: BatchResult) -> list[
         differences += _rubric_differences(
             case_id, baseline_by_id[case_id], candidate_by_id[case_id]
         )
+        differences += _label_differences(
+            case_id, baseline_by_id[case_id], candidate_by_id[case_id]
+        )
     return differences
+
+
+def _label_differences(case_id: int, baseline: CaseResult, candidate: CaseResult) -> list[str]:
+    """A case re-labelled between the two runs puts different cases in the two per-label
+    buckets of the same name, so every delta in `label_metrics_deltas` would silently compare
+    two different populations. Compared as sets: labels are read as a set everywhere, so a
+    reordered list is the same labelling and must not be reported as a change.
+    """
+    if set(baseline.labels) == set(candidate.labels):
+        return []
+    return [
+        f"case {case_id}: labels {sorted(baseline.labels)} vs {sorted(candidate.labels)}"
+    ]
 
 
 def _scale_differences(baseline: BatchResult, candidate: BatchResult) -> list[str]:

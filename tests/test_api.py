@@ -87,7 +87,7 @@ def test_the_result_carries_every_published_field(client):
 
     body = client.post("/evaluate", json=CASE).json()
 
-    assert set(body) == {"case_id", "score", "scale", "criterion_results"}
+    assert set(body) == {"case_id", "score", "scale", "criterion_results", "labels"}
     assert body["scale"] == DEFAULT_SCALE.model_dump(mode="json")  # grades as JSON keys
     assert set(body["criterion_results"][0]) == {
         "criterion_id", "weight", "score", "is_present", "spread", "failed", "reasoning",
@@ -124,13 +124,15 @@ def test_the_batch_result_carries_every_published_field(client):
 
     body = client.post("/evaluate/batch", json=BATCH).json()
 
-    assert set(body) == {"metrics", "case_results"}
+    assert set(body) == {"metrics", "label_metrics", "label_filter", "case_results"}
     assert set(body["metrics"]) == {
         "total_cases", "average_score", "median_score", "variance", "standard_deviation",
         "average_criterion_score", "criteria_fulfillment_rate", "cases_with_score_zero",
         "cases_with_score_zero_count", "weakest_cases_above_zero", "failed_criteria_count",
     }
-    assert set(body["case_results"][0]) == {"case_id", "score", "scale", "criterion_results"}
+    assert set(body["case_results"][0]) == {
+        "case_id", "score", "scale", "criterion_results", "labels",
+    }
 
 
 def test_a_batch_entry_is_serialized_exactly_like_a_single_evaluation(client):
@@ -418,7 +420,9 @@ def test_the_comparison_carries_every_published_field(client):
     """The result shape is a published interface — it may grow, never shrink."""
     body = client.post("/compare", json=_runs(run_of({1: 0, 2: 2}), run_of({1: 2, 2: 0}))).json()
 
-    assert set(body) == {"metrics_delta", "summary", "case_comparison_results"}
+    assert set(body) == {
+        "metrics_delta", "summary", "label_metrics_deltas", "case_comparison_results",
+    }
     assert set(body["metrics_delta"]) == {
         "average_score_delta", "median_score_delta", "variance_delta",
         "standard_deviation_delta", "average_criterion_score_delta",
@@ -564,3 +568,138 @@ def test_a_run_naming_the_same_case_twice_is_rejected_rather_than_dropping_one(c
 
     assert response.status_code == 422
     assert "case ids must be unique" in response.text
+
+
+# --- labels: the query parameter and what it records ---------------------------------------
+#
+# What a label *means* — bucketing, filtering, the comparison guard — is tested in
+# `test_labels.py`. Here only the HTTP end: the parameter, and the two refusals it can cause.
+
+LABELLED_BATCH = {
+    "cases": [
+        {**BATCH["cases"][0], "labels": ["table", "images"]},
+        {**BATCH["cases"][1], "labels": ["table"]},
+        {**BATCH["cases"][2], "labels": ["links"]},
+    ]
+}
+"""The shared batch, tagged: case 1 carries both `table` and `images`, case 2 only `table`,
+case 3 only `links` — enough to tell a subset filter from an exact-match one."""
+
+
+def test_a_batch_reports_its_metrics_once_per_label(client):
+    use_judge(FakeJudge(BATCH_VERDICTS))
+
+    body = client.post("/evaluate/batch", json=LABELLED_BATCH).json()
+
+    assert [bucket["label"] for bucket in body["label_metrics"]] == ["images", "links", "table"]
+    assert body["label_metrics"][0]["metrics"]["total_cases"] == 1  # images: case 1 only
+    assert body["label_metrics"][2]["metrics"]["total_cases"] == 2  # table: cases 1 and 2
+
+
+def test_a_label_filter_in_the_body_runs_only_the_matching_cases(client):
+    """No query string: the selection travels in the body, and the server runs the subset."""
+    use_judge(FakeJudge(BATCH_VERDICTS))
+    narrowed = {**LABELLED_BATCH, "label_filter": [["links"]]}
+
+    body = client.post("/evaluate/batch", json=narrowed).json()
+
+    assert [case["case_id"] for case in body["case_results"]] == [3]
+    assert body["label_filter"] == [["links"]]
+
+
+def test_one_group_requires_every_label_in_it(client):
+    use_judge(FakeJudge(BATCH_VERDICTS))
+    narrowed = {**LABELLED_BATCH, "label_filter": [["table", "images"]]}
+
+    body = client.post("/evaluate/batch", json=narrowed).json()
+
+    assert [case["case_id"] for case in body["case_results"]] == [1]
+
+
+def test_an_or_of_ands_travels_over_http_intact(client):
+    """`(table AND images) OR links` — the combination the flat form could not express."""
+    use_judge(FakeJudge(BATCH_VERDICTS))
+    narrowed = {**LABELLED_BATCH, "label_filter": [["table", "images"], ["links"]]}
+
+    body = client.post("/evaluate/batch", json=narrowed).json()
+
+    assert [case["case_id"] for case in body["case_results"]] == [1, 3]
+
+
+def test_the_metrics_describe_the_selected_cases_only(client):
+    """The run is the subset, so its aggregate and its buckets are the subset's — otherwise
+    a narrowed run would report numbers for cases it never judged."""
+    use_judge(FakeJudge(BATCH_VERDICTS))
+    narrowed = {**LABELLED_BATCH, "label_filter": [["links"]]}
+
+    body = client.post("/evaluate/batch", json=narrowed).json()
+
+    assert body["metrics"]["total_cases"] == 1
+    assert [bucket["label"] for bucket in body["label_metrics"]] == ["links"]
+
+
+def test_a_selection_matching_nothing_names_the_labels_that_do_exist(client):
+    """Nearly always a typo, and the right spelling is unguessable from "nothing matched"."""
+    use_judge(FakeJudge(BATCH_VERDICTS))
+    typo = {**LABELLED_BATCH, "label_filter": [["tabel"]]}
+
+    response = client.post("/evaluate/batch", json=typo)
+
+    assert response.status_code == 422
+    assert response.json()["detail"][0]["msg"] == (
+        "Value error, label_filter [['tabel']] matches no case; "
+        "labels present in this batch: images (1), links (1), table (2)"
+    )
+
+
+def test_a_blank_label_in_a_selection_is_rejected(client):
+    use_judge(FakeJudge(BATCH_VERDICTS))
+    blank = {**LABELLED_BATCH, "label_filter": [[""]]}
+
+    assert client.post("/evaluate/batch", json=blank).status_code == 422
+
+
+def test_a_repeated_group_is_rejected(client):
+    use_judge(FakeJudge(BATCH_VERDICTS))
+    repeated = {**LABELLED_BATCH, "label_filter": [["table"], ["table"]]}
+
+    assert client.post("/evaluate/batch", json=repeated).status_code == 422
+
+
+def test_a_flat_list_of_labels_is_rejected_rather_than_read_as_a_group(client):
+    """`"label_filter": ["table"]` is a plausible mistake; JSON gives no type error of its
+    own, so the schema has to be the one that refuses it."""
+    use_judge(FakeJudge(BATCH_VERDICTS))
+    flat = {**LABELLED_BATCH, "label_filter": ["table"]}
+
+    assert client.post("/evaluate/batch", json=flat).status_code == 422
+
+
+def test_labels_are_echoed_on_a_single_evaluation(client):
+    use_judge(FakeJudge({1: 2, 2: 1}))
+
+    body = client.post("/evaluate", json={**CASE, "labels": ["table"]}).json()
+
+    assert body["labels"] == ["table"]
+
+
+def test_a_comparison_reports_a_delta_per_label(client):
+    labels = {1: ["table"], 2: ["links"]}
+    baseline = run_of({1: 0}, {2: 2}, labels_by_case_id=labels)
+    candidate = run_of({1: 2}, {2: 2}, labels_by_case_id=labels)
+
+    body = client.post("/compare", json=_runs(baseline, candidate)).json()
+
+    deltas = {bucket["label"]: bucket["metrics_delta"] for bucket in body["label_metrics_deltas"]}
+    assert deltas["table"]["average_score_delta"] == pytest.approx(1.0)
+    assert deltas["links"]["average_score_delta"] == pytest.approx(0.0)
+
+
+def test_a_case_relabelled_between_the_runs_is_refused_with_the_reason(client):
+    baseline = run_of({1: 2}, labels_by_case_id={1: ["table"]})
+    candidate = run_of({1: 2}, labels_by_case_id={1: ["links"]})
+
+    response = client.post("/compare", json=_runs(baseline, candidate))
+
+    assert response.status_code == 422
+    assert "case 1: labels" in response.json()["detail"]

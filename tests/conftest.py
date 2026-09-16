@@ -7,7 +7,7 @@ from fastapi.testclient import TestClient
 
 from rubric_eval.api import app, get_judge
 from rubric_eval.judge import Verdict
-from rubric_eval.metrics import case_score, run_metrics
+from rubric_eval.metrics import case_score, label_metrics, run_metrics
 from rubric_eval.models import (
     DEFAULT_SCALE,
     BatchResult,
@@ -101,28 +101,42 @@ def use_judge(judge: FakeJudge) -> None:
     app.dependency_overrides[get_judge] = lambda: judge
 
 
-def run_of(*scores_per_case: dict[int, float], scale: Scale = DEFAULT_SCALE) -> BatchResult:
+def run_of(
+    *scores_per_case: dict[int, float],
+    scale: Scale = DEFAULT_SCALE,
+    labels_by_case_id: dict[int, list[str]] | None = None,
+) -> BatchResult:
     """A finished `BatchResult` built straight from judge scores, no judge and no async.
 
     One mapping per case: `run_of({1: 2, 2: 0}, {21: 1})` is a two-case run whose first case
     has criteria 1 and 2 scored 2 and 0. Case ids count from 1, weights are all 1, so two
     runs built this way are always comparable and every score is easy to predict by hand.
-    `scale` grades the whole run on something other than the bundled 0..2.
+    `scale` grades the whole run on something other than the bundled 0..2, and
+    `labels_by_case_id` tags individual cases — `{1: ["table"]}` labels the first one.
+
+    The per-label breakdown is computed rather than passed in, because `BatchResult` refuses
+    one that does not match its cases and a test should not have to restate it.
 
     Comparison tests are about the *difference* between two runs, so building them through
     `evaluate_batch` and a `FakeJudge` would only add an event loop between the test and the
     numbers it is asserting on.
     """
+    labels_by_case_id = labels_by_case_id or {}
     case_results = [
         CaseResult(
             case_id=case_id,
             score=case_score(_verdicts(scores, scale), scale),
             scale=scale,
             criterion_results=_verdicts(scores, scale),
+            labels=labels_by_case_id.get(case_id, []),
         )
         for case_id, scores in enumerate(scores_per_case, start=1)
     ]
-    return BatchResult(metrics=run_metrics(case_results), case_results=case_results)
+    return BatchResult(
+        metrics=run_metrics(case_results),
+        label_metrics=label_metrics(case_results),
+        case_results=case_results,
+    )
 
 
 def _verdicts(scores: dict[int, float], scale: Scale = DEFAULT_SCALE) -> list[CriterionResult]:
