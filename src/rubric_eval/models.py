@@ -18,14 +18,8 @@ from pydantic import (
     StringConstraints,
     computed_field,
     field_validator,
+    model_validator,
 )
-
-SCALE_MAX = 2
-"""Best score one criterion can reach. The scale is integral: 0, 1 or 2."""
-
-PRESENCE_THRESHOLD = 0.5
-"""Half a scale point. With a single judge run this is simply "not a plain 0"; with
-several runs it is the majority rule applied to the averaged score."""
 
 WEAKEST_CASES_REPORTED = 5
 """How many of the weakest non-zero cases `RunMetrics` names by id — the shortlist to look
@@ -46,11 +40,232 @@ def _duplicate_ids(ids: Iterable[int]) -> list[int]:
     return sorted(id_ for id_, count in counted.items() if count > 1)
 
 
+LevelDescription = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
+"""What one grade of a `Scale` means, in plain language. Stripped and never blank: it is
+rendered into the judge's prompt, where a bare number with nothing after it would read as an
+instruction to guess."""
+
+
 class DocumentedModel(BaseModel):
     """Base for every model in this package: makes attribute docstrings the field
     descriptions, so one docstring feeds both IDE hover and the generated OpenAPI schema."""
 
     model_config = ConfigDict(use_attribute_docstrings=True)
+
+
+class Scale(DocumentedModel):
+    """The grading scale one judge works on: how far a criterion can be covered, and from
+    where on it counts as covered at all.
+
+    A judge owns its scale and the `CaseResult` it produces carries it, so nothing downstream
+    has to assume the bundled 0..2. Compared by value — including the level descriptions, so
+    rewording what a grade means makes it a different scale and two runs judged under the two
+    wordings are refused rather than subtracted.
+
+    Describing the levels is what lets `prompt.judge_prompt` write the judge's instructions
+    from the scale alone; a scale that describes none is arithmetic only and needs a prompt
+    handed to the judge.
+
+    Frozen, and revalidated whenever it is put into a result: `frozen` stops the fields being
+    reassigned but not `level_descriptions` being written into, and `DEFAULT_SCALE` is one
+    module-level object every judge that takes the default shares. Revalidating copies it into
+    each `CaseResult`, so a finished run keeps saying what its grades meant even if someone
+    reaches into that constant afterwards — which is the whole reason a result carries a scale.
+
+    Example:
+        Scale(maximum=2, presence_threshold=0.5, level_descriptions={...})  # DEFAULT_SCALE
+        Scale(maximum=10, presence_threshold=5)     # arithmetic only, bring your own prompt
+    """
+
+    model_config = ConfigDict(frozen=True, revalidate_instances="always")
+
+    maximum: int = Field(gt=0)
+    """Best score one criterion can reach; the scale runs 0..maximum and is integral, so a
+    maximum of 2 offers exactly the grades 0, 1 and 2. Keep it small — a judge asked to pick
+    one of a hundred levels is guessing, not being precise, and every level has to be spelled
+    out in the prompt."""
+
+    presence_threshold: float = Field(gt=0, allow_inf_nan=False)
+    """From which score `CriterionResult.is_present` counts the criterion as covered. Above 0
+    because a criterion the judge scored 0 is by definition not covered, and at most
+    `maximum` because a threshold beyond the scale would make every criterion absent. On the
+    bundled scale it is 0.5 — "not a plain 0" for a single run, the majority rule once
+    repeated runs average into fractional scores."""
+
+    level_descriptions: dict[int, LevelDescription] = Field(default_factory=dict)
+    """What each grade means, keyed by the grade: `{2: "Fully covered. …", 1: "…", 0: "…"}`.
+    Either empty or complete — one entry for every grade from 0 to `maximum`, and none for a
+    grade off it — because a prompt that explains four of ten levels is worse than one that
+    explains none. This is judge-facing prose *and* data a result carries: it is what
+    `prompt.judge_prompt` renders, and what tells a reader of a stored run six months later
+    what its 7 out of 10 was supposed to mean."""
+
+    @model_validator(mode="after")
+    def _reject_descriptions_that_do_not_match_the_grades(self) -> "Scale":
+        """Half a description block would generate a prompt that lists some levels and leaves
+        the judge to invent the rest — worse than the zero-shot prompt an undescribed scale
+        gets, because the omission looks deliberate."""
+        if self.level_descriptions and set(self.level_descriptions) != set(self.grades):
+            raise ValueError(
+                f"level descriptions must describe every grade of the scale 0..{self.maximum} "
+                f"and no other, got {sorted(self.level_descriptions)}"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _reject_a_threshold_off_the_scale(self) -> "Scale":
+        """A threshold above the maximum cannot be reached by any grade, so every criterion
+        of every run would come back absent — with no error to explain it."""
+        if self.presence_threshold > self.maximum:
+            raise ValueError(
+                f"presence threshold {self.presence_threshold} is above the highest reachable "
+                f"score {self.maximum}, so no criterion could ever count as covered"
+            )
+        return self
+
+    @property
+    def grades(self) -> range:
+        """Every grade this scale offers, lowest first: 0, 1, 2 for the bundled one.
+
+        Returns:
+            A `range` from 0 through `maximum` inclusive — the one place that "inclusive" is
+            spelled out, so the validator, the prompt and the retry hints cannot disagree
+            about whether the top grade is on the scale.
+
+        Example:
+            list(DEFAULT_SCALE.grades)   # [0, 1, 2]
+        """
+        return range(self.maximum + 1)
+
+    def __str__(self) -> str:
+        """Short enough for an error message that has to name two scales at once."""
+        return f"0..{self.maximum} (covered from {self.presence_threshold})"
+
+
+DEFAULT_SCALE = Scale(
+    maximum=2,
+    presence_threshold=0.5,
+    level_descriptions={
+        2: (
+            "Fully covered. Every essential part of the criterion is clearly recognizable in "
+            "the answer, even if the wording, terminology or structure differs."
+        ),
+        1: (
+            "Partially covered. Some essential information is missing, but the basic idea is "
+            "still derivable from the answer."
+        ),
+        0: (
+            "Not covered. The criterion is absent, or the answer has no recognizable "
+            "connection to it."
+        ),
+    },
+)
+"""The scale `prompt.JUDGE_EN` is generated from, and the one results are read on when they
+name none — every run stored before scales were configurable was judged on exactly this.
+
+The three sentences live here rather than in `prompt.py` because they are not only prompt
+text: a `CaseResult` carries them, so a run read back months later still says what its grades
+were supposed to mean. `prompt.py` renders them and owns every other word the judge sees."""
+
+
+def one_scale_of(scales: Iterable[Scale]) -> Scale:
+    """The single scale a set of verdicts was given on, or a refusal naming the mix.
+
+    The one place the "a run is judged on exactly one scale" rule lives, so the models, the
+    metrics and the comparison cannot come to different conclusions about the same run. Mixed
+    scales are not a cosmetic problem: `RunMetrics.average_criterion_score` averages raw judge
+    scores across every criterion of a run, and a 2 meaning "fully covered" averaged with a 2
+    meaning "barely" produces a number with no unit.
+
+    Compared pairwise rather than through a `set`: a `Scale` carries its level descriptions in
+    a dict and is therefore not hashable. The lists are one entry per case, so the cost is
+    nothing and the alternative would be a second representation to keep in sync.
+
+    Args:
+        scales: The scales to reduce — one per case of a run. Must not be empty; every caller
+            reaches it past a `min_length=1` field.
+
+    Returns:
+        The `Scale` they all agree on.
+
+    Raises:
+        ValueError: They do not agree. The message names every distinct scale found.
+
+    Example:
+        one_scale_of(result.scale for result in batch_result.case_results)
+    """
+    distinct: list[Scale] = []
+    for scale in scales:
+        if scale not in distinct:
+            distinct.append(scale)
+    if len(distinct) > 1:
+        raise ValueError(
+            "all cases of a run must be judged on one scale, got: "
+            + ", ".join(sorted(str(scale) for scale in distinct))
+            + reworded_grades_clause(distinct)
+        )
+    return distinct[0]
+
+
+def reworded_grades_clause(scales: list[Scale]) -> str:
+    """The clause that explains scales which print alike but are not the same scale.
+
+    `Scale.__str__` names the maximum and the threshold, so scales differing only in what they
+    told the judge a grade *means* all print identically — and a refusal reading "got: 0..2
+    (covered from 0.5), 0..2 (covered from 0.5)" names a contradiction instead of a cause. Both
+    refusals that hold scales against each other end with this, so a rewording is reported the
+    same way whether it shows up between the cases of one run or between two runs.
+
+    Args:
+        scales: The scales that were found to differ. Two or more; fewer cannot disagree.
+
+    Returns:
+        A clause to append to a message that has already named them, or "" when they print
+        differently and the message therefore already says what differs.
+
+    Example:
+        reworded_grades_clause([DEFAULT_SCALE, default_with_a_reworded_two])
+        # " — same grades, but the wording of [2] differs"
+    """
+    if len({str(scale) for scale in scales}) > 1:
+        return ""
+    described_grades = {grade for scale in scales for grade in scale.level_descriptions}
+    reworded_grades = sorted(
+        grade
+        for grade in described_grades
+        if len({scale.level_descriptions.get(grade) for scale in scales}) > 1
+    )
+    if not reworded_grades:
+        return ""
+    return f" — same grades, but the wording of {reworded_grades} differs"
+
+
+def scores_must_fit(criterion_results: list["CriterionResult"], scale: Scale) -> None:
+    """Refuse verdicts graded above what the scale can carry.
+
+    The one place that rule lives, because two paths need it and must not word it differently:
+    `metrics.case_score` divides by `scale.maximum` while a case is being built, and
+    `CaseResult` re-checks the same thing for a finished run read back from JSON. Caught early
+    on either path, an out-of-scale grade would otherwise surface as a case score above 1.0 —
+    a number that names neither the criterion nor the judge that produced it.
+
+    Args:
+        criterion_results: The verdicts of one case. Only `score` and `criterion_id` are read.
+        scale: The scale they were given on.
+
+    Raises:
+        ValueError: At least one verdict is above `scale.maximum`. The message names every
+            offending criterion at once and the scale they were held against.
+
+    Example:
+        scores_must_fit(case_result.criterion_results, case_result.scale)
+    """
+    if off_scale := [
+        verdict.criterion_id for verdict in criterion_results if verdict.score > scale.maximum
+    ]:
+        raise ValueError(
+            f"criteria {off_scale} scored above the scale {scale} they were judged on"
+        )
 
 
 class Criterion(DocumentedModel):
@@ -97,15 +312,17 @@ class CriterionResult(DocumentedModel):
     """Copy of `Criterion.weight`, so a result can be scored without the rubric at hand.
     Positive and finite, exactly as the rubric it was copied from."""
 
-    score: float = Field(ge=0, le=SCALE_MAX, allow_inf_nan=False)
-    """Judge score in [0, SCALE_MAX]: 2 fully covered, 1 partially, 0 not covered.
-    A float rather than an int, so averaging several runs of the same criterion cannot
-    change the type. Off the scale it is refused rather than folded into a case score
-    above 1.0 that nothing downstream could recognize as wrong."""
+    score: float = Field(ge=0, allow_inf_nan=False)
+    """The judge's **raw** grade, not normalized: on the bundled scale 2 is fully covered, 1
+    partially, 0 not covered. A float rather than an int, so averaging several runs of the
+    same criterion cannot change the type. Its upper bound is `CaseResult.scale.maximum` and
+    is checked there — a verdict on its own does not know which scale it was given on."""
 
     is_present: bool
-    """Whether the criterion counts as covered at all: `score >= PRESENCE_THRESHOLD`.
-    Derived here and never asked of the judge — one question less for it to get wrong."""
+    """Whether the criterion counts as covered at all: `score >= scale.presence_threshold`,
+    with the scale of the `CaseResult` this verdict belongs to. Never asked of the judge —
+    one question less for it to get wrong — and `CaseResult` refuses a verdict whose value
+    here contradicts its own score, so it cannot drift away from the number it describes."""
 
     spread: float = Field(default=0.0, ge=0, allow_inf_nan=False)
     """Standard deviation of `score` across repeated judge runs. Stays 0.0 while every
@@ -120,27 +337,32 @@ class CriterionResult(DocumentedModel):
 
     @classmethod
     def judged(
-        cls, criterion: Criterion, score: float, reasoning: str | None
+        cls, criterion: Criterion, score: float, reasoning: str | None, scale: Scale
     ) -> "CriterionResult":
         """Build the result of a criterion the judge answered for.
 
         Args:
             criterion: The criterion that was judged; its `id` and `weight` are copied over
                 so the result can be re-scored without the rubric at hand.
-            score: The judge's score, expected on the 0..SCALE_MAX scale. Not clamped here —
-                `parse_verdict` is what enforces the range.
+            score: The judge's score, expected on `scale`. A score above its maximum is
+                refused rather than clamped.
             reasoning: The judge's argument, or None when the caller does not keep it.
+            scale: The scale the judge works on — `judge.scale`, never a guess. Not stored
+                on the verdict (the `CaseResult` above it carries it once for the whole
+                case); it is what `is_present` is cut at here.
 
         Returns:
-            A `CriterionResult` with `failed=False` and `is_present` derived as
-            `score >= PRESENCE_THRESHOLD` — the judge is never asked for that separately,
-            which is one question less for it to get wrong.
+            A `CriterionResult` with `failed=False` and `is_present` set from `scale`.
+
+        Raises:
+            ValidationError: `score` is negative or not finite. Whether it fits the scale is
+                checked by the `CaseResult` it goes into, which is the object that knows.
         """
         return cls(
             criterion_id=criterion.id,
             weight=criterion.weight,
             score=score,
-            is_present=score >= PRESENCE_THRESHOLD,
+            is_present=score >= scale.presence_threshold,
             reasoning=reasoning,
         )
 
@@ -155,7 +377,9 @@ class CriterionResult(DocumentedModel):
         Returns:
             A `CriterionResult` with `failed=True` and `score=0.0` that **keeps its weight**
             and therefore stays in the denominator of `case_score`. An outage has to lower
-            the score visibly rather than silently shrink the rubric.
+            the score visibly rather than silently shrink the rubric. Never `is_present`,
+            on any scale: a presence threshold is always above 0, so a flat 0 is never
+            covered — which is why no scale has to be passed in here.
         """
         return cls(
             criterion_id=criterion.id,
@@ -227,6 +451,13 @@ class CaseResult(DocumentedModel):
     was fully covered. Bounded for the same reason the verdict scores under it are: this
     model is what `/compare` takes in, and every delta of a comparison subtracts it."""
 
+    scale: Scale = DEFAULT_SCALE
+    """The grading scale every verdict below was given on, copied off the judge once for the
+    whole case. Here rather than on each verdict because a case is judged by one judge on one
+    scale, and `evaluate_case` returns this document on its own — so this is the lowest level
+    that always exists. Defaulted, because a result that names no scale was written before
+    scales were configurable and was therefore judged on exactly this one."""
+
     criterion_results: list[CriterionResult] = Field(min_length=1)
     """One verdict per criterion of the case, in rubric order. At least one, because
     `Case.criteria` rejects an empty rubric and the metrics divide by this count. Ids have to
@@ -244,6 +475,29 @@ class CaseResult(DocumentedModel):
         if repeated := _duplicate_ids(verdict.criterion_id for verdict in criterion_results):
             raise ValueError(f"criterion ids must be unique, repeated: {repeated}")
         return criterion_results
+
+    @model_validator(mode="after")
+    def _reject_scores_off_the_scale(self) -> "CaseResult":
+        """A verdict has no upper bound of its own — this is the object that knows the scale.
+        The path a fresh case takes is guarded by `case_score`; this guards the other one, a
+        finished run read back from JSON and posted to `/compare`."""
+        scores_must_fit(self.criterion_results, self.scale)
+        return self
+
+    @model_validator(mode="after")
+    def _reject_presence_that_contradicts_the_score(self) -> "CaseResult":
+        """`is_present` is documented as `score >= scale.presence_threshold`, and a documented
+        invariant that is only described can be lied to: a stored run claiming a covered zero
+        would otherwise raise `criteria_fulfillment_rate` at `/compare` with nothing to catch
+        it. Refused rather than recomputed, because silently rewriting a caller's number would
+        hide whichever of the two is actually wrong."""
+        for verdict in self.criterion_results:
+            if verdict.is_present != (verdict.score >= self.scale.presence_threshold):
+                raise ValueError(
+                    f"criterion {verdict.criterion_id} scored {verdict.score} and claims "
+                    f"is_present={verdict.is_present}, which the scale {self.scale} does not"
+                )
+        return self
 
 
 class Batch(DocumentedModel):
@@ -301,11 +555,14 @@ class RunMetrics(DocumentedModel):
     """Square root of `variance`, in the same unit as the scores. Small means the system is
     uniformly good or bad; large means it depends heavily on the question."""
 
-    average_criterion_score: float = Field(ge=0, le=SCALE_MAX, allow_inf_nan=False)
-    """Mean judge score over *all* criteria of all cases, on the raw 0..SCALE_MAX scale and
-    unweighted. Unlike `average_score` it ignores both weights and case boundaries, so it
-    answers "how well does the judge rate an average statement" rather than "how good is the
-    average answer"."""
+    average_criterion_score: float = Field(ge=0, allow_inf_nan=False)
+    """Mean judge score over *all* criteria of all cases, on the **raw** scale of the run and
+    unweighted — 1.4 of 2, not 0.7. Reported raw because the raw grades are what it is
+    diagnosing; read it next to the run's `scale`. Unlike `average_score` it ignores both
+    weights and case boundaries, so it answers "how well does the judge rate an average
+    statement" rather than "how good is the average answer". Its upper bound is the run's
+    `scale.maximum` and is enforced by `BatchResult`, which is the first place that knows
+    the scale."""
 
     criteria_fulfillment_rate: float = Field(ge=0, le=1, allow_inf_nan=False)
     """Mean share of criteria counting as covered (`is_present`) per case, in [0, 1].
@@ -365,6 +622,39 @@ class BatchResult(DocumentedModel):
             raise ValueError(f"case ids must be unique, repeated: {repeated}")
         return case_results
 
+    @property
+    def scale(self) -> Scale:
+        """The scale this whole run was judged on.
+
+        Returns:
+            The one `Scale` shared by every case of the run — what `/compare` holds two runs
+            against before subtracting anything.
+
+        Raises:
+            ValueError: The cases name more than one scale.
+        """
+        return one_scale_of(result.scale for result in self.case_results)
+
+    @model_validator(mode="after")
+    def _reject_a_mix_of_scales(self) -> "BatchResult":
+        """Reading `scale` is the check, exactly as in `CaseResult` — a run whose cases were
+        graded in different units has no `average_criterion_score` to report."""
+        _ = self.scale
+        return self
+
+    @model_validator(mode="after")
+    def _reject_metrics_off_the_runs_scale(self) -> "BatchResult":
+        """`RunMetrics` cannot check this bound itself — it holds numbers, not verdicts, and
+        only here is the scale they were computed on in reach. Left unchecked, a stored run
+        could claim an average of 4 on a 0..2 scale and every delta computed from it at
+        `/compare` would inherit the lie."""
+        if self.metrics.average_criterion_score > self.scale.maximum:
+            raise ValueError(
+                f"average criterion score {self.metrics.average_criterion_score} is off the "
+                f"scale {self.scale} this run was judged on"
+            )
+        return self
+
 
 class ChangeStatus(StrEnum):
     """Which way one score moved between two runs — the vocabulary of every comparison."""
@@ -408,14 +698,15 @@ class CriterionComparisonResult(DocumentedModel):
     barely moves the case score."""
 
     baseline_score: float
-    """What the baseline run's judge gave this criterion, on the raw 0..SCALE_MAX scale."""
+    """What the baseline run's judge gave this criterion, on the run's raw scale."""
 
     candidate_score: float
     """What the candidate run's judge gave it, same scale."""
 
     score_delta: float
     """`candidate_score - baseline_score`, so a positive number always means the candidate
-    did better. On the raw 0..SCALE_MAX scale, hence in [-SCALE_MAX, SCALE_MAX]."""
+    did better. On the run's raw scale, hence in [-maximum, maximum] — both runs were judged
+    on the same one, because a comparison of two scales is refused."""
 
     status: ChangeStatus
     """`score_delta` as a verdict. Derived from the raw score, not from `is_present`: a
@@ -552,7 +843,7 @@ class RunMetricsDelta(DocumentedModel):
     — which is an improvement or a regression depending on which way the mean went."""
 
     average_criterion_score_delta: float
-    """Change in the unweighted mean judge score over all criteria, on the 0..SCALE_MAX
+    """Change in the unweighted mean judge score over all criteria, on the runs' shared raw
     scale. Moves independently of `average_score_delta`, because it ignores both weights and
     case boundaries."""
 

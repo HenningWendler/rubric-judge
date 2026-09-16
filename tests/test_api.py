@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 from conftest import BATCH, BATCH_VERDICTS, CASE, FakeJudge, run_of, use_judge
 
 from rubric_eval.api import app, get_judge
+from rubric_eval.models import DEFAULT_SCALE, Scale
 
 
 def test_health(client):
@@ -86,7 +87,8 @@ def test_the_result_carries_every_published_field(client):
 
     body = client.post("/evaluate", json=CASE).json()
 
-    assert set(body) == {"case_id", "score", "criterion_results"}
+    assert set(body) == {"case_id", "score", "scale", "criterion_results"}
+    assert body["scale"] == DEFAULT_SCALE.model_dump(mode="json")  # grades as JSON keys
     assert set(body["criterion_results"][0]) == {
         "criterion_id", "weight", "score", "is_present", "spread", "failed", "reasoning",
     }
@@ -128,7 +130,7 @@ def test_the_batch_result_carries_every_published_field(client):
         "average_criterion_score", "criteria_fulfillment_rate", "cases_with_score_zero",
         "cases_with_score_zero_count", "weakest_cases_above_zero", "failed_criteria_count",
     }
-    assert set(body["case_results"][0]) == {"case_id", "score", "criterion_results"}
+    assert set(body["case_results"][0]) == {"case_id", "score", "scale", "criterion_results"}
 
 
 def test_a_batch_entry_is_serialized_exactly_like_a_single_evaluation(client):
@@ -455,6 +457,60 @@ def test_incomparable_runs_are_rejected_with_the_reason(client):
 
     assert response.status_code == 422
     assert "cases only in the baseline: [2]" in response.json()["detail"]
+
+
+def test_runs_judged_on_different_scales_are_rejected_with_the_reason(client):
+    """A change of judge is not a change of system, and subtracting a 2-of-10 from a 2-of-2
+    would report one as the other."""
+    ten_point = Scale(maximum=10, presence_threshold=5)
+    response = client.post("/compare", json=_runs(run_of({1: 2}), run_of({1: 2}, scale=ten_point)))
+
+    assert response.status_code == 422
+    assert "different scales" in response.json()["detail"]
+
+
+def test_a_batch_judged_on_a_custom_scale_reports_its_raw_grades_and_a_normalized_score(client):
+    """The two grains the README promises: `criterion_results` in the judge's own units,
+    `score` and `average_score` normalized so they are comparable to any other run."""
+    ten_point = Scale(maximum=10, presence_threshold=5)
+    use_judge(FakeJudge({1: 8, 2: 3, 21: 10, 31: 0}, scale=ten_point))
+
+    body = client.post("/evaluate/batch", json=BATCH).json()
+
+    first_case = body["case_results"][0]
+    assert first_case["criterion_results"][0]["score"] == 8.0
+    assert first_case["scale"]["maximum"] == 10
+    assert first_case["score"] == pytest.approx(0.675)  # (3*8/10 + 1*3/10) / 4
+    assert body["metrics"]["average_criterion_score"] == pytest.approx(5.25)  # raw, 0..10
+
+
+def test_a_judge_grading_above_its_own_scale_is_a_bug_and_not_a_score(unconfigured_client):
+    """The one judge failure that is *not* contained: an outage costs one criterion, but a
+    verdict off the declared scale is a broken judge, and a broken judge must not come back
+    as a plausible 200 with a case score nobody can tell from a real one."""
+    use_judge(FakeJudge({1: 5, 2: 0}))
+
+    assert unconfigured_client.post("/evaluate", json=CASE).status_code == 500
+
+
+def test_a_described_custom_scale_reaches_the_caller_with_its_wording(client):
+    """A stored result has to keep saying what its grades meant, so the descriptions travel
+    with it — keyed by the grade, which JSON can only spell as a string."""
+    described = Scale(
+        maximum=3,
+        presence_threshold=2,
+        level_descriptions={grade: f"Level {grade}." for grade in range(4)},
+    )
+    use_judge(FakeJudge({1: 3, 2: 1}, scale=described))
+
+    body = client.post("/evaluate", json=CASE).json()
+
+    assert body["scale"]["level_descriptions"] == {
+        "0": "Level 0.", "1": "Level 1.", "2": "Level 2.", "3": "Level 3.",
+    }
+    assert body["criterion_results"][0]["is_present"] is True   # 3 >= 2
+    assert body["criterion_results"][1]["is_present"] is False  # 1 <  2
+    assert body["score"] == pytest.approx(0.8333333333333334)  # (3*3/3 + 1*1/3) / 4
 
 
 def test_compare_answers_even_when_the_judge_is_unconfigured(unconfigured_client):

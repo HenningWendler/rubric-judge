@@ -9,42 +9,55 @@ import statistics
 from operator import attrgetter
 
 from rubric_eval.models import (
-    SCALE_MAX,
     WEAKEST_CASES_REPORTED,
     CaseResult,
     CriterionResult,
     RunMetrics,
+    Scale,
+    one_scale_of,
+    scores_must_fit,
 )
 
 
-def case_score(results: list[CriterionResult]) -> float:
+def case_score(results: list[CriterionResult], scale: Scale) -> float:
     """The weighted share of the reachable points, normalized to [0, 1].
 
-        score = sum(wi * si / SCALE_MAX) / sum(wi)
+        score = sum(wi * si / scale.maximum) / sum(wi)
+
+    Dividing by the scale is what makes the result scale-free: half marks everywhere is 0.5
+    whether the judge counted in halves or in fifths. Two runs are therefore comparable at
+    case grain even though their raw grades are not — and that is the whole reason this
+    number is normalized rather than reported raw.
 
     Args:
         results: The verdicts of one case, failed ones included. Only `weight` and `score`
             are read, so results loaded back from a stored run score identically.
+        scale: The scale they were given on — `CaseResult.scale`, or `judge.scale` while the
+            case result is still being built. A verdict does not carry it: one case is judged
+            by one judge on one scale, so one copy per case is the honest place for it.
 
     Returns:
-        A float in [0, 1]. Exactly 1.0 when every criterion scored `SCALE_MAX`, and exactly
-        0.0 when none scored anything — callers do compare against those bounds.
+        A float in [0, 1]. Exactly 1.0 when every criterion reached `scale.maximum`, and
+        exactly 0.0 when none scored anything — callers do compare against those bounds.
         Only the *ratios* of the weights matter: 3 and 1 score like 30 and 10.
 
     Raises:
-        ValueError: The list is empty. An empty rubric has no meaningful score, and
-            returning 0.0 for it would be indistinguishable from a completely missed answer.
+        ValueError: The list is empty — an empty rubric has no meaningful score, and
+            returning 0.0 for it would be indistinguishable from a completely missed answer —
+            or a verdict is graded above `scale.maximum`, which no share of the reachable
+            points can be made of.
 
     Example:
         Weights 3, 2, 1 scored 2, 1, 0 reach 3.0 + 1.0 + 0.0 of 6 possible points:
 
-        case_score(results)   # 0.667
+        case_score(results, DEFAULT_SCALE)   # 0.667
     """
     if not results:
         raise ValueError("a case score needs at least one criterion")
+    scores_must_fit(results, scale)
     weights = _weights_scaled_to_at_most_one(results)
     reached_points = sum(
-        weight * result.score / SCALE_MAX for weight, result in zip(weights, results)
+        weight * result.score / scale.maximum for weight, result in zip(weights, results)
     )
     reachable_points = sum(weights)
     return reached_points / reachable_points
@@ -80,7 +93,11 @@ def run_metrics(results: list[CaseResult]) -> RunMetrics:
         average: above 0 the run was depressed by judge outages, not only by the answers).
 
     Raises:
-        ValueError: The list is empty. A run of no cases has no distribution to describe.
+        ValueError: The list is empty — a run of no cases has no distribution to describe —
+            or the cases were not all judged on the same scale, which would make
+            `average_criterion_score` an average of grades in different units. `BatchResult`
+            refuses such a run too, but this function is documented as callable on its own
+            and must not hand back a number nobody can interpret.
 
     Example:
         metrics = run_metrics([CaseResult(**row) for row in json.load(file)])
@@ -89,6 +106,7 @@ def run_metrics(results: list[CaseResult]) -> RunMetrics:
     """
     if not results:
         raise ValueError("run metrics need at least one case")
+    one_scale_of(result.scale for result in results)
     scores = [result.score for result in results]
     variance = _variance(scores)
     return RunMetrics(

@@ -6,7 +6,7 @@ import pytest
 
 from rubric_eval.metrics import case_score, run_metrics
 from rubric_eval.models import (
-    PRESENCE_THRESHOLD,
+    DEFAULT_SCALE,
     WEAKEST_CASES_REPORTED,
     CaseResult,
     Criterion,
@@ -21,21 +21,21 @@ def _result(weight: float, score: float) -> CriterionResult:
     """A verdict written as weight and score alone — the only two things the formulas read.
     The id is handed out fresh each call, because a `CaseResult` rejects a repeated one."""
     criterion = Criterion(id=next(_NEXT_CRITERION_ID), content="x", weight=weight)
-    return CriterionResult.judged(criterion, score, None)
+    return CriterionResult.judged(criterion, score, None, DEFAULT_SCALE)
 
 
 def test_weights_the_scores_and_normalizes_to_one():
     # (3*2/2 + 1*0/2) / 4
-    assert case_score([_result(3, 2), _result(1, 0)]) == pytest.approx(0.75)
+    assert case_score([_result(3, 2), _result(1, 0)], DEFAULT_SCALE) == pytest.approx(0.75)
 
 
 def test_a_partial_score_counts_half():
-    assert case_score([_result(1, 1)]) == pytest.approx(0.5)
+    assert case_score([_result(1, 1)], DEFAULT_SCALE) == pytest.approx(0.5)
 
 
 def test_an_unjudged_criterion_scores_zero_but_keeps_its_weight():
     unjudged = CriterionResult.unjudged(Criterion(id=2, content="x", weight=1), "judge down")
-    assert case_score([_result(1, 2), unjudged]) == pytest.approx(0.5)
+    assert case_score([_result(1, 2), unjudged], DEFAULT_SCALE) == pytest.approx(0.5)
 
 
 def test_presence_is_derived_from_the_score():
@@ -45,7 +45,7 @@ def test_presence_is_derived_from_the_score():
 
 def test_an_empty_rubric_is_a_clear_error_not_a_division_by_zero():
     with pytest.raises(ValueError, match="at least one criterion"):
-        case_score([])
+        case_score([], DEFAULT_SCALE)
 
 
 def test_all_criteria_failing_scores_zero_rather_than_erroring():
@@ -54,31 +54,32 @@ def test_all_criteria_failing_scores_zero_rather_than_erroring():
         CriterionResult.unjudged(Criterion(id=1, content="x", weight=3), "judge down"),
         CriterionResult.unjudged(Criterion(id=2, content="y", weight=1), "judge down"),
     ]
-    assert case_score(dead) == 0.0
+    assert case_score(dead, DEFAULT_SCALE) == 0.0
 
 
 def test_a_perfect_rubric_scores_exactly_one():
     """The upper bound is exact, not 0.9999… — callers compare against 1.0."""
-    assert case_score([_result(3, 2), _result(1, 2)]) == 1.0
+    assert case_score([_result(3, 2), _result(1, 2)], DEFAULT_SCALE) == 1.0
 
 
 def test_the_score_never_leaves_the_unit_interval():
     """Mixed weights and scores stay inside [0, 1], the range `CaseResult.score` promises."""
-    score = case_score([_result(0.001, 0), _result(1000, 1), _result(7, 2)])
+    score = case_score([_result(0.001, 0), _result(1000, 1), _result(7, 2)], DEFAULT_SCALE)
     assert 0.0 <= score <= 1.0
 
 
 def test_scaling_every_weight_leaves_the_score_unchanged():
     """`Criterion.weight` promises that only the ratios matter — 3 and 1 must score like
     3e307 and 1e307. Extreme weights are what expose an overflow in the intermediate sums."""
-    baseline = case_score([_result(3, 2), _result(1, 0)])
-    assert case_score([_result(3e307, 2), _result(1e307, 0)]) == pytest.approx(baseline)
+    baseline = case_score([_result(3, 2), _result(1, 0)], DEFAULT_SCALE)
+    extreme = case_score([_result(3e307, 2), _result(1e307, 0)], DEFAULT_SCALE)
+    assert extreme == pytest.approx(baseline)
 
 
 def test_huge_weights_do_not_overflow_the_weight_sum():
     """Two weights whose sum exceeds the float range must not silently become `nan`:
     a `nan` score is serialized as `null` and breaks the declared result schema."""
-    score = case_score([_result(1e308, 2), _result(1e308, 0)])
+    score = case_score([_result(1e308, 2), _result(1e308, 0)], DEFAULT_SCALE)
     assert score == pytest.approx(0.5)
 
 
@@ -86,8 +87,9 @@ def test_huge_weights_do_not_overflow_the_weight_sum():
 
 
 def _case(case_id: int, *verdicts: CriterionResult) -> CaseResult:
+    results = list(verdicts)
     return CaseResult(
-        case_id=case_id, score=case_score(list(verdicts)), criterion_results=list(verdicts)
+        case_id=case_id, score=case_score(results, DEFAULT_SCALE), criterion_results=results
     )
 
 
@@ -204,14 +206,15 @@ def test_a_run_loaded_back_from_stored_rows_is_aggregated_like_a_fresh_one():
 def test_the_readme_worked_example_scores_two_thirds():
     """Weights 3/2/1 scored 2/1/0 reach 3.0 + 1.0 + 0.0 of 6 points — the example the README
     and the `case_score` docstring both spell out, and the one a reader reproduces first."""
-    assert case_score([_result(3, 2), _result(2, 1), _result(1, 0)]) == pytest.approx(2 / 3)
+    readme_example = [_result(3, 2), _result(2, 1), _result(1, 0)]
+    assert case_score(readme_example, DEFAULT_SCALE) == pytest.approx(2 / 3)
 
 
 def test_presence_starts_exactly_at_the_threshold():
-    """`is_present` is documented as `score >= PRESENCE_THRESHOLD`, so the threshold itself
-    counts as present. A `>` would move the cut silently and only for averaged scores."""
-    assert _result(1, PRESENCE_THRESHOLD).is_present is True
-    assert _result(1, PRESENCE_THRESHOLD / 2).is_present is False
+    """`is_present` is documented as `score >= scale.presence_threshold`, so the threshold
+    itself counts as present. A `>` would move the cut silently and only for averaged scores."""
+    assert _result(1, DEFAULT_SCALE.presence_threshold).is_present is True
+    assert _result(1, DEFAULT_SCALE.presence_threshold / 2).is_present is False
 
 
 def test_the_standard_deviation_is_the_square_root_of_the_variance():

@@ -4,9 +4,10 @@ Pure computation over two `BatchResult` documents — no judge, no network, no c
 saved to disk months apart compare exactly like runs produced a second ago.
 
 One entry point, `compare_runs`, and one hard rule underneath it: two runs are comparable
-only if they cover the same cases with the same rubric and the same weights. Different
-weights make the case scores non-commensurable, and a delta between them would look like a
-result while meaning nothing.
+only if they were judged on the same scale and cover the same cases with the same rubric and
+the same weights. Different weights make the case scores non-commensurable, a different scale
+makes the raw criterion scores so, and a delta between either would look like a result while
+meaning nothing.
 """
 
 import statistics
@@ -23,6 +24,7 @@ from rubric_eval.models import (
     RunMetrics,
     RunMetricsDelta,
     RunPair,
+    reworded_grades_clause,
 )
 
 
@@ -48,9 +50,10 @@ def compare_runs(run_pair: RunPair) -> ComparisonResult:
 
     Args:
         run_pair: The `baseline` run to compare against and the `candidate` run under
-            test. Both must cover the same case ids, the same criterion ids per case and the
-            same weights — see Raises. Nothing else is required of them: results loaded back
-            from stored JSON compare exactly like results just computed.
+            test. Both must have been judged on the same scale and must cover the same case
+            ids, the same criterion ids per case and the same weights — see Raises. Nothing
+            else is required of them: results loaded back from stored JSON compare exactly
+            like results just computed.
 
     Returns:
         A `ComparisonResult`. `metrics_delta` says whether the run got better, `summary` how
@@ -61,10 +64,11 @@ def compare_runs(run_pair: RunPair) -> ComparisonResult:
         artefact of that.
 
     Raises:
-        RunsNotComparableError: A `ValueError`. The runs do not describe the same catalog.
-            The message names every difference found — cases present on only one side,
-            criteria that differ within a shared case, and weights that changed — rather
-            than only the first, so one fix can address all of them.
+        RunsNotComparableError: A `ValueError`. The runs do not describe the same catalog,
+            or were not judged on the same scale. The message names every difference found —
+            a differing scale, cases present on only one side, criteria that differ within a
+            shared case, and weights that changed — rather than only the first, so one fix
+            can address all of them.
 
     Example:
         result = compare_runs(RunPair(baseline=last_weeks_run, candidate=todays_run))
@@ -182,15 +186,29 @@ def _reject_incomparable_runs(baseline: BatchResult, candidate: BatchResult) -> 
 
 def _differences_between(baseline: BatchResult, candidate: BatchResult) -> list[str]:
     """Everything that stops these two runs from being compared, in reading order: first the
-    cases that are missing on one side, then the rubric changes inside the shared ones."""
+    scale, which invalidates everything under it, then the cases that are missing on one side,
+    then the rubric changes inside the shared ones."""
     baseline_by_id = _case_results_by_id(baseline)
     candidate_by_id = _case_results_by_id(candidate)
-    differences = _only_on_one_side("cases", set(baseline_by_id), set(candidate_by_id))
+    differences = _scale_differences(baseline, candidate)
+    differences += _only_on_one_side("cases", set(baseline_by_id), set(candidate_by_id))
     for case_id in sorted(set(baseline_by_id) & set(candidate_by_id)):
         differences += _rubric_differences(
             case_id, baseline_by_id[case_id], candidate_by_id[case_id]
         )
     return differences
+
+
+def _scale_differences(baseline: BatchResult, candidate: BatchResult) -> list[str]:
+    """Reported first, because it is the difference that makes every other number meaningless:
+    a 2 out of 2 and a 2 out of 10 are not the same verdict, so subtracting them would turn a
+    change of judge into a collapse of the system under test."""
+    if baseline.scale == candidate.scale:
+        return []
+    return [
+        f"the runs were judged on different scales: baseline {baseline.scale}, "
+        f"candidate {candidate.scale}{reworded_grades_clause([baseline.scale, candidate.scale])}"
+    ]
 
 
 def _only_on_one_side(subject: str, baseline_ids: set[int], candidate_ids: set[int]) -> list[str]:

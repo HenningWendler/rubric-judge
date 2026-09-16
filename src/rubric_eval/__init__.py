@@ -5,8 +5,7 @@ from rubric_eval.evaluation import evaluate_batch, evaluate_case
 from rubric_eval.judge import Judge, JudgeConfig, OpenAIJudge, Verdict
 from rubric_eval.metrics import case_score, run_metrics
 from rubric_eval.models import (
-    PRESENCE_THRESHOLD,
-    SCALE_MAX,
+    DEFAULT_SCALE,
     SCORE_EQUALITY_TOLERANCE,
     WEAKEST_CASES_REPORTED,
     Batch,
@@ -24,11 +23,12 @@ from rubric_eval.models import (
     RunMetrics,
     RunMetricsDelta,
     RunPair,
+    Scale,
 )
+from rubric_eval.prompt import judge_prompt
 
 __all__ = [
-    "PRESENCE_THRESHOLD",
-    "SCALE_MAX",
+    "DEFAULT_SCALE",
     "SCORE_EQUALITY_TOLERANCE",
     "WEAKEST_CASES_REPORTED",
     "Batch",
@@ -50,10 +50,12 @@ __all__ = [
     "RunMetricsDelta",
     "RunPair",
     "RunsNotComparableError",
+    "Scale",
     "Verdict",
     "case_score",
     "compare_runs",
     "evaluate_batch",
     "evaluate_case",
+    "judge_prompt",
     "run_metrics",
 ]
