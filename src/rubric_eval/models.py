@@ -9,9 +9,10 @@ import math
 from collections import Counter
 from collections.abc import Iterable
 from enum import StrEnum
-from typing import Annotated
+from typing import Annotated, TypeVar
 
 from pydantic import (
+    AfterValidator,
     BaseModel,
     ConfigDict,
     Field,
@@ -31,19 +32,45 @@ float noise two runs accumulate summing the same weights in a different order, a
 the smallest score difference a rubric can actually produce."""
 
 
-def _duplicate_ids(ids: Iterable[int]) -> list[int]:
-    """One check for the rubric and the batch: both match results back to their input by id,
-    so a repeat breaks both the same way. Empty when every id is unique, which is what lets
-    it read as a validator condition.
+Identifier = TypeVar("Identifier", int, str)
+"""The two kinds of identifier this package matches things back by: the integer ids of cases
+and criteria, and the string labels of a case."""
+
+
+def _duplicates(values: Iterable[Identifier]) -> list[Identifier]:
+    """One check for the rubric, the batch and the labels: each of them matches something back
+    by an identifier, so a repeat breaks all three the same way. Empty when every value is
+    unique, which is what lets it read as a validator condition.
     """
-    counted = Counter(ids)
-    return sorted(id_ for id_, count in counted.items() if count > 1)
+    counted = Counter(values)
+    return sorted(value for value, count in counted.items() if count > 1)
 
 
 LevelDescription = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 """What one grade of a `Scale` means, in plain language. Stripped and never blank: it is
 rendered into the judge's prompt, where a bare number with nothing after it would read as an
 instruction to guess."""
+
+Label = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
+"""One tag on a case — `"table"`, `"multi_page_expected"`. The vocabulary is yours and is
+never checked against a list: a library cannot know your catalog's taxonomy. Stripped and
+never blank, because a blank tag would open a bucket in the metrics that names nothing.
+
+Labels never reach the judge. They slice a run; they do not grade an answer. A property that
+should change the grade belongs in a `Criterion`, where it is checkable and weighted."""
+
+
+def _reject_duplicate_labels(labels: list[Label]) -> list[Label]:
+    """Labels are read as a set everywhere — bucketing, filtering, comparing two runs — so a
+    repeat is a caller mistake that no downstream code could ever act on."""
+    if repeated := _duplicates(labels):
+        raise ValueError(f"labels must be unique, repeated: {repeated}")
+    return labels
+
+
+Labels = Annotated[list[Label], AfterValidator(_reject_duplicate_labels)]
+"""A case's tags: stripped, never blank, no repeats. One type for the input and the echo, so
+`Case.labels` and `CaseResult.labels` cannot drift into two different rules."""
 
 
 class DocumentedModel(BaseModel):
@@ -268,6 +295,67 @@ def scores_must_fit(criterion_results: list["CriterionResult"], scale: Scale) ->
         )
 
 
+def carries_every_label(case_labels: list[str], required_labels: list[str]) -> bool:
+    """Whether one case carries **all** of the required labels.
+
+    The one place the label-matching rule lives, because three callers depend on it meaning
+    the same thing: `filter_cases_by_labels` selects with it, `metrics.label_metrics` buckets
+    with it, and `every_case_must_carry` validates with it. That is what makes "the run
+    filtered to `table`" and "the `table` bucket of the full run" the same cases — split over
+    three modules, one of them would eventually drift to "any".
+
+    Args:
+        case_labels: The labels the case carries. Order and repeats are irrelevant.
+        required_labels: The labels being asked for — all of them, not any. Empty asks
+            nothing, so every case matches, which is what "no filter" means.
+
+    Returns:
+        True when `case_labels` covers `required_labels`.
+
+    Example:
+        carries_every_label(["table", "images"], ["table"])   # True — subset, not equality
+        carries_every_label(["table"], ["table", "images"])   # False
+    """
+    return set(required_labels) <= set(case_labels)
+
+
+def every_case_must_carry(label_filter: list[str], labels_by_case_id: dict[int, list[str]]) -> None:
+    """Refuse a label filter that does not describe the cases it is attached to.
+
+    `label_filter` claims "these cases are the ones carrying these labels". The claim is
+    checkable in one line, so it is checked rather than believed — the same stance
+    `CaseResult` takes on a verdict whose `is_present` contradicts its own score. Left
+    unchecked, a stored run could be labelled the `table` subset while holding the whole
+    catalog, and every number read off it later would answer a different question than its
+    name promises.
+
+    The one place the rule lives, because two models make the same claim: `Batch` about the
+    cases it is about to run, and `BatchResult` about the results it came back with.
+
+    Args:
+        label_filter: The labels the cases were selected by. An empty filter claims nothing
+            and is always accepted — it is what an unfiltered run carries.
+        labels_by_case_id: The labels of every case, keyed by case id. Keyed rather than
+            listed so the message can name the offenders.
+
+    Raises:
+        ValueError: At least one case does not carry every label of the filter. The message
+            names all of them at once, so one fix can address the whole mismatch.
+
+    Example:
+        every_case_must_carry(["table"], {case.id: case.labels for case in cases})
+    """
+    if missing := sorted(
+        case_id
+        for case_id, case_labels in labels_by_case_id.items()
+        if not carries_every_label(case_labels, label_filter)
+    ):
+        raise ValueError(
+            f"label_filter {sorted(set(label_filter))} does not describe this run: "
+            f"cases {missing} do not carry all of those labels"
+        )
+
+
 class Criterion(DocumentedModel):
     """One statement a good answer has to contain — the atom of a rubric.
 
@@ -400,7 +488,8 @@ class Case(DocumentedModel):
 
     Example:
         Case(id=1, question="How do I report sick leave?", answer="Email hr@...",
-             criteria=[Criterion(id=1, content="Report by email before 10:00", weight=3)])
+             criteria=[Criterion(id=1, content="Report by email before 10:00", weight=3)],
+             labels=["one_page_expected"])
     """
 
     id: int
@@ -418,12 +507,19 @@ class Case(DocumentedModel):
     """The rubric: at least one criterion, because an empty rubric has no meaningful score.
     Ids have to be unique — they are what results are matched by."""
 
+    labels: Labels = Field(default_factory=list)
+    """What kind of case this is — `["table", "multi_page_expected"]`. Free-form tags in your
+    own vocabulary, used to slice a run: `BatchResult.label_metrics` reports a full set of
+    numbers per label, and `filter_cases_by_labels` selects by them. Optional, because an
+    untagged catalog is still a catalog. Never shown to the judge, so adding a label cannot
+    move a single score — a requirement the answer has to meet belongs in `criteria`."""
+
     @field_validator("criteria")
     @classmethod
     def _reject_duplicate_criterion_ids(cls, criteria: list[Criterion]) -> list[Criterion]:
         """Every verdict is labelled with its `Criterion.id`, so a repeated id makes results
         ambiguous: a caller keying by id would drop one verdict or count another twice."""
-        if repeated := _duplicate_ids(criterion.id for criterion in criteria):
+        if repeated := _duplicates(criterion.id for criterion in criteria):
             raise ValueError(f"criterion ids must be unique, repeated: {repeated}")
         return criteria
 
@@ -464,6 +560,12 @@ class CaseResult(DocumentedModel):
     be unique, exactly as in the rubric this came from. Named for what it holds: `criteria`
     would promise `Criterion` objects and deliver verdicts."""
 
+    labels: Labels = Field(default_factory=list)
+    """The `Case.labels` this result came from, copied over so a stored run can still be sliced
+    by label months later without the catalog at hand. Defaulted, because a result that names
+    none was either written before labels existed or came from an untagged case — both simply
+    belong to no bucket."""
+
     @field_validator("criterion_results")
     @classmethod
     def _reject_duplicate_criterion_ids(
@@ -472,7 +574,7 @@ class CaseResult(DocumentedModel):
         """`Case.criteria` already rejects repeated ids, so `evaluate_case` can never produce
         them — but a stored result is postable to `/compare`, which keys verdicts by id to
         pair the two runs up and would silently drop one of a repeated pair."""
-        if repeated := _duplicate_ids(verdict.criterion_id for verdict in criterion_results):
+        if repeated := _duplicates(verdict.criterion_id for verdict in criterion_results):
             raise ValueError(f"criterion ids must be unique, repeated: {repeated}")
         return criterion_results
 
@@ -515,14 +617,27 @@ class Batch(DocumentedModel):
     """The catalog: at least one case, because an empty run has no meaningful metrics.
     Ids have to be unique — they are what results are matched by."""
 
+    label_filter: Labels = Field(default_factory=list)
+    """The labels these cases were selected by, recorded so the finished run says what subset
+    it is. Empty for an unfiltered run, which is the normal case. Not itself a filter — it
+    describes a selection already made, with `filter_cases_by_labels` or by hand — and every
+    case listed above must carry every label named here, or the batch is refused."""
+
     @field_validator("cases")
     @classmethod
     def _reject_duplicate_case_ids(cls, cases: list[Case]) -> list[Case]:
         """Same reason as for criterion ids: a repeated id makes the run metrics ambiguous,
         because `cases_with_score_zero` and the weakest-case shortlist name cases by id."""
-        if repeated := _duplicate_ids(case.id for case in cases):
+        if repeated := _duplicates(case.id for case in cases):
             raise ValueError(f"case ids must be unique, repeated: {repeated}")
         return cases
+
+    @model_validator(mode="after")
+    def _reject_a_filter_that_does_not_describe_the_cases(self) -> "Batch":
+        """Caught here rather than at the end of the run, because the alternative is paying for
+        a whole catalog of judge calls before being told the label was a typo."""
+        every_case_must_carry(self.label_filter, {case.id: case.labels for case in self.cases})
+        return self
 
 
 class RunMetrics(DocumentedModel):
@@ -590,18 +705,59 @@ class RunMetrics(DocumentedModel):
         return len(self.cases_with_score_zero)
 
 
+class LabelMetrics(DocumentedModel):
+    """One label's slice of a run: the same `RunMetrics`, computed over only the cases
+    carrying that label.
+
+    Composed rather than flattened on purpose. A twin that redeclared every `RunMetrics` field
+    would have to be edited in step with it forever, and the half that got forgotten would go
+    on serializing a stale number under a familiar name.
+
+    A case counts in every bucket it carries a label for, so the buckets overlap and their
+    case counts add up to more than the run. That is the question a bucket answers: "how do
+    cases involving tables do", not "how do cases that are *only* tables do".
+
+    Example:
+        bucket.label                   # "agentic_search"
+        bucket.metrics.average_score   # 0.013 — next to a run average of 0.536
+        bucket.metrics.total_cases     # 7
+    """
+
+    label: str
+    """The `Case.labels` entry this slice is about."""
+
+    metrics: RunMetrics
+    """The run metrics over the cases carrying `label`, and nothing else. Every field means
+    exactly what it means on the run as a whole — including `total_cases`, which is how many
+    cases carry this label."""
+
+
 class BatchResult(DocumentedModel):
     """What `evaluate_batch` returns: the aggregate plus every single case result it was
     computed from, so a suspicious number can always be traced back to its cases.
 
     Example:
-        run.metrics.average_score           # 0.5
-        run.metrics.cases_with_score_zero   # [2]  — the answers to read first
-        run.case_results[0]                 # the CaseResult for case 1, in full
+        run.metrics.average_score              # 0.5
+        run.metrics.cases_with_score_zero      # [2]  — the answers to read first
+        run.label_metrics[0].label             # "table"
+        run.label_metrics[0].metrics.average_score   # 0.25 — where the run really hurts
+        run.case_results[0]                    # the CaseResult for case 1, in full
     """
 
     metrics: RunMetrics
     """The aggregate over all cases of this run."""
+
+    label_metrics: list[LabelMetrics] = Field(default_factory=list)
+    """The same aggregate once per label, in alphabetical label order — the breakdown that
+    says *which kind* of case a bad average is made of. One entry per label occurring anywhere
+    in `case_results` and no others, so a run of untagged cases carries none. See
+    `metrics.label_metrics`, which computes this and can be called on stored results too."""
+
+    label_filter: Labels = Field(default_factory=list)
+    """The labels this run's cases were selected by, carried over from `Batch.label_filter` so
+    a stored run still says what subset it is. Empty for an unfiltered run. Every case result
+    must carry every label named here, exactly as on the way in — a run cannot claim to be the
+    `table` subset while holding the whole catalog."""
 
     case_results: list[CaseResult] = Field(min_length=1)
     """One result per case of the batch, in request order. Each one is exactly what
@@ -618,7 +774,7 @@ class BatchResult(DocumentedModel):
         them — but a stored run is postable to `/compare`, which keys cases by id to pair the
         two runs up. A repeated id would silently drop a case there and report deltas over
         fewer cases than `metrics` describes, with a 200."""
-        if repeated := _duplicate_ids(result.case_id for result in case_results):
+        if repeated := _duplicates(result.case_id for result in case_results):
             raise ValueError(f"case ids must be unique, repeated: {repeated}")
         return case_results
 
@@ -652,6 +808,31 @@ class BatchResult(DocumentedModel):
             raise ValueError(
                 f"average criterion score {self.metrics.average_criterion_score} is off the "
                 f"scale {self.scale} this run was judged on"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _reject_a_filter_that_does_not_describe_the_run(self) -> "BatchResult":
+        """The same claim `Batch` makes on the way in, re-checked for a run read back from
+        JSON — which is the path where it can have been edited since."""
+        every_case_must_carry(
+            self.label_filter, {result.case_id: result.labels for result in self.case_results}
+        )
+        return self
+
+    @model_validator(mode="after")
+    def _reject_label_metrics_that_do_not_match_the_cases(self) -> "BatchResult":
+        """Which labels have a bucket is checkable in a set comparison; whether each bucket's
+        numbers are right is not, short of recomputing the whole run. So the structural lie is
+        refused — a bucket for a label no case carries, or a labelled run with no breakdown at
+        all — and `/compare`, which pairs the two runs' buckets by label, can rely on the
+        breakdown covering exactly the labels that are there."""
+        described = {bucket.label for bucket in self.label_metrics}
+        present = {label for result in self.case_results for label in result.labels}
+        if described != present:
+            raise ValueError(
+                f"label_metrics describes {sorted(described)} but the cases carry "
+                f"{sorted(present)}"
             )
         return self
 
@@ -860,6 +1041,27 @@ class RunMetricsDelta(DocumentedModel):
     number above is then partly an artefact of that rather than of the answers."""
 
 
+class LabelMetricsDelta(DocumentedModel):
+    """One label's slice of a comparison: `RunMetricsDelta` over only the cases carrying it.
+
+    The mirror of `LabelMetrics`, and composed for the same reason. This is what answers "my
+    average went up — but did I fix `agentic_search` or break `table`?"
+
+    Example:
+        bucket.label                              # "agentic_search"
+        bucket.metrics_delta.average_score_delta  # +0.21
+    """
+
+    label: str
+    """The label this slice is about. Present on both runs — a case whose labels changed
+    between them makes the comparison incomparable and is refused before this is computed."""
+
+    metrics_delta: RunMetricsDelta
+    """Candidate minus baseline over the cases carrying `label`. Every field points the same
+    way it does on the run as a whole: positive means the candidate scored higher, except for
+    the two counting fields."""
+
+
 class ChangeMagnitude(DocumentedModel):
     """How large the moves on one side of a comparison were — improvements or regressions.
 
@@ -981,11 +1183,13 @@ class ComparisonResult(DocumentedModel):
     """What `compare_runs` returns: the same comparison at three grains.
 
     `metrics_delta` says whether the run got better, `summary` says how that is distributed
-    over the cases, and `case_comparison_results` says which criterion is responsible. A
-    number at any grain can always be traced down to the one below it.
+    over the cases, `label_metrics_deltas` says which *kind* of case moved, and
+    `case_comparison_results` says which criterion is responsible. A number at any grain can
+    always be traced down to the one below it.
 
     Example:
         result.metrics_delta.average_score_delta   # +0.084
+        result.label_metrics_deltas[0].label       # "agentic_search"
         result.summary.worsened_case_ids           # [5] — what the win cost
         result.case_comparison_results[0].criterion_comparison_results[1].score_delta  # -2.0
     """
@@ -995,6 +1199,11 @@ class ComparisonResult(DocumentedModel):
 
     summary: ChangeSummary
     """How the movement is distributed over the cases: who won, who lost, by how much."""
+
+    label_metrics_deltas: list[LabelMetricsDelta] = Field(default_factory=list)
+    """`metrics_delta` once per label, in alphabetical label order — which *kind* of case
+    moved. Empty when neither run carries labels. Both runs always cover the same labels here:
+    a case whose labels differ between the two makes them incomparable."""
 
     case_comparison_results: list[CaseComparisonResult] = Field(min_length=1)
     """One entry per case, ordered by `case_id`. At least one, because both compared runs

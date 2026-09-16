@@ -1,4 +1,5 @@
-"""Scoring: one case folded into one number, and a whole run folded into its metrics.
+"""Scoring: one case folded into one number, a whole run folded into its metrics, and that
+run sliced once per label.
 
 Failed criteria count as 0 and stay in the denominator — a judge outage must lower the
 score visibly, not silently shrink the rubric.
@@ -12,8 +13,10 @@ from rubric_eval.models import (
     WEAKEST_CASES_REPORTED,
     CaseResult,
     CriterionResult,
+    LabelMetrics,
     RunMetrics,
     Scale,
+    carries_every_label,
     one_scale_of,
     scores_must_fit,
 )
@@ -121,6 +124,60 @@ def run_metrics(results: list[CaseResult]) -> RunMetrics:
         weakest_cases_above_zero=_weakest_case_ids_above_zero(results),
         failed_criteria_count=_failed_criteria_count(results),
     )
+
+
+def label_metrics(results: list[CaseResult]) -> list[LabelMetrics]:
+    """Slice a run once per label: the same metrics over only the cases carrying each one.
+
+    The breakdown that says *which kind* of case a bad average is made of — a run averaging
+    0.54 whose `agentic_search` bucket averages 0.013 has one problem, not a general one.
+
+    A case counts in every bucket it carries a label for, so the buckets overlap and their
+    case counts add up to more than the run. Cases with no labels land in no bucket at all;
+    they are in the run-wide `run_metrics` and nowhere else.
+
+    Public for the same reason `run_metrics` is: `evaluate_batch` calls it, but so can you,
+    on case results loaded back from a stored run — including one saved before you started
+    labelling, once you have added the labels to its results.
+
+    Args:
+        results: The case results of one run, in any order. Only `labels` decides which
+            bucket a case lands in; everything else is handed to `run_metrics` unchanged.
+
+    Returns:
+        One `LabelMetrics` per label occurring anywhere in `results`, in alphabetical label
+        order so the document does not depend on the run's storage order. Empty when no case
+        carries a label — which is the honest answer, not a missing breakdown.
+
+    Raises:
+        ValueError: The cases were not all judged on the same scale, raised by `run_metrics`
+            for the first bucket that mixes two. No bucket can be empty, so the "no cases"
+            refusal of `run_metrics` is unreachable from here.
+
+    Example:
+        buckets = label_metrics(run.case_results)
+        buckets[0].label                   # "agentic_search"
+        buckets[0].metrics.average_score   # 0.013
+    """
+    return [
+        LabelMetrics(label=label, metrics=run_metrics(_cases_carrying(label, results)))
+        for label in _labels_present_in(results)
+    ]
+
+
+def _labels_present_in(results: list[CaseResult]) -> list[str]:
+    """Which buckets there are to build, alphabetically — a set so a label shared by forty
+    cases opens one bucket, sorted so the breakdown reads the same whatever order the run was
+    stored in."""
+    return sorted({label for result in results for label in result.labels})
+
+
+def _cases_carrying(label: str, results: list[CaseResult]) -> list[CaseResult]:
+    """One bucket's cases. "Carries this label", never "is exactly this label": the question a
+    bucket answers is how the cases *involving* tables do, and a case tagged both `table` and
+    `images` is one of them. Through the same predicate `filter_cases_by_labels` uses, so
+    a bucket and the filter of the same name can never select different cases."""
+    return [result for result in results if carries_every_label(result.labels, [label])]
 
 
 def _variance(scores: list[float]) -> float:

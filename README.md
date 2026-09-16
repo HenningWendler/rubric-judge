@@ -142,6 +142,57 @@ that case on its own — the batch is a fan-out over it plus the aggregate, noth
 Every result is a Pydantic model, so `result.model_dump()` and `result.model_dump_json()`
 give you plain data to write to disk.
 
+### Slicing a run by label
+
+Tag your cases and the same set of numbers comes back once per label. That is what tells a
+system that is *generally* mediocre apart from one that is fine except on one kind of
+question:
+
+```python
+catalog = [
+    Case(id=1, question="How do I report sick leave?", answer="Email hr@example.com.",
+         criteria=[Criterion(id=1, content="Report by email before 10:00", weight=3)],
+         labels=["one_page_expected"]),
+    Case(id=2, question="What is the parental leave allowance?", answer="Ask your team lead.",
+         criteria=[Criterion(id=2, content="Quote the rate from the benefits table", weight=1)],
+         labels=["table", "one_page_expected"]),
+    Case(id=3, question="Which office has a parking garage?", answer="Nobody really knows.",
+         criteria=[Criterion(id=3, content="Name the Berlin office", weight=1)],
+         labels=["table"]),
+]
+
+run = await evaluate_batch(judge, Batch(cases=catalog))
+
+run.metrics.average_score                    # 0.3333333333333333 — mediocre, but why?
+{b.label: b.metrics.average_score for b in run.label_metrics}
+# {'one_page_expected': 0.5, 'table': 0.0}   — every table question failed
+```
+
+A label is yours to invent: any non-blank string, no vocabulary to register. A case may carry
+several, and it counts in **every** bucket it carries a label for — case 2 above is in both,
+which is why the two buckets hold two cases each over a run of three.
+
+Labels never reach the judge. They slice a run; they do not grade an answer. A requirement the
+answer actually has to meet belongs in `criteria`, where it is checkable and weighted —
+adding a label cannot move a single score.
+
+**Running only part of the catalog** — `filter_cases_by_labels` selects the cases carrying
+*all* of the labels you name, and `label_filter` records what you selected by, so the finished
+run says which subset it is:
+
+```python
+from rubric_eval import filter_cases_by_labels
+
+table_cases = filter_cases_by_labels(catalog, ["table"])        # cases 2 and 3
+run = await evaluate_batch(judge, Batch(cases=table_cases, label_filter=["table"]))
+
+run.label_filter          # ['table']
+```
+
+`label_filter` is a claim about the cases, not a filter of its own: every case in the batch
+must carry every label named there, or the `Batch` is rejected. Passing it without filtering
+first is an error, not a shortcut.
+
 ### Comparing two runs
 
 Two `BatchResult`s of the **same catalog** → one `ComparisonResult`: did your change help,
@@ -255,6 +306,7 @@ Criterion(id=2, content="Email HR before 10:00 and inform your team", weight=3) 
 | `question` | `str` | yes | Context for the judge only — it is **never scored**. May be empty |
 | `answer` | `str` | yes | The answer under test, judged exactly as it comes in. May be empty: a system that returned nothing is a valid case that scores `0` |
 | `criteria` | `list[Criterion]` | yes | At least one. Criterion ids must be unique |
+| `labels` | `list[str]` | no, default `[]` | What kind of case this is — `["table", "images"]`. Your own vocabulary, never checked against a list. Each stripped and non-empty; no duplicates within one case. **Never shown to the judge** |
 
 `id` is mandatory even for a single evaluation. That is what makes one result type serve
 both paths — see [the vocabulary](#the-vocabulary).
@@ -264,13 +316,18 @@ both paths — see [the vocabulary](#the-vocabulary).
 | Field | Type | Required | Rules |
 |---|---|---|---|
 | `cases` | `list[Case]` | yes | At least one. Case ids must be unique |
+| `label_filter` | `list[str]` | no, default `[]` | The labels these cases were selected by, recorded so the finished run says which subset it is. **Not itself a filter** — every case above must carry every label named here, or the batch is rejected |
+
+`label_filter` records a selection you already made; `filter_cases_by_labels()` is what makes
+one. Keeping them apart is what lets the claim be *checked*: a batch that calls itself the
+`table` subset while holding an untagged case is refused rather than believed.
 
 #### `RunPair` — two finished runs to hold against each other
 
 | Field | Type | Required | Rules |
 |---|---|---|---|
 | `baseline` | `BatchResult` | yes | The run compared *against* — the state of things before your change |
-| `candidate` | `BatchResult` | yes | The run *under test*. Must have been judged on the same `scale` and must cover the same case ids, the same criterion ids per case and the same weights as `baseline` |
+| `candidate` | `BatchResult` | yes | The run *under test*. Must have been judged on the same `scale` and must cover the same case ids, the same criterion ids per case, the same weights and the same labels per case as `baseline` |
 
 A named pair rather than two arguments: both sides have the same type, so a swap would be
 impossible to detect and would invert the sign of every number in the result.
@@ -312,6 +369,7 @@ the one a stored result is read on when it names none.
 | `score` | `float` | `0.0 … 1.0` | The weighted case score, see [How scoring works](#how-scoring-works). `1.0` means every criterion fully covered |
 | `scale` | `Scale` | — | What the grades below mean. Stored **once per case**, not per verdict: one case is judged by one judge on one scale, and `POST /evaluate` returns this document on its own, so this is the lowest level that always exists. Defaults to `DEFAULT_SCALE` when a stored result names none |
 | `criterion_results` | `list[CriterionResult]` | ≥ 1 entry | One verdict per criterion, **in rubric order**, so it can be zipped with `Case.criteria`. Never empty — a rubric has at least one criterion, so a result has at least one verdict. Criterion ids must be unique: verdicts are paired by id when two runs are compared |
+| `labels` | `list[str]` | — | The `Case.labels` this result came from, copied over so a stored run can still be sliced without the catalog at hand. `[]` for an untagged case, and for a result written before labels existed |
 
 > Named `criterion_results`, not `criteria`: the list holds *verdicts*, one per criterion —
 > `Case.criteria` is the rubric, and one name must not mean two things.
@@ -339,11 +397,29 @@ twenty criteria would outvote nineteen cases with one.
 | `weakest_cases_above_zero` | `list[int]` | ≤ 5 entries | The weakest cases that still scored *something*, weakest first. Kept apart from the zeros because a total miss and a partial answer usually have different causes |
 | `failed_criteria_count` | `int` | `>= 0` | Criteria the judge never answered for. **Read this before the average**: anything above `0` means the run is depressed by outages, not only by the answers |
 
+#### `LabelMetrics` — one label's slice of a run
+
+| Field | Type | Range | Meaning |
+|---|---|---|---|
+| `label` | `str` | — | The `Case.labels` entry this slice is about |
+| `metrics` | `RunMetrics` | — | The table above, computed over **only** the cases carrying `label`. Every field means exactly what it means for the whole run, `total_cases` included — there it is how many cases carry this label |
+
+A case counts in **every** bucket it carries a label for, so the buckets overlap and their
+case counts add up to more than the run. That is the question a bucket answers: *how do cases
+involving tables do*, not *how do cases that are only tables do*. Cases with no labels are in
+the run-wide `metrics` and in no bucket at all.
+
+Composed rather than flattened: a twin that redeclared every `RunMetrics` field would have to
+be edited in step with it forever, and the half that got forgotten would go on serializing a
+stale number under a familiar name.
+
 #### `BatchResult` — one whole run
 
 | Field | Type | Meaning |
 |---|---|---|
 | `metrics` | `RunMetrics` | The aggregate over every case of the run |
+| `label_metrics` | `list[LabelMetrics]` | The same aggregate once per label, **in alphabetical label order**. One entry per label occurring anywhere in `case_results` and no others — `[]` for a run of untagged cases |
+| `label_filter` | `list[str]` | Echoed from `Batch.label_filter`, so a stored run still says which subset it is. `[]` for an unfiltered run. Every case result must carry every label named here |
 | `case_results` | `list[CaseResult]` | ≥ 1 entry. One per case, in request order — so any suspicious number can be traced back. Never empty: `run_metrics` refuses a run of no cases, so such a run was never producible. Case ids must be unique: cases are paired by id when two runs are compared |
 
 #### `ChangeStatus` — which way a score moved
@@ -404,6 +480,16 @@ the movement of cases instead.
 | `cases_with_score_zero_count_delta` | `int` | Change in how many answers missed completely. **Negative is the good direction here** |
 | `failed_criteria_count_delta` | `int` | Change in judge outages. **Read this first**: anything but `0` and every other number above is partly an artefact of the outage rather than of the answers |
 
+#### `LabelMetricsDelta` — one label's slice of a comparison
+
+| Field | Type | Meaning |
+|---|---|---|
+| `label` | `str` | The label this slice is about. Always present on both runs — a case whose labels changed between them makes the comparison incomparable |
+| `metrics_delta` | `RunMetricsDelta` | The table above, over only the cases carrying `label`. Signs point the same way they do for the whole run |
+
+The mirror of `LabelMetrics`, and what answers *"my average went up — but did I fix
+`agentic_search` or break `table`?"*
+
 #### `ChangeMagnitude` — how large the moves on one side were
 
 | Field | Type | Meaning |
@@ -441,6 +527,7 @@ says whether every case rose a little or one rose a lot while another collapsed.
 |---|---|---|
 | `metrics_delta` | `RunMetricsDelta` | Whether the run got better |
 | `summary` | `ChangeSummary` | How that is distributed over the cases |
+| `label_metrics_deltas` | `list[LabelMetricsDelta]` | Which *kind* of case moved, **in alphabetical label order**. `[]` when neither run carries labels |
 | `case_comparison_results` | `list[CaseComparisonResult]` | Which criterion is responsible. **Ordered by `case_id`** — both runs cover the same cases, so neither one's storage order is canonical |
 
 ### Functions
@@ -454,8 +541,17 @@ Judges one case. Fans out over the criteria concurrently, contains judge failure
 ```python
 async def evaluate_batch(judge: Judge, batch: Batch) -> BatchResult
 ```
-Judges every case concurrently and adds `RunMetrics`. A fan-out over `evaluate_case` and
-nothing else, so the two paths cannot drift apart.
+Judges every case concurrently and adds `RunMetrics`, plus one `LabelMetrics` per label the
+cases carry. A fan-out over `evaluate_case` and nothing else, so the two paths cannot drift
+apart. It does not select cases — hand it the batch you want.
+
+```python
+def filter_cases_by_labels(cases: list[Case], labels: list[str]) -> list[Case]
+```
+The cases carrying **all** of `labels` — the same rule the buckets use, so "the run filtered
+to `table`" and "the `table` bucket of the full run" are the same cases. An empty `labels`
+selects everything. No match is an empty list, never an exception: it is a filter and it
+composes. `Batch` is what refuses to *run* an empty selection.
 
 ```python
 def run_metrics(results: list[CaseResult]) -> RunMetrics
@@ -464,6 +560,13 @@ The aggregate on its own — use it when you already have case results (loaded f
 say) and only want the numbers. Raises `ValueError` on an empty list, or on cases judged on
 different scales: `average_criterion_score` averages raw grades, and grades in two units do
 not average.
+
+```python
+def label_metrics(results: list[CaseResult]) -> list[LabelMetrics]
+```
+The per-label breakdown on its own, alphabetical. Public for the same reason `run_metrics`
+is: a run read back from disk months later can still be sliced. `[]` when no case carries a
+label.
 
 ```python
 def case_score(results: list[CriterionResult], scale: Scale) -> float
@@ -481,9 +584,10 @@ appended verbatim. Raises `ValueError` for a scale with no `level_descriptions`.
 ```python
 def compare_runs(run_pair: RunPair) -> ComparisonResult
 ```
-Holds two finished runs against each other at three grains — run, case, criterion. Pure
-computation: no judge, no network, no cost. Raises `RunsNotComparableError` — a `ValueError`
-— naming **every** difference at once when the runs do not describe the same catalog.
+Holds two finished runs against each other at three grains — run, case, criterion — plus
+one delta per label. Pure computation: no judge, no network, no cost. Raises
+`RunsNotComparableError` — a `ValueError` — naming **every** difference at once when the runs
+do not describe the same catalog.
 
 ```python
 class OpenAIJudge:
@@ -523,6 +627,7 @@ different order, far below the smallest difference a rubric can actually produce
 |---|---|---|---|
 | `POST` | `/evaluate` | a `Case` | a `CaseResult` |
 | `POST` | `/evaluate/batch` | a `Batch` | a `BatchResult` |
+| `POST` | `/evaluate/batch?labels=…` | a `Batch` | a `BatchResult` over the matching cases only |
 | `POST` | `/compare` | a `RunPair` | a `ComparisonResult` |
 | `GET` | `/health` | — | `{"status": "ok"}` |
 
@@ -532,9 +637,11 @@ The JSON shapes are exactly the models above. `POST /evaluate/batch`:
 {
   "cases": [
     { "id": 1, "question": "How do I report sick leave?", "answer": "Send an email …",
-      "criteria": [ { "id": 1, "content": "Report by email before 10:00", "weight": 3 } ] },
+      "criteria": [ { "id": 1, "content": "Report by email before 10:00", "weight": 3 } ],
+      "labels": ["table"] },
     { "id": 2, "question": "How do I request vacation?", "answer": "Ask your team lead.",
-      "criteria": [ { "id": 1, "content": "Submit the request in the HR tool", "weight": 1 } ] }
+      "criteria": [ { "id": 1, "content": "Submit the request in the HR tool", "weight": 1 } ],
+      "labels": ["table", "links"] }
   ]
 }
 ```
@@ -551,6 +658,17 @@ The JSON shapes are exactly the models above. `POST /evaluate/batch`:
     "weakest_cases_above_zero": [1],
     "failed_criteria_count": 0
   },
+  "label_metrics": [
+    { "label": "links",
+      "metrics": { "total_cases": 1, "average_score": 0.0, "median_score": 0.0,
+                   "variance": 0.0, "standard_deviation": 0.0,
+                   "average_criterion_score": 0.0, "criteria_fulfillment_rate": 0.0,
+                   "cases_with_score_zero": [2], "cases_with_score_zero_count": 1,
+                   "weakest_cases_above_zero": [], "failed_criteria_count": 0 } },
+    { "label": "table",
+      "metrics": { "total_cases": 2, "average_score": 0.5, "…": "the whole table again" } }
+  ],
+  "label_filter": [],
   "case_results": [
     { "case_id": 1, "score": 1.0,
       "scale": { "maximum": 2, "presence_threshold": 0.5,
@@ -558,11 +676,37 @@ The JSON shapes are exactly the models above. `POST /evaluate/batch`:
                                          "0": "Not covered. …" } },
       "criterion_results": [
         { "criterion_id": 1, "weight": 3.0, "score": 2.0, "is_present": true,
-          "spread": 0.0, "failed": false, "reasoning": "The answer instructs …" } ] },
-    { "case_id": 2, "score": 0.0, "scale": { … }, "criterion_results": [ … ] }
+          "spread": 0.0, "failed": false, "reasoning": "The answer instructs …" } ],
+      "labels": ["table"] },
+    { "case_id": 2, "score": 0.0, "scale": { … }, "criterion_results": [ … ],
+      "labels": ["table", "links"] }
   ]
 }
 ```
+
+Case 1 carries one label and case 2 carries two, so case 2 counts in **both** buckets — which
+is why `links` reports one case and `table` reports two, over a run of two.
+
+Add `?labels=` to run only part of the catalog; repeat the parameter per label, and a case
+has to carry **all** of them:
+
+```bash
+curl -s 'localhost:8000/evaluate/batch?labels=table&labels=links' \
+  -H 'content-type: application/json' -d @batch.json
+```
+
+The filter comes back as `label_filter` on the response. It does **not** save you the upload —
+the whole batch travels either way — so for a large catalog prefer posting only the cases you
+want. If the filter matches no case the request is a `422` naming the labels your batch does
+carry, with counts:
+
+```json
+{ "detail": "no case carries all of ['tabel']; labels present in this batch: links (1), table (2)" }
+```
+
+You may instead put `label_filter` in the body, which is what the library path records. Send
+one or the other: a query parameter that contradicts a `label_filter` already in the body is a
+`422` rather than a silent winner.
 
 Every `case_results` entry carries its own `scale` — the cases of one run are all judged by
 one judge, so they all repeat the same one. It is a field you may *omit when posting* a
@@ -578,6 +722,10 @@ the same type, not a similar one — so the two endpoints cannot disagree.
 { "baseline":  { "metrics": { … }, "case_results": [ … ] },
   "candidate": { "metrics": { … }, "case_results": [ … ] } }
 ```
+
+The response adds `label_metrics_deltas` — the same `metrics_delta` once per label — whenever
+the runs carry labels. It is what tells an average that rose by fixing one kind of case from
+one that rose across the board.
 
 For a three-case catalog where case 1 went `0.0 → 0.875`, case 2 held at `1.0` and case 3
 fell `1.0 → 0.5` — the response, printed verbatim:
@@ -639,8 +787,13 @@ Everything is validated **before** the first LLM call, so a malformed request co
 | `criteria`, `cases`, `criterion_results` or `case_results` empty; duplicate ids in any of them; `content` blank; `weight` `0`, negative, `Infinity` or `NaN`; missing field | `pydantic.ValidationError` | `422` |
 | A run posted to `/compare` whose numbers leave the ranges the [output tables](#outputs) give — a score above its own `scale.maximum` or off `0 … 1`, a non-positive weight, any `Infinity` or `NaN` | `pydantic.ValidationError` | `422` |
 | A run whose cases name more than one `scale`; a verdict whose `is_present` contradicts its own score | `pydantic.ValidationError` | `422` |
+| A blank label, or the same label twice on one case — in a body or in `?labels=` | `pydantic.ValidationError` | `422` |
+| A `label_filter` naming a label some case does not carry, on a `Batch` or a stored `BatchResult` | `pydantic.ValidationError` naming the offending case ids | `422` |
+| A stored run whose `label_metrics` does not describe exactly the labels its cases carry | `pydantic.ValidationError` | `422` |
+| `?labels=` matching no case | — (the library returns `[]`; `Batch` then rejects the empty `cases`) | `422`, naming the labels the batch does carry, with counts |
+| `?labels=` contradicting a `label_filter` in the body | — | `422` |
 | A `Scale` describing only some of its grades, or a grade it does not have | `pydantic.ValidationError` | `422` |
-| Two runs not comparable: a different grading scale, different case ids, different criteria within a case, or different weights | `RunsNotComparableError` (a `ValueError`) naming **every** difference at once | `422` |
+| Two runs not comparable: a different grading scale, different case ids, different criteria within a case, different weights, or a case whose **labels** changed between the runs | `RunsNotComparableError` (a `ValueError`) naming **every** difference at once | `422` |
 | A judge returning a score above the `scale` it declares | `ValueError` out of `evaluate_case()` naming the criterion — a bug in the judge, not an outage | `500` |
 | Judge not configured (missing env vars) | `RuntimeError` naming every missing variable | `500` |
 | Judge endpoint refused / timed out / out of quota | **contained** — that criterion gets `failed: true`, `score: 0`, cause in `reasoning` | `200` |
@@ -950,6 +1103,10 @@ Three grains, each a pair of *what goes in* and *what comes back*:
 Plus `RunMetrics`, which is `BatchResult.metrics` and nothing else, `Scale`, which every
 verdict carries, and `Verdict`, which never leaves `judge.py`.
 
+Labels add no grain — they cut *across* one. `LabelMetrics` and `LabelMetricsDelta` are each
+a label plus the aggregate of the grain above, composed rather than copied, so the pair
+`RunMetrics`/`RunMetricsDelta` stays the single definition of what a run's numbers are.
+
 ("Grain", not "scale" — `Scale` is the grading scale and one word must not mean two things.)
 
 Comparing repeats the same three grains one level up, and the names say so: a
@@ -974,8 +1131,10 @@ The result types draw the layer boundary and answer the question by themselves:
 Verdict:          score, reasoning                            # what the model replied
 CriterionResult:  criterion_id, weight, score, is_present,     # what the system concluded
                   spread, failed, reasoning
-CaseResult:       case_id, score, scale, criterion_results     # one whole case
+CaseResult:       case_id, score, scale, criterion_results,    # one whole case
+                  labels
 RunMetrics:       the aggregate over many case results
+LabelMetrics:     that aggregate again, per label
 ```
 
 `judge.py` speaks `Verdict` — prompts, parsing and retries are *its* business, and another
@@ -1038,7 +1197,7 @@ field tables in [Reference](#reference). One text, never three — they cannot d
 .venv/bin/python -m pytest
 ```
 
-249 tests, no real LLM ever called. Mocked at two levels:
+298 tests, no real LLM ever called. Mocked at two levels:
 
 - **`FakeJudge`** ([conftest.py](tests/conftest.py)) replaces the `Judge` protocol and scores
   from a lookup table — `{1: 2, 2: ValueError("down")}` scores criterion 1 with a `2` and
@@ -1051,9 +1210,10 @@ field tables in [Reference](#reference). One text, never three — they cannot d
   `JudgeConfig.from_env()`, the real `openai` SDK, a real socket, reply parsing, the weighted
   fold. That is what proves the wire format and the self-healing retry.
 - **`run_of`** ([conftest.py](tests/conftest.py)) builds a finished `BatchResult` straight
-  from judge scores — `run_of({1: 2, 2: 0}, {21: 1})` is a two-case run. Comparison tests
-  are about the *difference* between two runs, so going through a judge and an event loop would
-  only stand between the test and the numbers it asserts on.
+  from judge scores — `run_of({1: 2, 2: 0}, {21: 1})` is a two-case run, and
+  `labels_by_case_id={1: ["table"]}` tags one. Comparison tests are about the *difference*
+  between two runs, so going through a judge and an event loop would only stand between the
+  test and the numbers it asserts on.
 
 | File | Covers |
 |---|---|
@@ -1063,16 +1223,16 @@ field tables in [Reference](#reference). One text, never three — they cannot d
 | [test_comparison.py](tests/test_comparison.py) | deltas and their direction, the three statuses, ordering, and every refusal |
 | [test_prompt.py](tests/test_prompt.py) | the prompt a scale generates, held against the hand-written original |
 | [test_scale.py](tests/test_scale.py) | what a valid scale is, and what it does to a verdict, a run and a comparison |
+| [test_labels.py](tests/test_labels.py) | what a valid label is, which cases a filter and a bucket select, and what a relabelled case does to a comparison |
 | [test_api.py](tests/test_api.py) | validation, wiring, serialization, and the end-to-end chain |
 
 ## Scope
 
-**Implemented** — evaluating one case or a whole batch with run metrics, and comparing two
-finished runs against each other, as a library or over HTTP.
+**Implemented** — evaluating one case or a whole batch with run metrics, slicing a run by
+label, and comparing two finished runs against each other, as a library or over HTTP.
 
-**Not implemented** — rubric catalog files, a CLI, labels and per-label metrics, streaming
-progress for long batches, and self-consistency (judging each criterion several times and
-reporting the `spread`).
+**Not implemented** — rubric catalog files, a CLI, streaming progress for long batches, and
+self-consistency (judging each criterion several times and reporting the `spread`).
 
 ## License
 
