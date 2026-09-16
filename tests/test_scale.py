@@ -68,6 +68,24 @@ def test_a_scale_is_frozen_because_a_judge_and_its_results_share_one():
         DEFAULT_SCALE.maximum = 5
 
 
+def test_a_finished_result_keeps_its_wording_when_the_shared_default_is_written_into():
+    """`frozen` covers the fields, not the dict behind `level_descriptions`, and every judge
+    on the default shares one `DEFAULT_SCALE`. A stored run has to keep saying what its grades
+    meant, so the scale is copied into the result rather than referenced out of the constant."""
+    result = CaseResult(
+        case_id=1,
+        score=1.0,
+        scale=DEFAULT_SCALE,  # named, as `evaluate_case` names `judge.scale` — not defaulted
+        criterion_results=[CriterionResult.judged(_criterion(), 2, None, DEFAULT_SCALE)],
+    )
+    original = DEFAULT_SCALE.level_descriptions[2]
+    try:
+        DEFAULT_SCALE.level_descriptions[2] = "Anything at all."
+        assert result.scale.level_descriptions[2] == original
+    finally:
+        DEFAULT_SCALE.level_descriptions[2] = original
+
+
 def test_scales_that_differ_only_in_their_threshold_are_different_scales():
     """`0..2, covered from 2` and `0..2, covered from 0.5` disagree about what "covered"
     means, so `criteria_fulfillment_rate` does not subtract between them either."""
@@ -99,6 +117,14 @@ def test_allows_a_threshold_at_the_maximum_where_only_full_coverage_counts():
     strict = Scale(maximum=2, presence_threshold=2)
     assert CriterionResult.judged(_criterion(), 1, None, strict).is_present is False
     assert CriterionResult.judged(_criterion(), 2, None, strict).is_present is True
+
+
+def test_the_grades_of_a_scale_run_from_zero_to_its_maximum_inclusive():
+    """`grades` is the one place "inclusive" is spelled out, so the validator, the prompt and
+    the retry hints cannot disagree about whether the top grade is on the scale."""
+    assert list(DEFAULT_SCALE.grades) == [0, 1, 2]
+    assert list(Scale(maximum=1, presence_threshold=1).grades) == [0, 1]
+    assert list(TEN_POINT.grades) == [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
 
 
 def test_a_scale_is_not_stored_on_the_verdict_but_on_the_case_above_it():
@@ -190,6 +216,29 @@ def test_rejects_a_run_whose_cases_disagree_about_the_scale():
 
 def test_a_run_reports_the_scale_of_its_cases():
     assert run_of({1: 7}, scale=TEN_POINT).scale == TEN_POINT
+
+
+def test_a_run_reads_its_scale_off_its_cases_instead_of_storing_it_twice():
+    """`BatchResult.scale` is a Python accessor, not a field: the cases already carry it, and
+    a second copy on the run is a second thing that can disagree with them."""
+    run = run_of({1: 7}, scale=TEN_POINT)
+    assert "scale" not in run.model_dump()
+    assert "scale" in run.model_dump()["case_results"][0]
+    assert run.scale == TEN_POINT
+
+
+def test_the_coverage_rate_of_a_run_follows_the_scales_threshold_not_its_grades():
+    """`is_present` is the one metric input the threshold decides, so two runs of identical
+    grades report the same raw average and a different fulfillment rate."""
+    lenient = Scale(maximum=10, presence_threshold=1)
+    strict_run = run_of({1: 4, 2: 6}, {21: 2, 22: 10}, scale=TEN_POINT)
+    lenient_run = run_of({1: 4, 2: 6}, {21: 2, 22: 10}, scale=lenient)
+
+    strict_metrics, lenient_metrics = strict_run.metrics, lenient_run.metrics
+    assert strict_metrics.average_criterion_score == lenient_metrics.average_criterion_score
+    assert strict_metrics.average_score == lenient_metrics.average_score
+    assert strict_metrics.criteria_fulfillment_rate == 0.5
+    assert lenient_metrics.criteria_fulfillment_rate == 1.0
 
 
 def test_rejects_a_run_whose_average_criterion_score_is_off_its_own_scale():
@@ -404,6 +453,26 @@ def test_the_refusal_says_which_grade_was_reworded_when_the_scales_print_alike()
     )
     with pytest.raises(RunsNotComparableError, match=r"the wording of \[1\] differs"):
         compare_runs(RunPair(baseline=run_of({1: 1}), candidate=run_of({1: 1}, scale=reworded)))
+
+
+def test_a_run_says_which_grade_was_reworded_too_when_its_cases_print_alike():
+    """The same explanation at the run grain: `one_scale_of` fires first and on more paths —
+    `BatchResult`, `run_metrics` on stored results — so it is the message most callers hit."""
+    reworded = DEFAULT_SCALE.model_copy(
+        update={"level_descriptions": DEFAULT_SCALE.level_descriptions | {1: "Halfway there."}}
+    )
+    on_reworded = run_of({2: 1}, scale=reworded).case_results[0]
+    with pytest.raises(ValueError, match=r"the wording of \[1\] differs"):
+        run_metrics([run_of({1: 1}).case_results[0], on_reworded])
+
+
+def test_a_run_of_scales_that_print_differently_needs_no_such_clause():
+    """The two names already explain it — the clause is only there for scales that print
+    alike, at either grain."""
+    on_ten_point = run_of({2: 7}, scale=TEN_POINT).case_results[0]
+    both_named = r"0\.\.10 \(covered from 5\.0\), 0\.\.2 \(covered from 0\.5\)$"
+    with pytest.raises(ValueError, match=both_named):
+        run_metrics([run_of({1: 1}).case_results[0], on_ten_point])
 
 
 def test_a_refusal_over_different_maximums_stays_short():

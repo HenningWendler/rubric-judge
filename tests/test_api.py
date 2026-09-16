@@ -484,6 +484,35 @@ def test_a_batch_judged_on_a_custom_scale_reports_its_raw_grades_and_a_normalize
     assert body["metrics"]["average_criterion_score"] == pytest.approx(5.25)  # raw, 0..10
 
 
+def test_a_judge_grading_above_its_own_scale_is_a_bug_and_not_a_score(unconfigured_client):
+    """The one judge failure that is *not* contained: an outage costs one criterion, but a
+    verdict off the declared scale is a broken judge, and a broken judge must not come back
+    as a plausible 200 with a case score nobody can tell from a real one."""
+    use_judge(FakeJudge({1: 5, 2: 0}))
+
+    assert unconfigured_client.post("/evaluate", json=CASE).status_code == 500
+
+
+def test_a_described_custom_scale_reaches_the_caller_with_its_wording(client):
+    """A stored result has to keep saying what its grades meant, so the descriptions travel
+    with it — keyed by the grade, which JSON can only spell as a string."""
+    described = Scale(
+        maximum=3,
+        presence_threshold=2,
+        level_descriptions={grade: f"Level {grade}." for grade in range(4)},
+    )
+    use_judge(FakeJudge({1: 3, 2: 1}, scale=described))
+
+    body = client.post("/evaluate", json=CASE).json()
+
+    assert body["scale"]["level_descriptions"] == {
+        "0": "Level 0.", "1": "Level 1.", "2": "Level 2.", "3": "Level 3.",
+    }
+    assert body["criterion_results"][0]["is_present"] is True   # 3 >= 2
+    assert body["criterion_results"][1]["is_present"] is False  # 1 <  2
+    assert body["score"] == pytest.approx(0.8333333333333334)  # (3*3/3 + 1*1/3) / 4
+
+
 def test_compare_answers_even_when_the_judge_is_unconfigured(unconfigured_client):
     """Pure computation: comparing stored runs must not need an API key."""
     body = _runs(run_of({1: 0}), run_of({1: 2}))

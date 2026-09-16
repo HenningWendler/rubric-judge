@@ -69,6 +69,15 @@ def test_worked_examples_are_left_out_unless_they_are_handed_in():
     assert "Example:" in judge_prompt(TEN_POINT, WORKED_EXAMPLES_EN)
 
 
+def test_examples_are_appended_to_the_generated_instructions_unchanged():
+    """`examples` is documented as appended verbatim: a caller's own worked judgements are
+    the one part of the prompt the generator must not reflow, renumber or reword."""
+    instructions = judge_prompt(TEN_POINT)
+    own_examples = '---\nExample:\n\nQuestion:\nHow?\n{"score": 7}\n'
+
+    assert judge_prompt(TEN_POINT, own_examples) == instructions + own_examples
+
+
 def test_a_scale_that_describes_no_levels_cannot_generate_a_prompt():
     """There would be nothing to put under "Use this 0-2 scale:" — a judge told to pick a
     grade with no meanings attached is guessing."""

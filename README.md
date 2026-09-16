@@ -367,9 +367,9 @@ improved.
 |---|---|---|---|
 | `criterion_id` | `int` | — | The criterion both runs judged. Identical in both by construction |
 | `weight` | `float` | `> 0` | Its weight, identical in both — compared **exactly**, since weights are copied from the rubric and never computed. Read a movement against it: a `2.0` swing on weight `1` beside nine criteria of weight `3` barely moves the case |
-| `baseline_score` | `float` | `0.0 … 2.0` | What the baseline run's judge gave it |
-| `candidate_score` | `float` | `0.0 … 2.0` | What the candidate run's judge gave it |
-| `score_delta` | `float` | `-2.0 … 2.0` | `candidate_score - baseline_score` |
+| `baseline_score` | `float` | `0.0 … scale.maximum` | What the baseline run's judge gave it, on the runs' shared raw scale |
+| `candidate_score` | `float` | `0.0 … scale.maximum` | What the candidate run's judge gave it, same scale |
+| `score_delta` | `float` | `-maximum … maximum` | `candidate_score - baseline_score`. Both runs were judged on one scale — a comparison of two is refused |
 | `status` | `ChangeStatus` | — | That delta as a verdict |
 
 #### `CaseComparisonResult` — one case across two runs
@@ -1031,7 +1031,7 @@ field tables in [Reference](#reference). One text, never three — they cannot d
 .venv/bin/python -m pytest
 ```
 
-168 tests, no real LLM ever called. Mocked at two levels:
+249 tests, no real LLM ever called. Mocked at two levels:
 
 - **`FakeJudge`** ([conftest.py](tests/conftest.py)) replaces the `Judge` protocol and scores
   from a lookup table — `{1: 2, 2: ValueError("down")}` scores criterion 1 with a `2` and
@@ -1054,6 +1054,8 @@ field tables in [Reference](#reference). One text, never three — they cannot d
 | [test_evaluation.py](tests/test_evaluation.py) | fan-out, ordering, failure policy, batch aggregation |
 | [test_judge.py](tests/test_judge.py) | the parser reply by reply, the retry loop, the concurrency limit |
 | [test_comparison.py](tests/test_comparison.py) | deltas and their direction, the three statuses, ordering, and every refusal |
+| [test_prompt.py](tests/test_prompt.py) | the prompt a scale generates, held against the hand-written original |
+| [test_scale.py](tests/test_scale.py) | what a valid scale is, and what it does to a verdict, a run and a comparison |
 | [test_api.py](tests/test_api.py) | validation, wiring, serialization, and the end-to-end chain |
 
 ## Scope

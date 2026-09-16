@@ -24,7 +24,7 @@ from rubric_eval.models import (
     RunMetrics,
     RunMetricsDelta,
     RunPair,
-    Scale,
+    reworded_grades,
 )
 
 
@@ -207,26 +207,8 @@ def _scale_differences(baseline: BatchResult, candidate: BatchResult) -> list[st
         return []
     return [
         f"the runs were judged on different scales: baseline {baseline.scale}, "
-        f"candidate {candidate.scale}{_reworded_grades(baseline.scale, candidate.scale)}"
+        f"candidate {candidate.scale}{reworded_grades([baseline.scale, candidate.scale])}"
     ]
-
-
-def _reworded_grades(baseline: Scale, candidate: Scale) -> str:
-    """Names the grades whose wording changed, but only when the two scales print the same.
-
-    Two scales with one maximum and one threshold differing only in what they told the judge a
-    grade means would otherwise produce "baseline 0..2 (covered from 0.5), candidate 0..2
-    (covered from 0.5)" — a refusal that reads as a contradiction instead of as a cause.
-    """
-    if str(baseline) != str(candidate):
-        return ""
-    described = set(baseline.level_descriptions) | set(candidate.level_descriptions)
-    reworded = sorted(
-        grade
-        for grade in described
-        if baseline.level_descriptions.get(grade) != candidate.level_descriptions.get(grade)
-    )
-    return f" — same grades, but the wording of {reworded} differs" if reworded else ""
 
 
 def _only_on_one_side(subject: str, baseline_ids: set[int], candidate_ids: set[int]) -> list[str]:

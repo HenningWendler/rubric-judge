@@ -570,6 +570,13 @@ def test_the_complaints_quote_the_scale_that_was_asked_for():
         parse_verdict("no json here", TEN_POINT)
 
 
+def test_the_malformed_json_complaint_offers_the_scales_own_grades_too():
+    """The third complaint is the one a judge sees when it wrote a score object at all, so it
+    is the likeliest to be corrected into a grade — on the scale it was asked for, not 0-2."""
+    with pytest.raises(ValueError, match=r"0, 1, 2, 3, 4, 5, 6, 7, 8, 9 or 10"):
+        parse_verdict('Reasoning.\n{"score": 7,}', TEN_POINT)
+
+
 def test_a_binary_scale_is_offered_as_two_choices_not_as_a_list_of_one():
     with pytest.raises(ValueError, match=r"using 0 or 1"):
         parse_verdict("no json here", Scale(maximum=1, presence_threshold=1))
