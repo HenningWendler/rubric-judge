@@ -76,45 +76,79 @@ def test_labels_that_differ_only_in_case_are_two_labels():
 # --- filtering ------------------------------------------------------------------------------
 
 
-def test_the_filter_selects_the_cases_carrying_the_label():
-    catalog = [case_with(1, ["table"]), case_with(2, ["images"]), case_with(3, ["table"])]
+CATALOG = [
+    case_with(1, ["table", "split_infos"]),
+    case_with(2, ["table"]),
+    case_with(3, ["agentic"]),
+    case_with(4, ["images"]),
+]
+"""Four cases covering every shape a selection can ask for: one carrying both labels of a
+two-label group, one carrying only part of it, one matching a second group, and one matching
+nothing — so a test can tell AND, OR and their combination apart."""
 
-    selected = filter_cases_by_labels(catalog, ["table"])
+
+def test_one_group_requires_every_label_in_it():
+    assert [case.id for case in filter_cases_by_labels(CATALOG, [["table"]])] == [1, 2]
+    assert [
+        case.id for case in filter_cases_by_labels(CATALOG, [["table", "split_infos"]])
+    ] == [1]
+
+
+def test_several_groups_are_an_or():
+    selected = filter_cases_by_labels(CATALOG, [["table"], ["agentic"]])
+
+    assert [case.id for case in selected] == [1, 2, 3]
+
+
+def test_an_or_of_ands_is_the_whole_point():
+    """`(table AND split_infos) OR agentic` — the combination no flat list could express."""
+    selected = filter_cases_by_labels(CATALOG, [["table", "split_infos"], ["agentic"]])
 
     assert [case.id for case in selected] == [1, 3]
 
 
-def test_a_case_carrying_more_than_the_filter_still_matches():
-    """Subset, not equality: the `table` subset is every case *involving* a table, which is
+def test_a_case_matching_two_groups_is_selected_once():
+    """The groups overlap freely; the result is a selection of cases, not of matches."""
+    selected = filter_cases_by_labels(CATALOG, [["table"], ["split_infos"]])
+
+    assert [case.id for case in selected] == [1, 2]
+
+
+def test_a_case_carrying_more_than_a_group_still_matches():
+    """Subset, not equality: the `table` group is every case *involving* a table, which is
     the question the bucket of the same name answers too."""
-    catalog = [case_with(1, ["table", "images", "links"])]
-
-    assert filter_cases_by_labels(catalog, ["table"]) == catalog
+    assert filter_cases_by_labels([case_with(1, ["table", "images"])], [["table"]]) != []
 
 
-def test_several_labels_are_required_together():
-    catalog = [case_with(1, ["table"]), case_with(2, ["table", "images"])]
-
-    assert [case.id for case in filter_cases_by_labels(catalog, ["table", "images"])] == [2]
-
-
-def test_an_empty_filter_selects_everything():
-    """What "no filter" means — the same thing an absent `label_filter` means on a batch."""
-    catalog = [case_with(1, ["table"]), case_with(2, [])]
-
-    assert filter_cases_by_labels(catalog, []) == catalog
+def test_an_empty_selection_selects_everything():
+    """What "no selection" means — the same thing an absent `label_filter` means on a batch."""
+    assert filter_cases_by_labels(CATALOG, []) == CATALOG
 
 
 def test_no_match_is_an_empty_list_and_not_an_exception():
     """A filter behaves like a filter, so it composes. What an empty selection *means* is the
     caller's to decide — `Batch` is what refuses to run one."""
-    assert filter_cases_by_labels([case_with(1, ["table"])], ["tabel"]) == []
+    assert filter_cases_by_labels(CATALOG, [["tabel"]]) == []
+
+
+def test_a_flat_list_of_labels_is_refused_rather_than_read_as_characters():
+    """`["table"]` is a plausible mistake and `set("table") <= set(labels)` would quietly
+    compare *characters*, returning a wrong answer with no error. The message names both
+    things the caller might have meant."""
+    with pytest.raises(TypeError, match=r"list of label \*groups\*"):
+        filter_cases_by_labels(CATALOG, ["table"])
 
 
 def test_the_filter_keeps_the_catalog_order():
-    catalog = [case_with(3, ["table"]), case_with(1, ["table"]), case_with(2, ["table"])]
+    shuffled = [case_with(3, ["table"]), case_with(1, ["table"]), case_with(2, ["table"])]
 
-    assert [case.id for case in filter_cases_by_labels(catalog, ["table"])] == [3, 1, 2]
+    assert [case.id for case in filter_cases_by_labels(shuffled, [["table"]])] == [3, 1, 2]
+
+
+def test_duplicate_groups_are_rejected():
+    """The same group twice, in any order, asks one question twice and selects nothing extra."""
+    with pytest.raises(ValidationError, match="label groups must be unique"):
+        Batch(cases=CATALOG, label_filter=[["table", "split_infos"], ["split_infos", "table"]])
 
 
 # --- the breakdown --------------------------------------------------------------------------
@@ -171,33 +205,51 @@ def test_the_breakdown_can_be_computed_on_stored_results():
     assert [bucket.label for bucket in buckets] == ["table"]
 
 
-# --- the recorded filter --------------------------------------------------------------------
+# --- the selection a batch runs -------------------------------------------------------------
 
 
-def test_a_batch_records_what_selected_its_cases():
-    batch = Batch(cases=[case_with(1, ["table"])], label_filter=["table"])
+def test_a_batch_runs_only_the_cases_its_selection_covers():
+    """Hand it the catalog and the selection: `cases` is what you have, `selected_cases` is
+    what runs."""
+    batch = Batch(cases=CATALOG, label_filter=[["table", "split_infos"], ["agentic"]])
 
-    assert batch.label_filter == ["table"]
-
-
-def test_a_batch_refuses_a_filter_its_cases_do_not_carry():
-    """The claim "these are the table cases" is checkable in one line, so it is checked
-    rather than believed — and checked here, before a catalog of judge calls is paid for."""
-    with pytest.raises(ValidationError, match=r"cases \[2\] do not carry"):
-        Batch(cases=[case_with(1, ["table"]), case_with(2, ["images"])], label_filter=["table"])
+    assert [case.id for case in batch.cases] == [1, 2, 3, 4]
+    assert [case.id for case in batch.selected_cases] == [1, 3]
 
 
-def test_a_batch_without_a_filter_claims_nothing():
-    assert Batch(cases=[case_with(1, [])]).label_filter == []
+def test_a_batch_without_a_selection_runs_everything():
+    assert Batch(cases=CATALOG).selected_cases == CATALOG
 
 
-def test_a_stored_run_refuses_a_filter_its_results_do_not_carry():
-    """The same claim re-checked on the way back in — the path where it can have been edited
-    since. A run cannot call itself the `table` subset while holding the whole catalog."""
+def test_a_batch_whose_selection_matches_nothing_is_refused_before_any_judge_call():
+    """A run of no cases has no metrics to report, and being told the label was a typo after
+    paying for a catalog of judge calls is the outcome this exists to prevent."""
+    with pytest.raises(ValidationError, match="matches no case"):
+        Batch(cases=CATALOG, label_filter=[["tabel"]])
+
+
+def test_a_selection_that_matches_nothing_names_the_labels_that_do_exist():
+    """That is nearly always a typo, and the right spelling is unguessable from "nothing
+    matched" alone."""
+    carried = r"agentic \(1\), images \(1\), split_infos \(1\), table \(2\)"
+    with pytest.raises(ValidationError, match=carried):
+        Batch(cases=CATALOG, label_filter=[["tabel"]])
+
+
+def test_a_stored_run_refuses_a_selection_its_results_do_not_match():
+    """On a *result* the field is a claim, not an instruction, so here it can lie — and a
+    stored run is the path where it can have been edited since. A run cannot call itself the
+    `table` subset while holding the whole catalog."""
     stored = run_of({1: 2}, {2: 0}, labels_by_case_id={1: ["table"]}).model_dump()
 
-    with pytest.raises(ValidationError, match=r"cases \[2\] do not carry"):
-        BatchResult(**{**stored, "label_filter": ["table"]})
+    with pytest.raises(ValidationError, match=r"cases \[2\] match none of its groups"):
+        BatchResult(**{**stored, "label_filter": [["table"]]})
+
+
+def test_a_batch_may_hold_cases_its_selection_excludes():
+    """The asymmetry with the result above, stated outright: an instruction cannot lie, and
+    passing a catalog plus a selection is the entire point."""
+    assert Batch(cases=CATALOG, label_filter=[["agentic"]]).cases == CATALOG
 
 
 # --- the breakdown cannot lie ---------------------------------------------------------------
@@ -225,14 +277,26 @@ def test_a_labelled_run_refuses_an_empty_breakdown():
 # --- evaluating a labelled batch ------------------------------------------------------------
 
 
-async def test_a_run_echoes_the_labels_and_the_filter_it_was_given():
-    batch = Batch(cases=[case_with(1, ["table"])], label_filter=["table"])
+async def test_a_run_covers_the_selected_cases_and_records_what_picked_them():
+    batch = Batch(
+        cases=[case_with(1, ["table"]), case_with(2, ["images"])], label_filter=[["table"]]
+    )
 
-    run = await evaluate_batch(FakeJudge({1: 2}), batch)
+    run = await evaluate_batch(FakeJudge({1: 2, 2: 2}), batch)
 
+    assert [result.case_id for result in run.case_results] == [1]
     assert run.case_results[0].labels == ["table"]
-    assert run.label_filter == ["table"]
+    assert run.label_filter == [["table"]]
     assert [bucket.label for bucket in run.label_metrics] == ["table"]
+
+
+async def test_an_or_of_ands_narrows_a_whole_catalog_in_one_call():
+    batch = Batch(cases=CATALOG, label_filter=[["table", "split_infos"], ["agentic"]])
+
+    run = await evaluate_batch(FakeJudge({1: 2, 2: 2, 3: 0, 4: 2}), batch)
+
+    assert [result.case_id for result in run.case_results] == [1, 3]
+    assert run.metrics.total_cases == 2
 
 
 async def test_a_label_never_reaches_the_judge():
@@ -326,8 +390,8 @@ def test_runs_recorded_under_different_filters_still_compare():
     baseline = run_of({1: 2}, labels_by_case_id={1: ["table", "images"]})
     candidate = run_of({1: 0}, labels_by_case_id={1: ["table", "images"]})
     runs = RunPair(
-        baseline=BatchResult(**{**baseline.model_dump(), "label_filter": ["table"]}),
-        candidate=BatchResult(**{**candidate.model_dump(), "label_filter": ["images"]}),
+        baseline=BatchResult(**{**baseline.model_dump(), "label_filter": [["table"]]}),
+        candidate=BatchResult(**{**candidate.model_dump(), "label_filter": [["images"]]}),
     )
 
     assert compare_runs(runs).metrics_delta.average_score_delta == pytest.approx(-1.0)

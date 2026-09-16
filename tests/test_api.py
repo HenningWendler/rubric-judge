@@ -596,90 +596,83 @@ def test_a_batch_reports_its_metrics_once_per_label(client):
     assert body["label_metrics"][2]["metrics"]["total_cases"] == 2  # table: cases 1 and 2
 
 
-def test_the_query_parameter_runs_only_the_matching_cases(client):
+def test_a_label_filter_in_the_body_runs_only_the_matching_cases(client):
+    """No query string: the selection travels in the body, and the server runs the subset."""
     use_judge(FakeJudge(BATCH_VERDICTS))
+    narrowed = {**LABELLED_BATCH, "label_filter": [["links"]]}
 
-    body = client.post("/evaluate/batch?labels=table", json=LABELLED_BATCH).json()
+    body = client.post("/evaluate/batch", json=narrowed).json()
 
-    assert [case["case_id"] for case in body["case_results"]] == [1, 2]
-    assert body["label_filter"] == ["table"]
+    assert [case["case_id"] for case in body["case_results"]] == [3]
+    assert body["label_filter"] == [["links"]]
 
 
-def test_repeating_the_parameter_requires_every_label(client):
-    """Subset, not union: `?labels=table&labels=images` is the case carrying both."""
+def test_one_group_requires_every_label_in_it(client):
     use_judge(FakeJudge(BATCH_VERDICTS))
+    narrowed = {**LABELLED_BATCH, "label_filter": [["table", "images"]]}
 
-    body = client.post(
-        "/evaluate/batch?labels=table&labels=images", json=LABELLED_BATCH
-    ).json()
+    body = client.post("/evaluate/batch", json=narrowed).json()
 
     assert [case["case_id"] for case in body["case_results"]] == [1]
 
 
-def test_a_filter_matching_nothing_names_the_labels_that_do_exist(client):
-    """A filter that matches nothing is a typo far more often than a genuinely empty subset,
-    and "table" is unguessable from "no cases matched" alone."""
+def test_an_or_of_ands_travels_over_http_intact(client):
+    """`(table AND images) OR links` — the combination the flat form could not express."""
     use_judge(FakeJudge(BATCH_VERDICTS))
+    narrowed = {**LABELLED_BATCH, "label_filter": [["table", "images"], ["links"]]}
 
-    response = client.post("/evaluate/batch?labels=tabel", json=LABELLED_BATCH)
+    body = client.post("/evaluate/batch", json=narrowed).json()
+
+    assert [case["case_id"] for case in body["case_results"]] == [1, 3]
+
+
+def test_the_metrics_describe_the_selected_cases_only(client):
+    """The run is the subset, so its aggregate and its buckets are the subset's — otherwise
+    a narrowed run would report numbers for cases it never judged."""
+    use_judge(FakeJudge(BATCH_VERDICTS))
+    narrowed = {**LABELLED_BATCH, "label_filter": [["links"]]}
+
+    body = client.post("/evaluate/batch", json=narrowed).json()
+
+    assert body["metrics"]["total_cases"] == 1
+    assert [bucket["label"] for bucket in body["label_metrics"]] == ["links"]
+
+
+def test_a_selection_matching_nothing_names_the_labels_that_do_exist(client):
+    """Nearly always a typo, and the right spelling is unguessable from "nothing matched"."""
+    use_judge(FakeJudge(BATCH_VERDICTS))
+    typo = {**LABELLED_BATCH, "label_filter": [["tabel"]]}
+
+    response = client.post("/evaluate/batch", json=typo)
 
     assert response.status_code == 422
-    assert response.json()["detail"] == (
-        "no case carries all of ['tabel']; "
+    assert response.json()["detail"][0]["msg"] == (
+        "Value error, label_filter [['tabel']] matches no case; "
         "labels present in this batch: images (1), links (1), table (2)"
     )
 
 
-def test_a_blank_label_in_the_query_is_rejected(client):
+def test_a_blank_label_in_a_selection_is_rejected(client):
     use_judge(FakeJudge(BATCH_VERDICTS))
-    assert client.post("/evaluate/batch?labels=", json=LABELLED_BATCH).status_code == 422
+    blank = {**LABELLED_BATCH, "label_filter": [[""]]}
+
+    assert client.post("/evaluate/batch", json=blank).status_code == 422
 
 
-def test_a_repeated_label_in_the_query_is_rejected(client):
+def test_a_repeated_group_is_rejected(client):
     use_judge(FakeJudge(BATCH_VERDICTS))
-    response = client.post("/evaluate/batch?labels=table&labels=table", json=LABELLED_BATCH)
+    repeated = {**LABELLED_BATCH, "label_filter": [["table"], ["table"]]}
 
-    assert response.status_code == 422
+    assert client.post("/evaluate/batch", json=repeated).status_code == 422
 
 
-def test_a_body_filter_alone_is_honoured_and_echoed(client):
-    """The library path recorded in the body, with no query parameter — same field, same
-    meaning, so a run built either way is indistinguishable."""
+def test_a_flat_list_of_labels_is_rejected_rather_than_read_as_a_group(client):
+    """`"label_filter": ["table"]` is a plausible mistake; JSON gives no type error of its
+    own, so the schema has to be the one that refuses it."""
     use_judge(FakeJudge(BATCH_VERDICTS))
-    pre_filtered = {"cases": LABELLED_BATCH["cases"][:2], "label_filter": ["table"]}
+    flat = {**LABELLED_BATCH, "label_filter": ["table"]}
 
-    body = client.post("/evaluate/batch", json=pre_filtered).json()
-
-    assert body["label_filter"] == ["table"]
-
-
-def test_a_body_filter_the_cases_do_not_carry_is_rejected(client):
-    use_judge(FakeJudge(BATCH_VERDICTS))
-    lying = {**LABELLED_BATCH, "label_filter": ["table"]}  # case 3 carries only `links`
-
-    assert client.post("/evaluate/batch", json=lying).status_code == 422
-
-
-def test_a_query_parameter_contradicting_the_body_is_refused(client):
-    """Two disagreeing filters in one request is a caller who has lost track of what they are
-    sending; honouring one silently would store a run whose provenance contradicts it."""
-    use_judge(FakeJudge(BATCH_VERDICTS))
-    pre_filtered = {"cases": LABELLED_BATCH["cases"][:2], "label_filter": ["table"]}
-
-    response = client.post("/evaluate/batch?labels=images", json=pre_filtered)
-
-    assert response.status_code == 422
-    assert "contradict" in response.json()["detail"]
-
-
-def test_a_query_parameter_agreeing_with_the_body_is_fine(client):
-    use_judge(FakeJudge(BATCH_VERDICTS))
-    pre_filtered = {"cases": LABELLED_BATCH["cases"][:2], "label_filter": ["table"]}
-
-    response = client.post("/evaluate/batch?labels=table", json=pre_filtered)
-
-    assert response.status_code == 200
-    assert response.json()["label_filter"] == ["table"]
+    assert client.post("/evaluate/batch", json=flat).status_code == 422
 
 
 def test_labels_are_echoed_on_a_single_evaluation(client):

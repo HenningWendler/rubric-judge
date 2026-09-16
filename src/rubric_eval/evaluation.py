@@ -21,7 +21,7 @@ from rubric_eval.models import (
     CaseResult,
     Criterion,
     CriterionResult,
-    carries_every_label,
+    matches_label_selection,
 )
 
 #: Errors that mean *this program* is wrong, not that the judge's endpoint is having a bad
@@ -90,9 +90,9 @@ async def evaluate_batch(judge: Judge, batch: Batch) -> BatchResult:
     nothing else: one entry of `BatchResult.case_results` is exactly what `evaluate_case`
     returns for that case, so the single and the batch path cannot drift apart.
 
-    Selecting *which* cases to run is not this function's job — hand it the batch you want.
-    `filter_cases_by_labels` is there to build one, and `Batch.label_filter` records what it
-    was built with, so the finished run says which subset it is.
+    Which cases run is the batch's own business: `evaluate_batch` judges
+    `batch.selected_cases`, so handing it a whole catalog and a `label_filter` runs the
+    subset and records what picked it. An empty selection runs everything.
 
     Concurrency — no second throttle is applied here on purpose. The cases fan out *and*
     every case fans out over its criteria, so the coroutines multiply (50 cases x 10
@@ -105,10 +105,13 @@ async def evaluate_batch(judge: Judge, batch: Batch) -> BatchResult:
     Args:
         judge: As for `evaluate_case`. The same instance serves every case of the batch,
             which is what makes the shared limit above work.
-        batch: At least one case, with unique case ids (Pydantic has checked both).
+        batch: At least one case, with unique case ids (Pydantic has checked both). Its
+            `label_filter` decides which of them run — also already checked, so a selection
+            matching no case never reaches here.
 
     Returns:
-        A `BatchResult`: `case_results` in request order, `metrics` aggregated over them,
+        A `BatchResult`: one `case_results` entry per **selected** case in request order —
+        fewer than `batch.cases` when a `label_filter` narrowed the run — `metrics` over them,
         `label_metrics` the same aggregate once per label the cases carry, and `label_filter`
         echoed from the batch. A judge outage never aborts the run — it lowers the scores and
         is counted in `RunMetrics.failed_criteria_count`, which is the field to read before
@@ -125,7 +128,9 @@ async def evaluate_batch(judge: Judge, batch: Batch) -> BatchResult:
         run.label_metrics[0].label          # "table"
         run.case_results[0].score           # 1.0  — every single result is still there
     """
-    results = await asyncio.gather(*(evaluate_case(judge, case) for case in batch.cases))
+    results = await asyncio.gather(
+        *(evaluate_case(judge, case) for case in batch.selected_cases)
+    )
     return BatchResult(
         metrics=run_metrics(results),
         label_metrics=label_metrics(results),
@@ -134,32 +139,37 @@ async def evaluate_batch(judge: Judge, batch: Batch) -> BatchResult:
     )
 
 
-def filter_cases_by_labels(cases: list[Case], labels: list[str]) -> list[Case]:
-    """Pick the cases carrying **all** of the given labels.
+def filter_cases_by_labels(cases: list[Case], selection: list[list[str]]) -> list[Case]:
+    """Pick the cases a `LabelSelection` covers — any group, every label of it.
 
-    The same rule the per-label metrics bucket by, so "the run filtered to `table`" and "the
-    `table` bucket of the full run" are the same cases — one word, one meaning. An empty
-    `labels` selects everything, which is what "no filter" means.
+    The same rule `Batch.selected_cases` runs by and the per-label metrics bucket by, so "the
+    run selected by `table`" and "the `table` bucket of the full run" are the same cases.
+
+    You rarely need this to *run* a subset — hand `Batch` the catalog and the selection and it
+    does exactly this. Reach for it to see what a selection would pick before spending a judge
+    call on it, or to select by something a `Batch` never sees.
 
     A filter, and it behaves like one: no match is an empty list, not an exception, so it
-    composes. What an empty selection then means is the caller's to decide — `Batch` refuses
-    it, because a run of no cases has no metrics to report.
+    composes. `Batch` is what refuses to *run* an empty selection.
 
     Args:
         cases: The catalog to select from; returned in its own order, never reordered.
-        labels: The labels a case has to carry to be selected — *all* of them, not any.
-            Order and repeats are irrelevant, it is read as a set.
+        selection: Groups of required labels, read as an OR of ANDs. Empty selects every
+            case.
 
     Returns:
-        The matching cases. Empty when none match, which for a single mistyped label is the
-        common outcome — compare against the labels your catalog actually carries before
-        concluding the subset is genuinely empty.
+        The matching cases, empty when none match.
 
     Example:
-        table_cases = filter_cases_by_labels(catalog, ["table"])
-        run = await evaluate_batch(judge, Batch(cases=table_cases, label_filter=["table"]))
+        filter_cases_by_labels(catalog, [["table", "split_infos"], ["agentic"]])
     """
-    return [case for case in cases if carries_every_label(case.labels, labels)]
+    if any(isinstance(group, str) for group in selection):
+        raise TypeError(
+            "a selection is a list of label *groups*, not a list of labels: pass "
+            f"{[list(selection)]} to require all of them, or "
+            f"{[[label] for label in selection]} to require any of them"
+        )
+    return [case for case in cases if matches_label_selection(case.labels, selection)]
 
 
 async def _judge_criterion(judge: Judge, case: Case, criterion: Criterion) -> CriterionResult:

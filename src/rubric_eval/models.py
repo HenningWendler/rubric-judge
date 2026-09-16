@@ -73,6 +73,32 @@ Labels = Annotated[list[Label], AfterValidator(_reject_duplicate_labels)]
 `Case.labels` and `CaseResult.labels` cannot drift into two different rules."""
 
 
+def _reject_duplicate_groups(selection: list[list[str]]) -> list[list[str]]:
+    """A group is read as a set of required labels, so the same group twice — in any order,
+    `["a", "b"]` and `["b", "a"]` — asks one question twice and selects nothing extra."""
+    counted = Counter(frozenset(group) for group in selection)
+    if repeated := sorted(sorted(group) for group, count in counted.items() if count > 1):
+        raise ValueError(f"label groups must be unique, repeated: {repeated}")
+    return selection
+
+
+LabelSelection = Annotated[list[Labels], AfterValidator(_reject_duplicate_groups)]
+"""Which cases a run covers, as an **OR of ANDs**: a case is selected when it carries every
+label of at least one group.
+
+Every boolean combination of labels can be written this way, which is why no expression
+grammar is needed — one more level of list is the whole feature:
+
+    [["table", "split_infos"], ["agentic"]]   # (table AND split_infos) OR agentic
+    [["table", "images"]]                     # table AND images
+    [["table"], ["images"]]                   # table OR images
+    []                                        # everything — what "no selection" means
+
+Negation is deliberately absent: "table but not images" cannot be written, and adding it
+would mean either a second field or a sigil inside a label, neither of which has been asked
+for yet."""
+
+
 class DocumentedModel(BaseModel):
     """Base for every model in this package: makes attribute docstrings the field
     descriptions, so one docstring feeds both IDE hover and the generated OpenAPI schema."""
@@ -296,18 +322,17 @@ def scores_must_fit(criterion_results: list["CriterionResult"], scale: Scale) ->
 
 
 def carries_every_label(case_labels: list[str], required_labels: list[str]) -> bool:
-    """Whether one case carries **all** of the required labels.
+    """Whether one case carries **all** of the required labels — one group of a selection.
 
-    The one place the label-matching rule lives, because three callers depend on it meaning
-    the same thing: `filter_cases_by_labels` selects with it, `metrics.label_metrics` buckets
-    with it, and `every_case_must_carry` validates with it. That is what makes "the run
-    filtered to `table`" and "the `table` bucket of the full run" the same cases — split over
-    three modules, one of them would eventually drift to "any".
+    The one place the AND rule lives, because two callers depend on it meaning the same
+    thing: `metrics.label_metrics` buckets with it and `matches_label_selection` selects with
+    it. That is what makes "the run selected by `table`" and "the `table` bucket of the full
+    run" the same cases — written out twice, one of them would eventually drift to "any".
 
     Args:
         case_labels: The labels the case carries. Order and repeats are irrelevant.
         required_labels: The labels being asked for — all of them, not any. Empty asks
-            nothing, so every case matches, which is what "no filter" means.
+            nothing, so every case matches.
 
     Returns:
         True when `case_labels` covers `required_labels`.
@@ -319,41 +344,81 @@ def carries_every_label(case_labels: list[str], required_labels: list[str]) -> b
     return set(required_labels) <= set(case_labels)
 
 
-def every_case_must_carry(label_filter: list[str], labels_by_case_id: dict[int, list[str]]) -> None:
-    """Refuse a label filter that does not describe the cases it is attached to.
+def matches_label_selection(case_labels: list[str], selection: list[list[str]]) -> bool:
+    """Whether one case is covered by a `LabelSelection` — any group, every label of it.
 
-    `label_filter` claims "these cases are the ones carrying these labels". The claim is
-    checkable in one line, so it is checked rather than believed — the same stance
+    The OR half of the rule, on top of the AND half above. One place, for the same reason:
+    `Batch` selects the cases to run with it, `BatchResult` validates what ran with it, and
+    `filter_cases_by_labels` lets you ask which cases it would pick without running them.
+
+    Args:
+        case_labels: The labels the case carries.
+        selection: Groups of required labels. Empty selects every case, which is what "no
+            selection" means — and what keeps an unfiltered batch a batch.
+
+    Returns:
+        True when the case carries every label of at least one group.
+
+    Example:
+        matches_label_selection(["table", "split_infos"],
+                                [["table", "split_infos"], ["agentic"]])   # True
+        matches_label_selection(["agentic"], [["table", "split_infos"], ["agentic"]])  # True
+        matches_label_selection(["table"], [["table", "split_infos"], ["agentic"]])    # False
+    """
+    return not selection or any(
+        carries_every_label(case_labels, group) for group in selection
+    )
+
+
+def every_case_must_match(
+    selection: list[list[str]], labels_by_case_id: dict[int, list[str]]
+) -> None:
+    """Refuse a finished run whose `label_filter` does not describe the cases it holds.
+
+    `label_filter` on a *result* claims "these are the cases that selection picked". The
+    claim is checkable in one line, so it is checked rather than believed — the same stance
     `CaseResult` takes on a verdict whose `is_present` contradicts its own score. Left
-    unchecked, a stored run could be labelled the `table` subset while holding the whole
+    unchecked, a stored run could call itself the `table` subset while holding the whole
     catalog, and every number read off it later would answer a different question than its
     name promises.
 
-    The one place the rule lives, because two models make the same claim: `Batch` about the
-    cases it is about to run, and `BatchResult` about the results it came back with.
+    Only results are held to this. On a `Batch` the same field is an *instruction*, and an
+    instruction cannot lie: the batch is expected to carry cases the selection excludes,
+    which is the entire point of handing it a catalog and a selection.
 
     Args:
-        label_filter: The labels the cases were selected by. An empty filter claims nothing
-            and is always accepted — it is what an unfiltered run carries.
+        selection: The groups the cases were selected by. Empty claims nothing and is always
+            accepted — it is what an unfiltered run carries.
         labels_by_case_id: The labels of every case, keyed by case id. Keyed rather than
             listed so the message can name the offenders.
 
     Raises:
-        ValueError: At least one case does not carry every label of the filter. The message
-            names all of them at once, so one fix can address the whole mismatch.
+        ValueError: At least one case matches no group of the selection. The message names
+            all of them at once, so one fix can address the whole mismatch.
 
     Example:
-        every_case_must_carry(["table"], {case.id: case.labels for case in cases})
+        every_case_must_match([["table"]], {r.case_id: r.labels for r in case_results})
     """
     if missing := sorted(
         case_id
         for case_id, case_labels in labels_by_case_id.items()
-        if not carries_every_label(case_labels, label_filter)
+        if not matches_label_selection(case_labels, selection)
     ):
         raise ValueError(
-            f"label_filter {sorted(set(label_filter))} does not describe this run: "
-            f"cases {missing} do not carry all of those labels"
+            f"label_filter {selection} does not describe this run: "
+            f"cases {missing} match none of its groups"
         )
+
+
+def labels_present_in(labels_by_case_id: dict[int, list[str]]) -> str:
+    """The labels a catalog actually carries, with counts, for a selection that picked
+    nothing — that is a typo far more often than a genuinely empty subset, and the right
+    spelling is unguessable from "nothing matched" alone."""
+    counted = Counter(
+        label for case_labels in labels_by_case_id.values() for label in case_labels
+    )
+    carried = ", ".join(f"{label} ({count})" for label, count in sorted(counted.items()))
+    return carried or "none"
 
 
 class Criterion(DocumentedModel):
@@ -617,11 +682,16 @@ class Batch(DocumentedModel):
     """The catalog: at least one case, because an empty run has no meaningful metrics.
     Ids have to be unique — they are what results are matched by."""
 
-    label_filter: Labels = Field(default_factory=list)
-    """The labels these cases were selected by, recorded so the finished run says what subset
-    it is. Empty for an unfiltered run, which is the normal case. Not itself a filter — it
-    describes a selection already made, with `filter_cases_by_labels` or by hand — and every
-    case listed above must carry every label named here, or the batch is refused."""
+    label_filter: LabelSelection = Field(default_factory=list)
+    """Which of those cases to actually run, as an OR of ANDs:
+    `[["table", "split_infos"], ["agentic"]]` runs the cases carrying both `table` and
+    `split_infos`, plus the cases carrying `agentic`. Empty runs all of them, which is the
+    normal case.
+
+    Hand this a whole catalog and a selection rather than pre-filtering: `cases` is what you
+    have, `selected_cases` is what runs, and the finished run records the selection so it
+    still says which subset it is months later. A selection matching no case is refused
+    here — before the first judge call, not after a catalog of them."""
 
     @field_validator("cases")
     @classmethod
@@ -632,11 +702,35 @@ class Batch(DocumentedModel):
             raise ValueError(f"case ids must be unique, repeated: {repeated}")
         return cases
 
+    @property
+    def selected_cases(self) -> list[Case]:
+        """The cases this batch actually runs: those matching `label_filter`.
+
+        Returns:
+            The entries of `cases` covered by the selection, in their original order — all of
+            them when the selection is empty. Never empty: a selection matching nothing is
+            refused when the batch is built.
+
+        Example:
+            Batch(cases=catalog, label_filter=[["table"]]).selected_cases
+        """
+        return [
+            case
+            for case in self.cases
+            if matches_label_selection(case.labels, self.label_filter)
+        ]
+
     @model_validator(mode="after")
-    def _reject_a_filter_that_does_not_describe_the_cases(self) -> "Batch":
-        """Caught here rather than at the end of the run, because the alternative is paying for
-        a whole catalog of judge calls before being told the label was a typo."""
-        every_case_must_carry(self.label_filter, {case.id: case.labels for case in self.cases})
+    def _reject_a_selection_that_matches_no_case(self) -> "Batch":
+        """Caught while the batch is built, because the alternative is being told the label
+        was a typo only after paying for a catalog of judge calls — and because a run of no
+        cases has no metrics to report, so there is nothing to hand back either."""
+        if not self.selected_cases:
+            labels_by_case_id = {case.id: case.labels for case in self.cases}
+            raise ValueError(
+                f"label_filter {self.label_filter} matches no case; "
+                f"labels present in this batch: {labels_present_in(labels_by_case_id)}"
+            )
         return self
 
 
@@ -753,11 +847,11 @@ class BatchResult(DocumentedModel):
     in `case_results` and no others, so a run of untagged cases carries none. See
     `metrics.label_metrics`, which computes this and can be called on stored results too."""
 
-    label_filter: Labels = Field(default_factory=list)
-    """The labels this run's cases were selected by, carried over from `Batch.label_filter` so
-    a stored run still says what subset it is. Empty for an unfiltered run. Every case result
-    must carry every label named here, exactly as on the way in — a run cannot claim to be the
-    `table` subset while holding the whole catalog."""
+    label_filter: LabelSelection = Field(default_factory=list)
+    """The selection that picked this run's cases, carried over from `Batch.label_filter` so a
+    stored run still says which subset it is. Empty for an unfiltered run. Here the field is a
+    *record*, not an instruction: every case result must match it, so a run cannot call itself
+    the `table` subset while holding the whole catalog."""
 
     case_results: list[CaseResult] = Field(min_length=1)
     """One result per case of the batch, in request order. Each one is exactly what
@@ -813,9 +907,10 @@ class BatchResult(DocumentedModel):
 
     @model_validator(mode="after")
     def _reject_a_filter_that_does_not_describe_the_run(self) -> "BatchResult":
-        """The same claim `Batch` makes on the way in, re-checked for a run read back from
-        JSON — which is the path where it can have been edited since."""
-        every_case_must_carry(
+        """`Batch` cannot make this check — there the field selects, so the batch is expected
+        to hold cases it excludes. Here it describes what actually ran, which is a claim, and
+        a stored run is the path where a claim can have been edited since."""
+        every_case_must_match(
             self.label_filter, {result.case_id: result.labels for result in self.case_results}
         )
         return self

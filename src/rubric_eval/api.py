@@ -4,11 +4,10 @@ Stateless: no catalog, no run ids, no persistence. Everything that decides *what
 means lives in `evaluation.py` and below.
 """
 
-from collections import Counter
 from functools import lru_cache
 from typing import Annotated
 
-from fastapi import Depends, FastAPI, HTTPException, Query, Request
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
@@ -20,7 +19,6 @@ from rubric_eval.models import (
     Case,
     CaseResult,
     ComparisonResult,
-    Labels,
     RunPair,
 )
 
@@ -113,11 +111,7 @@ async def evaluate_case(case: Case, judge: Annotated[Judge, Depends(get_judge)])
 
 
 @app.post("/evaluate/batch", summary="Score a catalog of answers and aggregate the run")
-async def evaluate_batch(
-    batch: Batch,
-    judge: Annotated[Judge, Depends(get_judge)],
-    labels: Annotated[Labels | None, Query()] = None,
-) -> BatchResult:
+async def evaluate_batch(batch: Batch, judge: Annotated[Judge, Depends(get_judge)]) -> BatchResult:
     """Score a whole catalog of answers in one request and get metrics over the run.
 
     Send a `Batch`: a list of exactly the cases `POST /evaluate` takes, with unique ids.
@@ -132,62 +126,26 @@ async def evaluate_batch(
     mediocre system apart from one that is fine except on tables. A case counts in every
     bucket it carries a label for, so the buckets overlap.
 
-    Add `?labels=table&labels=images` to run only the cases carrying **all** of the named
-    labels; repeat the parameter per label. The filter is echoed back as `label_filter`, so a
-    stored run says which subset it is. Filtering here does not save you the upload — the
-    whole batch travels either way, so for a big catalog prefer posting just the cases you
-    want.
+    **Running only part of a catalog.** Send the whole thing plus a `label_filter`, an **OR
+    of ANDs**: `[["table", "split_infos"], ["agentic"]]` runs the cases carrying both `table`
+    and `split_infos`, plus the cases carrying `agentic`. One group is a plain AND, several
+    one-label groups are a plain OR, and an absent `label_filter` runs everything. It comes
+    back on the response, so a stored run still says which subset it is.
 
-    Synchronous: the response arrives when the last case is done. Sizing the request is
-    therefore yours to do — the whole catalog is one HTTP timeout.
+    Synchronous: the response arrives when the last selected case is done. Sizing the request
+    is therefore yours to do — the whole catalog is one HTTP timeout, whether or not a
+    `label_filter` narrows what is judged.
 
     **422** on the single-case rules, plus an empty `cases` or duplicate case ids. One
     invalid case rejects the whole batch: a run that is partly judged and partly refused
-    would produce metrics nobody can compare. Also **422** when `?labels=` matches no case —
-    the message lists the labels your batch does carry, with counts — when a `label_filter`
-    in the body contradicts the query parameter, and when a `label_filter` in the body names
-    a label some case does not carry.
+    would produce metrics nobody can compare. Also **422** when `label_filter` matches no
+    case at all — the message lists the labels your batch does carry, with counts, because
+    that is nearly always a typo.
 
     Concurrency is bounded by the judge, not by the batch: every case of this request shares
     one budget, and so does every other request in flight.
     """
-    return await evaluation.evaluate_batch(judge, _batch_selected_by(batch, labels or []))
-
-
-def _batch_selected_by(batch: Batch, labels: list[str]) -> Batch:
-    """The query parameter applied: the subset to actually run, recording what selected it.
-
-    Refuses rather than picks a winner when the body already claims a different
-    `label_filter` — a request carrying two disagreeing filters is a caller who has lost
-    track of what they are sending, and silently honouring one would store a run whose
-    recorded provenance contradicts the request that produced it.
-    """
-    if not labels:
-        return batch
-    if batch.label_filter and set(batch.label_filter) != set(labels):
-        raise HTTPException(
-            status_code=422,
-            detail=(
-                f"query labels {sorted(labels)} contradict the body's label_filter "
-                f"{sorted(batch.label_filter)}; send one or the other"
-            ),
-        )
-    cases = evaluation.filter_cases_by_labels(batch.cases, labels)
-    if not cases:
-        raise HTTPException(status_code=422, detail=_no_case_carries(labels, batch.cases))
-    return Batch(cases=cases, label_filter=labels)
-
-
-def _no_case_carries(labels: list[str], cases: list[Case]) -> str:
-    """Name the labels the batch *does* carry, with counts. A filter that matches nothing is
-    a typo far more often than an genuinely empty subset, and "table" is unguessable from
-    "no cases matched" alone."""
-    present = Counter(label for case in cases for label in case.labels)
-    carried = ", ".join(f"{label} ({count})" for label, count in sorted(present.items()))
-    return (
-        f"no case carries all of {sorted(labels)}; "
-        f"labels present in this batch: {carried or 'none'}"
-    )
+    return await evaluation.evaluate_batch(judge, batch)
 
 
 @app.post("/compare", summary="Hold two finished runs against each other")
