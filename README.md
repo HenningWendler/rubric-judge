@@ -63,7 +63,7 @@ a committed file. Copy [.env.example](.env.example) to `.env` and fill it in.
 | `RUBRIC_EVAL_JUDGE_ENDPOINT` | URL | **required** | OpenAI-compatible base URL, version path included: `https://api.openai.com/v1`, `http://localhost:11434/v1` |
 | `RUBRIC_EVAL_JUDGE_API_KEY` | string | **required** | Key for that endpoint. Local servers usually accept any non-empty string |
 | `RUBRIC_EVAL_JUDGE_MODEL` | string | **required** | Model name as *that* endpoint knows it: `gpt-4o-mini`, `qwen3:8b`, … |
-| `RUBRIC_EVAL_JUDGE_TEMPERATURE` | float ≥ 0 | `0.0` | Keep at `0.0`: verdicts stay reproducible while each criterion is judged once |
+| `RUBRIC_EVAL_JUDGE_TEMPERATURE` | float ≥ 0 | `0.0` | Keep at `0.0`: it is as reproducible as the endpoint gets, which matters while each criterion is judged once. Not a guarantee — see [Repeatability](#repeatability) |
 | `RUBRIC_EVAL_JUDGE_MAX_TOKENS` | int ≥ 1 | `768` | Budget per judge call. Must fit the reasoning **and** the closing JSON — a reply cut off before the JSON is unparseable and costs a retry |
 | `RUBRIC_EVAL_JUDGE_MAX_ATTEMPTS` | int ≥ 1 | `3` | Tries per criterion, **the first one included**. Raise it for a small model that formats badly |
 | `RUBRIC_EVAL_JUDGE_MAX_CONCURRENT` | int ≥ 1 | `8` | Judge calls in flight at once. Raise for a local vLLM or Ollama, lower for a small hosted tier |
@@ -618,11 +618,15 @@ do not describe the same catalog.
 
 ```python
 class OpenAIJudge:
-    def __init__(self, config: JudgeConfig, prompt: str | None = None)
+    def __init__(self, config: JudgeConfig, prompt: str | None = None,
+                 scale: Scale = DEFAULT_SCALE)
     async def score(self, question: str, answer: str, criterion: Criterion) -> Verdict
 ```
-The bundled judge. `prompt` replaces the system prompt; `score()` judges a single criterion
-with no fan-out and no failure handling — handy for a quick experiment.
+The bundled judge. `prompt` replaces the system prompt and `scale` is what it grades on —
+a described scale writes its own prompt, so passing both is only for your own instructions
+on your own scale, see [Another scale](#another-scale). `score()` judges a single criterion
+with no fan-out and no failure handling — handy for a quick experiment. Raises `ValueError`
+for a `scale` with no `level_descriptions` and no `prompt` to go with it.
 
 ```python
 class JudgeConfig:
@@ -899,7 +903,7 @@ outage lowers the score **visibly** rather than silently shrinking the rubric.
 ### One run
 
 `RunMetrics` aggregates the case scores; every field is defined in
-[the reference table](#runmetrics-the-aggregate-over-a-batch). Two of them are easy to
+[the reference table](#runmetrics--the-aggregate-over-a-batch). Two of them are easy to
 misread, so in short:
 
 - **`average_criterion_score` is not `average_score` on a different scale.** It ignores
@@ -911,6 +915,43 @@ misread, so in short:
 ---
 
 ## Failure and load
+
+### Repeatability
+
+`temperature = 0.0` makes a judge as repeatable as its endpoint is willing to be. It is not a
+guarantee, and nothing here can make it one: a hosted endpoint batches your call with other
+people's, floating-point addition is not associative on a GPU, and the model behind a name is
+replaced without asking you.
+
+What that looks like in practice is narrower than "the numbers move". Four consecutive runs of
+one three-case catalog against a hosted endpoint at temperature `0.0`, 18 criterion judgements
+per run: **every clear-cut criterion returned the same grade every time, and exactly one wavered**
+— the one whose verdict is genuinely arguable.
+
+The criterion was *"State the expected last day of absence"*, against an answer reading *"Send an
+email to hr@example.com before 10:00 on your first day of absence."* It names a day, but not that
+day. A human reviewer would hesitate too:
+
+| Scale | Grades over the four runs | Case score |
+|---|---|---|
+| `0–2` | `0`, `0`, `0`, `1` | `0.750` three times, `0.875` once |
+| `0–3` | `0`, `1`, `1`, `0` | `0.750` twice, `0.833` twice |
+
+Note which explanation that rules out: it is **not** a matter of scale granularity. The same
+criterion wavered on both scales, while the sharp criteria stayed put on both.
+
+**What it costs a comparison.** That one grade decided whether the run's headline number read
+`average_score_delta = +0.083` or `+0.042` — a factor of two on the number the whole run gets
+reported by, with nothing about the system under test changed. So:
+
+- **A borderline criterion is a measurement instrument with a loose needle.** Phrasing it as
+  [one checkable fact](#criterion--one-requirement-a-good-answer-has-to-satisfy) is not only about
+  the judge picking a compromise score — it is what makes the verdict repeatable at all.
+- **Read a one-grade criterion move against its `weight`** before calling it a regression.
+- **Re-run the baseline before you believe a small delta.** Two runs of an *unchanged* system
+  measure your noise floor, and that is the cheapest way to learn which deltas mean anything.
+- `CriterionResult.spread` is the field that would carry this and is `0.0` today, because each
+  criterion is judged exactly once — so **a run does not tell you how steady its own numbers are.**
 
 ### Unparseable replies heal themselves
 
