@@ -457,8 +457,9 @@ class Criterion(DocumentedModel):
 class CriterionResult(DocumentedModel):
     """The verdict for a single criterion: what the judge gave, and why.
 
-    Not built by hand — use `judged()` for an answered criterion and `unjudged()` for one
-    the judge never delivered, so the derived fields stay consistent everywhere.
+    Not built by hand — use `judged()`, so the derived fields stay consistent everywhere.
+    There is no constructor for a criterion the judge never answered for: a verdict nobody
+    gave is not a verdict with a 0 in it, and the run it belongs to is invalidated instead.
 
     Every documented range is enforced, not merely described: a stored result is postable to
     `/compare`, so this model is an *input* type there and the numbers below are arithmetic
@@ -489,12 +490,8 @@ class CriterionResult(DocumentedModel):
     """Standard deviation of `score` across repeated judge runs. Stays 0.0 while every
     criterion is judged exactly once, which is the only mode implemented so far."""
 
-    failed: bool = False
-    """True when the judge produced no usable verdict even after all retries. The criterion
-    still counts with score 0 and keeps its weight, so an outage lowers the score visibly."""
-
     reasoning: str | None = None
-    """The judge's own argument for the score — or the error cause when `failed` is true."""
+    """The judge's own argument for the score."""
 
     @classmethod
     def judged(
@@ -513,7 +510,9 @@ class CriterionResult(DocumentedModel):
                 case); it is what `is_present` is cut at here.
 
         Returns:
-            A `CriterionResult` with `failed=False` and `is_present` set from `scale`.
+            A `CriterionResult` carrying the judge's raw score, with `is_present` set from
+            `scale` — `False` for a 0 on every scale, since a presence threshold is always
+            above it.
 
         Raises:
             ValidationError: `score` is negative or not finite. Whether it fits the scale is
@@ -525,30 +524,6 @@ class CriterionResult(DocumentedModel):
             score=score,
             is_present=score >= scale.presence_threshold,
             reasoning=reasoning,
-        )
-
-    @classmethod
-    def unjudged(cls, criterion: Criterion, cause: str) -> "CriterionResult":
-        """Build the result of a criterion the judge never delivered a verdict for.
-
-        Args:
-            criterion: The criterion that could not be judged.
-            cause: Why — reported verbatim as the result's `reasoning`.
-
-        Returns:
-            A `CriterionResult` with `failed=True` and `score=0.0` that **keeps its weight**
-            and therefore stays in the denominator of `case_score`. An outage has to lower
-            the score visibly rather than silently shrink the rubric. Never `is_present`,
-            on any scale: a presence threshold is always above 0, so a flat 0 is never
-            covered — which is why no scale has to be passed in here.
-        """
-        return cls(
-            criterion_id=criterion.id,
-            weight=criterion.weight,
-            score=0.0,
-            is_present=False,
-            failed=True,
-            reasoning=cause,
         )
 
 
@@ -603,8 +578,8 @@ class CaseResult(DocumentedModel):
     The same document whether the case was evaluated alone or inside a batch — which is why
     `Case.id` is mandatory: one result type, no nullable id, nothing to reconcile.
 
-    Always complete: a criterion the judge could not answer for is present with
-    `failed=True`, never missing.
+    Always complete: one verdict per criterion of the rubric, never a hole. A case the judge
+    could not answer every criterion of produces no result at all.
 
     Example:
         result.score                             # 0.75  — weighted, in [0, 1]
@@ -793,11 +768,6 @@ class RunMetrics(DocumentedModel):
     """Ids of the up to `WEAKEST_CASES_REPORTED` lowest-scoring cases that scored above 0,
     weakest first. Listed apart from `cases_with_score_zero` because a total miss and a
     partial answer usually have different causes."""
-
-    failed_criteria_count: int = Field(ge=0)
-    """How many criteria across the whole run got no usable verdict and were counted as 0.
-    Anything above 0 means the run is depressed by judge outages, not only by the answers —
-    read it before the average."""
 
     @computed_field
     @property
@@ -1103,9 +1073,9 @@ class RunMetricsDelta(DocumentedModel):
     """`RunMetrics` of the candidate minus those of the baseline — one field per metric that
     can meaningfully be subtracted.
 
-    Every delta points the same way: **positive means the candidate scored higher**. For the
-    two counting fields that reads backwards on purpose — a positive
-    `cases_with_score_zero_count_delta` means the candidate produced *more* total misses.
+    Every delta points the same way: **positive means the candidate scored higher**. For
+    `cases_with_score_zero_count_delta` that reads backwards on purpose — a positive value
+    means the candidate produced *more* total misses.
 
     `total_cases` has no delta because a comparison of runs with different case sets is
     refused, and the two id lists of `RunMetrics` have none because a set of ids does not
@@ -1138,11 +1108,6 @@ class RunMetricsDelta(DocumentedModel):
     """Change in how many cases missed their rubric completely. **Negative is the good
     direction here** — the candidate left fewer answers at zero."""
 
-    failed_criteria_count_delta: int
-    """Change in how many criteria got no usable verdict. Read this before any other delta:
-    anything but 0 means the two runs suffered different amounts of judge outage, and every
-    number above is then partly an artefact of that rather than of the answers."""
-
 
 class LabelMetricsDelta(DocumentedModel):
     """One label's slice of a comparison: `RunMetricsDelta` over only the cases carrying it.
@@ -1162,7 +1127,7 @@ class LabelMetricsDelta(DocumentedModel):
     metrics_delta: RunMetricsDelta
     """Candidate minus baseline over the cases carrying `label`. Every field points the same
     way it does on the run as a whole: positive means the candidate scored higher, except for
-    the two counting fields."""
+    `cases_with_score_zero_count_delta`."""
 
 
 class ChangeMagnitude(DocumentedModel):

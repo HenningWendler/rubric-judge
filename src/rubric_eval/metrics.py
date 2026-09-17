@@ -1,8 +1,9 @@
 """Scoring: one case folded into one number, a whole run folded into its metrics, and that
 run sliced once per label.
 
-Failed criteria count as 0 and stay in the denominator — a judge outage must lower the
-score visibly, not silently shrink the rubric.
+Every number here is folded from verdicts the judge really gave: a run that lost one to an
+outage is invalidated before it gets this far, so no average is quietly depressed by a
+criterion nobody graded.
 """
 
 import math
@@ -33,8 +34,8 @@ def case_score(results: list[CriterionResult], scale: Scale) -> float:
     number is normalized rather than reported raw.
 
     Args:
-        results: The verdicts of one case, failed ones included. Only `weight` and `score`
-            are read, so results loaded back from a stored run score identically.
+        results: The verdicts of one case, all of them. Only `weight` and `score` are read,
+            so results loaded back from a stored run score identically.
         scale: The scale they were given on — `CaseResult.scale`, or `judge.scale` while the
             case result is still being built. A verdict does not carry it: one case is judged
             by one judge on one scale, so one copy per case is the honest place for it.
@@ -90,10 +91,9 @@ def run_metrics(results: list[CaseResult]) -> RunMetrics:
             criteria cannot outvote nineteen cases with one.
 
     Returns:
-        A `RunMetrics`. Every field is documented on the model; the two most easily misread
-        are `average_criterion_score` (unweighted, across case boundaries — a different
-        question from `average_score`) and `failed_criteria_count` (read it *before* the
-        average: above 0 the run was depressed by judge outages, not only by the answers).
+        A `RunMetrics`. Every field is documented on the model; the most easily misread is
+        `average_criterion_score` — unweighted and across case boundaries, which is a
+        different question from `average_score`.
 
     Raises:
         ValueError: The list is empty — a run of no cases has no distribution to describe —
@@ -104,8 +104,8 @@ def run_metrics(results: list[CaseResult]) -> RunMetrics:
 
     Example:
         metrics = run_metrics([CaseResult(**row) for row in json.load(file)])
-        metrics.average_score          # 0.5
-        metrics.failed_criteria_count  # 0 — read this before trusting the average
+        metrics.average_score            # 0.5
+        metrics.average_criterion_score  # 1.4 — on the run's raw scale, not on 0..1
     """
     if not results:
         raise ValueError("run metrics need at least one case")
@@ -122,7 +122,6 @@ def run_metrics(results: list[CaseResult]) -> RunMetrics:
         criteria_fulfillment_rate=statistics.mean(_fulfillment_rate_per_case(results)),
         cases_with_score_zero=_case_ids_scoring_zero(results),
         weakest_cases_above_zero=_weakest_case_ids_above_zero(results),
-        failed_criteria_count=_failed_criteria_count(results),
     )
 
 
@@ -218,7 +217,3 @@ def _weakest_case_ids_above_zero(results: list[CaseResult]) -> list[int]:
         (result for result in results if result.score > 0), key=attrgetter("score")
     )
     return [result.case_id for result in above_zero[:WEAKEST_CASES_REPORTED]]
-
-
-def _failed_criteria_count(results: list[CaseResult]) -> int:
-    return sum(criterion.failed for result in results for criterion in result.criterion_results)

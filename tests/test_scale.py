@@ -16,6 +16,7 @@ from rubric_eval import (
     CaseResult,
     Criterion,
     CriterionResult,
+    JudgeUnavailableError,
     RunPair,
     RunsNotComparableError,
     Scale,
@@ -190,10 +191,11 @@ def test_a_case_without_a_scale_is_read_on_the_default_one():
     assert stored.scale == DEFAULT_SCALE
 
 
-def test_a_failed_criterion_is_never_present_and_needs_no_scale_to_say_so():
-    """Every presence threshold is above 0, so a flat 0 is uncovered on every scale — which
-    is why `unjudged` takes no scale at all."""
-    assert CriterionResult.unjudged(_criterion(), "judge down").is_present is False
+def test_a_zero_is_never_present_on_any_scale():
+    """Every presence threshold is above 0, so the bottom grade is uncovered whatever the
+    scale — on the bundled 0..2 as well as on a 0..10."""
+    assert CriterionResult.judged(_criterion(), 0, None, DEFAULT_SCALE).is_present is False
+    assert CriterionResult.judged(_criterion(), 0, None, TEN_POINT).is_present is False
 
 
 # ------------------------------------------------------------------- one scale per case and run
@@ -295,17 +297,17 @@ async def test_a_custom_scale_reaches_the_results_it_produced():
     assert result.score == pytest.approx(0.75)  # weights 3 and 1
 
 
-async def test_an_outage_on_a_custom_scale_keeps_the_case_on_one_scale():
-    judge = FakeJudge({1: 10, 2: ValueError("endpoint down")}, scale=TEN_POINT)
-    result = await evaluate_case(judge, Case(**CASE))
+async def test_an_outage_on_a_custom_scale_invalidates_the_case_like_any_other():
+    """The scale changes what a grade means, never what an outage costs."""
+    judge = FakeJudge({1: 10, 2: JudgeUnavailableError("endpoint down")}, scale=TEN_POINT)
 
-    assert result.scale == TEN_POINT
-    assert result.criterion_results[1].failed is True
+    with pytest.raises(JudgeUnavailableError, match="endpoint down"):
+        await evaluate_case(judge, Case(**CASE))
 
 
 async def test_a_judge_that_declares_no_scale_is_a_broken_program_not_an_outage():
-    """`_BUGS_NOT_OUTAGES` territory: scoring the criterion 0 would hide the missing
-    attribute behind a plausible number."""
+    """Both end the run, but only one of them is the endpoint's fault: a missing attribute
+    arrives as the `AttributeError` it is, so the HTTP layer answers 500 rather than 503."""
 
     class ScalelessJudge:
         async def score(self, question, answer, criterion):

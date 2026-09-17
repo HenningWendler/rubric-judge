@@ -33,11 +33,6 @@ def test_a_partial_score_counts_half():
     assert case_score([_result(1, 1)], DEFAULT_SCALE) == pytest.approx(0.5)
 
 
-def test_an_unjudged_criterion_scores_zero_but_keeps_its_weight():
-    unjudged = CriterionResult.unjudged(Criterion(id=2, content="x", weight=1), "judge down")
-    assert case_score([_result(1, 2), unjudged], DEFAULT_SCALE) == pytest.approx(0.5)
-
-
 def test_presence_is_derived_from_the_score():
     assert _result(1, 1).is_present is True
     assert _result(1, 0).is_present is False
@@ -48,13 +43,10 @@ def test_an_empty_rubric_is_a_clear_error_not_a_division_by_zero():
         case_score([], DEFAULT_SCALE)
 
 
-def test_all_criteria_failing_scores_zero_rather_than_erroring():
-    """A total judge outage is a 0, not an exception — the caller still gets a result."""
-    dead = [
-        CriterionResult.unjudged(Criterion(id=1, content="x", weight=3), "judge down"),
-        CriterionResult.unjudged(Criterion(id=2, content="y", weight=1), "judge down"),
-    ]
-    assert case_score(dead, DEFAULT_SCALE) == 0.0
+def test_a_rubric_missed_completely_scores_zero_rather_than_erroring():
+    """An answer that covers nothing is a 0, not an exception — and a real one, because a run
+    that lost a verdict to an outage never reaches the formulas at all."""
+    assert case_score([_result(3, 0), _result(1, 0)], DEFAULT_SCALE) == 0.0
 
 
 def test_a_perfect_rubric_scores_exactly_one():
@@ -164,14 +156,6 @@ def test_the_weakest_case_list_is_capped():
     assert len(run_metrics(many).weakest_cases_above_zero) == WEAKEST_CASES_REPORTED
 
 
-def test_failed_criteria_are_counted_across_the_whole_run():
-    """The number to read before the average: it says how much of a bad run is the judge."""
-    outage = CriterionResult.unjudged(Criterion(id=9, content="x", weight=1), "judge down")
-    run = [_case(1, _result(1, 2), outage), _case(2, outage)]
-
-    assert run_metrics(run).failed_criteria_count == 2
-
-
 def test_an_empty_run_is_a_clear_error_not_a_division_by_zero():
     with pytest.raises(ValueError, match="at least one case"):
         run_metrics([])
@@ -261,5 +245,4 @@ def test_the_readme_batch_example_reports_exactly_the_documented_numbers():
         "cases_with_score_zero": [2],
         "cases_with_score_zero_count": 1,
         "weakest_cases_above_zero": [1],
-        "failed_criteria_count": 0,
     }

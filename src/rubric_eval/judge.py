@@ -10,7 +10,8 @@ import os
 import re
 from typing import Protocol
 
-from openai import AsyncOpenAI
+from openai import APIConnectionError, AsyncOpenAI, InternalServerError, RateLimitError
+from openai.types.chat import ChatCompletion
 from pydantic import Field
 
 from rubric_eval.models import DEFAULT_SCALE, Criterion, DocumentedModel, Scale
@@ -29,6 +30,51 @@ ChatMessage = dict[str, str]
 #: The judge reasons first and closes with the JSON object, so the *last* match wins.
 _SCORE_OBJECT = re.compile(r'\{[^{}]*?"score"\s*:\s*(-?\d+(?:\.\d+)?)[^{}]*?\}')
 
+#: Endpoint failures worth waiting out: unreachable, rate limited, or broken on the far side.
+#: A rejected key, an unknown model or a malformed request are absent on purpose — asking
+#: again changes nothing about any of them, it only delays the report.
+_RETRYABLE_TRANSPORT_FAILURES = (APIConnectionError, RateLimitError, InternalServerError)
+
+#: How long to wait after the first transport failure; doubled after each further one.
+_FIRST_BACKOFF_SECONDS = 0.5
+
+
+class JudgeUnavailableError(Exception):
+    """The judge produced no verdict, so the run it was part of is invalid.
+
+    The whole failure policy in one type: a criterion nobody graded has no score, and the
+    plausible-looking 0 that would stand in for it is indistinguishable from a real result.
+    Raising this aborts the case and the run — `POST /evaluate` answers `503`, and there is
+    no partial document to mistake for a finished one.
+
+    Raise it from a custom `Judge` for anything its endpoint does: refusing, timing out,
+    running out of quota, replying with nothing usable. Everything else a judge raises is
+    read as a bug in the program and surfaces as a `500`.
+
+    Example:
+        class MyJudge:
+            scale = DEFAULT_SCALE
+
+            async def score(self, question, answer, criterion) -> Verdict:
+                raise JudgeUnavailableError("my quota is used up")
+    """
+
+
+class UnusableReplyError(ValueError):
+    """One judge reply the parser refuses, worded as the complaint to send back to the model.
+
+    A `ValueError`, because that is what `parse_verdict` has always raised for a broken
+    reply. Its own type nonetheless: the retry loop repeats an attempt for *this* exception
+    and for nothing else, so a `ValueError` escaping the parser by accident stays the bug it
+    is instead of being replayed to the model three times and reported as a dead endpoint.
+
+    Example:
+        try:
+            parse_verdict("I think it is fine.")
+        except UnusableReplyError as complaint:
+            str(complaint)   # "Your reply contained no JSON object …"
+    """
+
 
 class Verdict(DocumentedModel):
     """One parsed and validated judge reply, for exactly one criterion."""
@@ -44,7 +90,8 @@ class Judge(Protocol):
     """Extension point: bring your own client, the core does not care.
 
     An implementation scores one criterion at a time and either returns a valid `Verdict`
-    or raises — a raising judge costs one criterion (marked `failed`), never the case.
+    or raises — and a raising judge invalidates the whole run, so raise
+    `JudgeUnavailableError` for what the endpoint did and anything else for a bug.
 
     It is also where throttling belongs: `evaluation.py` fans out over the whole rubric at
     once and deliberately does not limit that, because only the implementation knows what
@@ -55,8 +102,8 @@ class Judge(Protocol):
     scale: Scale
     """The grading scale this judge answers on, and the reason a custom judge is not tied to
     0..2: every verdict it produces is stored with this scale, `case_score` normalizes by its
-    maximum and `is_present` uses its threshold. A judge without it is a broken program —
-    `evaluation.py` lets the resulting `AttributeError` through rather than scoring 0."""
+    maximum and `is_present` uses its threshold. A judge without it is a broken program, and
+    the resulting `AttributeError` reaches the caller like any other bug."""
 
     async def score(self, question: str, answer: str, criterion: Criterion) -> Verdict:
         """Decide how well one criterion is covered by one answer.
@@ -76,9 +123,12 @@ class Judge(Protocol):
             score above 1.0.
 
         Raises:
-            Anything, for an endpoint that cannot answer. `evaluation.py` turns it into one
-            criterion marked `failed` — so raising is the correct way to report an outage,
-            and returning a made-up 0 is not.
+            JudgeUnavailableError: The endpoint could not answer — refused, timed out, out of
+                quota, or never replied with anything usable. Raising is the correct way to
+                report that, and returning a made-up 0 is not; the run is invalidated rather
+                than completed around the gap.
+            Exception: Anything else an implementation raises is read as a bug in the
+                program and reaches the caller unchanged.
         """
         ...
 
@@ -113,9 +163,11 @@ class JudgeConfig(DocumentedModel):
     a reply cut off before the JSON is unparseable and costs a retry."""
 
     max_attempts: int = Field(default=3, ge=1)
-    """How often one criterion may be asked, the first try included. Every further attempt
-    replays the broken reply plus the concrete complaint. Running out marks it `failed`.
-    At least 1: a budget of 0 would never ask the judge and score the whole rubric 0."""
+    """How often one criterion may be asked, the first try included, whether the endpoint
+    failed or its reply did. An unusable reply is replayed to the model with the concrete
+    complaint; a transport failure is waited out. Running out invalidates the run. This is
+    the only retry budget there is — the SDK's own is switched off, so two of them cannot
+    multiply behind your back. At least 1: a budget of 0 would never ask the judge at all."""
 
     max_concurrent: int = Field(default=8, ge=1)
     """How many judge calls may be in flight at once, across all cases this judge serves.
@@ -180,10 +232,10 @@ def parse_verdict(reply: str, scale: Scale = DEFAULT_SCALE) -> Verdict:
         `reasoning` (the whole reply, if it wrote nothing but the object).
 
     Raises:
-        ValueError: No score object, unparseable JSON, or a score off the scale. **The
-            message is not for humans** — the retry loop sends it straight back to the model
-            as the correction, so rewording one means changing the prompt. The wordings live
-            in `prompt.py`.
+        UnusableReplyError: A `ValueError`. No score object, unparseable JSON, or a score off
+            the scale. **The message is not for humans** — the retry loop sends it straight
+            back to the model as the correction, so rewording one means changing the prompt.
+            The wordings live in `prompt.py`.
 
     Example:
         parse_verdict('The answer names the address.\n{"score": 2}')
@@ -192,24 +244,24 @@ def parse_verdict(reply: str, scale: Scale = DEFAULT_SCALE) -> Verdict:
     score_object = _last_score_object(reply, scale)
     score = _score_in(score_object, scale)
     if not _is_on(scale, score):
-        raise ValueError(out_of_range_hint(score, scale))
+        raise UnusableReplyError(out_of_range_hint(score, scale))
     return Verdict(score=int(score), reasoning=_reasoning_before(reply, score_object))
 
 
 def _last_score_object(reply: str, scale: Scale) -> re.Match[str]:
     matches = list(_SCORE_OBJECT.finditer(reply))
     if not matches:
-        raise ValueError(no_json_hint(scale))
+        raise UnusableReplyError(no_json_hint(scale))
     return matches[-1]
 
 
 def _score_in(score_object: re.Match[str], scale: Scale) -> float:
-    """Raise ValueError with a concrete hint if the object does not parse as valid JSON —
-    the retry loop feeds that hint back to the judge instead of guessing at a broken reply."""
+    """Complain concretely if the object does not parse as valid JSON — the retry loop feeds
+    that complaint back to the judge instead of guessing at a broken reply."""
     try:
         return float(json.loads(score_object.group(0))["score"])
     except (ValueError, KeyError, TypeError) as error:  # JSONDecodeError is a ValueError
-        raise ValueError(malformed_json_hint(error, scale)) from error
+        raise UnusableReplyError(malformed_json_hint(error, scale)) from error
 
 
 def _is_on(scale: Scale, score: float) -> bool:
@@ -265,7 +317,11 @@ class OpenAIJudge:
         self.config = config
         self.scale = scale
         self.system_prompt = prompt or _prompt_for(scale)
-        self.client = AsyncOpenAI(base_url=config.endpoint, api_key=config.api_key)
+        self.client = AsyncOpenAI(
+            base_url=config.endpoint, api_key=config.api_key, max_retries=0
+        )
+        #: The SDK's own retrying is off so `config.max_attempts` is the whole budget: two
+        #: retry loops in series would multiply into nine calls where three were configured.
         self._slots_per_loop: dict[asyncio.AbstractEventLoop, asyncio.Semaphore] = {}
         #: One throttle per event loop, see `free_call_slots`.
 
@@ -297,10 +353,13 @@ class OpenAIJudge:
         }
 
     async def score(self, question: str, answer: str, criterion: Criterion) -> Verdict:
-        """Ask the model about one criterion, correcting it until the reply parses.
+        """Ask the model about one criterion until it answers usably, or give the run up.
 
-        Not a blind retry: on an unusable reply the model is shown its own output plus the
-        concrete complaint, so attempt two answers a question rather than repeating one.
+        Two kinds of failure share the one attempt budget, because each of them costs a call.
+        An unusable reply is not blindly repeated: the model is shown its own output plus the
+        concrete complaint, so attempt two answers a question rather than repeating one. A
+        transport failure has nothing to correct and is waited out instead — a single rate
+        limit must not throw away a whole catalog's worth of judging.
 
         Args:
             question: Context for the model; never scored.
@@ -311,23 +370,49 @@ class OpenAIJudge:
             A `Verdict` with a validated integer score and the model's argument for it.
 
         Raises:
-            ValueError: No usable reply within `config.max_attempts`, naming the last
-                complaint. `evaluation.py` turns this into one `failed` criterion.
-            Exception: Whatever the `openai` SDK raises for a transport, auth or quota
-                problem, unchanged — it is contained one layer up, not here.
+            JudgeUnavailableError: No usable verdict within `config.max_attempts`, naming
+                the last cause and chaining it as `__cause__`. The run is invalid from here
+                on — nothing above turns this into a score.
+            openai.OpenAIError: An endpoint failure no retry can heal — a rejected key, an
+                unknown model, a malformed request — raised on the first attempt, unchanged.
+
+        Example:
+            judge = OpenAIJudge(JudgeConfig.from_env())
+            verdict = await judge.score(
+                "How do I report sick leave?",
+                "Email hr@example.com before 10:00.",
+                Criterion(id=1, content="Report by email before 10:00", weight=3),
+            )
+            verdict.score   # 2
         """
         conversation = self._opening_messages(question, answer, criterion)
-        last_error: ValueError | None = None
-        for _ in range(self.config.max_attempts):
-            reply = await self._ask(conversation)
+        last_failure: Exception | None = None
+        for attempt in range(self.config.max_attempts):
+            try:
+                reply = await self._ask(conversation)
+            except _RETRYABLE_TRANSPORT_FAILURES as outage:
+                last_failure = outage
+                await asyncio.sleep(self._backoff_seconds(attempt))
+                continue
             try:
                 return parse_verdict(reply, self.scale)
-            except ValueError as error:
-                last_error = error
-                conversation = conversation + _correction(reply, error)
-        raise ValueError(
-            f"Judge gave no valid answer in {self.config.max_attempts} attempts: {last_error}"
-        )
+            except UnusableReplyError as complaint:
+                last_failure = complaint
+                conversation = conversation + _correction(reply, complaint)
+        raise JudgeUnavailableError(
+            f"Judge gave no usable answer in {self.config.max_attempts} attempts: "
+            f"{_describe(last_failure)}"
+        ) from last_failure
+
+    def _backoff_seconds(self, failed_attempt: int) -> float:
+        """How long to wait after the transport failure numbered `failed_attempt` (counting
+        from 0): twice as long after each one, so an endpoint that is rate limiting or
+        restarting gets time instead of being hammered by the retry it just refused. Zero
+        after the last attempt — the run is invalid either way, and waiting only delays the
+        bad news."""
+        if failed_attempt + 1 >= self.config.max_attempts:
+            return 0.0
+        return _FIRST_BACKOFF_SECONDS * 2**failed_attempt
 
     def _opening_messages(
         self, question: str, answer: str, criterion: Criterion
@@ -351,7 +436,35 @@ class OpenAIJudge:
                 temperature=self.config.temperature,
                 max_completion_tokens=self.config.max_tokens,
             )
-        return response.choices[0].message.content or ""
+        return _reply_text(response)
+
+
+def _reply_text(response: ChatCompletion) -> str:
+    """What the model actually wrote, or a loud failure when it wrote nothing.
+
+    Args:
+        response: One chat completion exactly as the endpoint returned it.
+
+    Returns:
+        The content of its first choice, never empty.
+
+    Raises:
+        JudgeUnavailableError: The response carries no choice at all, or one whose content is
+            absent — a reply cut off by the token budget, removed by a content filter, or
+            spent on a tool call. The `finish_reason` is named because it is the only thing
+            that tells those apart. Not retried and never sent back to the model: reprompting
+            cannot undo a truncation, and complaining about "no JSON object" would blame the
+            model for what its endpoint did.
+    """
+    if not response.choices:
+        raise JudgeUnavailableError("the judge's endpoint answered without a single choice")
+    choice = response.choices[0]
+    if not choice.message.content:
+        raise JudgeUnavailableError(
+            f"the judge's endpoint answered with no content, finish_reason "
+            f"{choice.finish_reason!r}"
+        )
+    return choice.message.content
 
 
 def _prompt_for(scale: Scale) -> str:
@@ -362,6 +475,15 @@ def _prompt_for(scale: Scale) -> str:
     described scale gets the generated instructions without them.
     """
     return JUDGE_EN if scale == DEFAULT_SCALE else judge_prompt(scale)
+
+
+def _describe(failure: Exception | None) -> str:
+    """The cause to name when the judge is given up on, never an empty string.
+
+    `str(TimeoutError())` *is* the empty string, and a timeout is the likeliest judge failure
+    of all — then the class name is the only cause there is to report.
+    """
+    return str(failure) or type(failure).__name__
 
 
 def _correction(reply: str, error: ValueError) -> list[ChatMessage]:

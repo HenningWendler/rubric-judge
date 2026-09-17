@@ -17,7 +17,7 @@ from rubric_eval import (
     compare_runs,
 )
 from rubric_eval.metrics import case_score, run_metrics
-from rubric_eval.models import BatchResult, CaseResult, Criterion, CriterionResult
+from rubric_eval.models import BatchResult, CaseResult, CriterionResult
 
 
 def compared(baseline: BatchResult, candidate: BatchResult):
@@ -75,7 +75,6 @@ class TestDirection:
         assert delta.average_criterion_score_delta == pytest.approx(1.1666666666666667)
         assert delta.criteria_fulfillment_rate_delta == pytest.approx(0.6666666666666667)
         assert delta.cases_with_score_zero_count_delta == -1
-        assert delta.failed_criteria_count_delta == 0
 
     def test_a_run_compared_with_itself_moves_nothing(self):
         """The fixed point of a comparison, and the cheapest check that every delta really
@@ -385,18 +384,6 @@ class TestRefusal:
             compared(run_of({1: 1}), run_of({2: 1}))
 
 
-class TestJudgeOutages:
-    """A failed criterion is scored 0 today, so it shows up as an ordinary regression. The
-    run-level delta is what tells a reader the movement is an artefact."""
-
-    def test_a_run_with_more_outages_is_flagged_at_the_run_level(self):
-        baseline = run_of({1: 2})
-        candidate = _with_failed_criterion(run_of({1: 0}), criterion_id=1)
-        result = compared(baseline, candidate)
-        assert result.metrics_delta.failed_criteria_count_delta == 1
-        assert result.summary.worsened_case_ids == [1]
-
-
 def _case_status_for_score(candidate_score: float) -> ChangeStatus:
     """A one-case comparison whose baseline scores an exact 0.0, so the delta is the
     candidate score itself and the tolerance can be asserted on without float noise."""
@@ -418,26 +405,6 @@ def _reweighted(run: BatchResult, weights: dict[int, float]) -> BatchResult:
             result,
             [
                 verdict.model_copy(update={"weight": weights[verdict.criterion_id]})
-                for verdict in result.criterion_results
-            ],
-        )
-        for result in run.case_results
-    ]
-    return BatchResult(metrics=run_metrics(case_results), case_results=case_results)
-
-
-def _with_failed_criterion(run: BatchResult, criterion_id: int) -> BatchResult:
-    """A run in which the judge never answered for one criterion, as `evaluate_case` records it."""
-    case_results = [
-        _rebuilt(
-            result,
-            [
-                CriterionResult.unjudged(
-                    Criterion(id=verdict.criterion_id, content="x", weight=verdict.weight),
-                    "down",
-                )
-                if verdict.criterion_id == criterion_id
-                else verdict
                 for verdict in result.criterion_results
             ],
         )

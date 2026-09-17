@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 
 from conftest import BATCH, BATCH_VERDICTS, CASE, FakeJudge, run_of, use_judge
 
+from rubric_eval import JudgeUnavailableError
 from rubric_eval.api import app, get_judge
 from rubric_eval.models import DEFAULT_SCALE, Scale
 
@@ -90,7 +91,7 @@ def test_the_result_carries_every_published_field(client):
     assert set(body) == {"case_id", "score", "scale", "criterion_results", "labels"}
     assert body["scale"] == DEFAULT_SCALE.model_dump(mode="json")  # grades as JSON keys
     assert set(body["criterion_results"][0]) == {
-        "criterion_id", "weight", "score", "is_present", "spread", "failed", "reasoning",
+        "criterion_id", "weight", "score", "is_present", "spread", "reasoning",
     }
     assert body["criterion_results"][0]["weight"] == 3
     assert body["criterion_results"][0]["spread"] == 0.0
@@ -128,7 +129,7 @@ def test_the_batch_result_carries_every_published_field(client):
     assert set(body["metrics"]) == {
         "total_cases", "average_score", "median_score", "variance", "standard_deviation",
         "average_criterion_score", "criteria_fulfillment_rate", "cases_with_score_zero",
-        "cases_with_score_zero_count", "weakest_cases_above_zero", "failed_criteria_count",
+        "cases_with_score_zero_count", "weakest_cases_above_zero",
     }
     assert set(body["case_results"][0]) == {
         "case_id", "score", "scale", "criterion_results", "labels",
@@ -298,26 +299,34 @@ def test_a_broken_reply_is_healed_over_the_wire(client, stub_endpoint):
     body = client.post("/evaluate", json={**CASE, "criteria": [CASE["criteria"][0]]}).json()
 
     assert body["score"] == pytest.approx(0.5)
-    assert body["criterion_results"][0]["failed"] is False
     assert len(stub_endpoint.received) == 2
     assert "no JSON object" in stub_endpoint.received[1]["messages"][-1]["content"]
 
 
-def test_an_unhealable_endpoint_costs_only_its_own_criterion(client, stub_endpoint):
-    """An unhealable judge costs one criterion, not the case: the other one is still scored
-    and the case score drops visibly instead of the request failing."""
+def test_an_unhealable_endpoint_answers_503_rather_than_a_partial_result(client, stub_endpoint):
+    """One criterion is graded perfectly well and the case would fold to a plausible 0.75
+    around the other — so the request fails instead. 503, not 500: the program is fine, the
+    judge is not, and the same request is worth sending again later."""
     stub_endpoint.replies = {
         EMAIL_CRITERION: ['Covered.\n{"score": 2}'],
         LAST_DAY_CRITERION: ["no json"] * 3,
     }
 
-    body = client.post("/evaluate", json=CASE).json()
+    response = client.post("/evaluate", json=CASE)
 
-    scored, failed = body["criterion_results"]
-    assert scored["score"] == 2.0
-    assert failed["failed"] is True
-    assert "no valid answer in 3 attempts" in failed["reasoning"]
-    assert body["score"] == pytest.approx(0.75)  # (3*2/2 + 1*0/2) / 4
+    assert response.status_code == 503
+    assert "no usable answer in 3 attempts" in response.json()["detail"]
+
+
+def test_an_outage_in_one_case_answers_503_for_the_whole_batch(client):
+    """The run metrics average the cases against each other, so there is no honest partial
+    run to hand back — not even the cases that were judged."""
+    use_judge(FakeJudge({**BATCH_VERDICTS, 21: JudgeUnavailableError("endpoint down")}))
+
+    response = client.post("/evaluate/batch", json=BATCH)
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == "endpoint down"
 
 
 def test_one_judge_serves_the_whole_process_so_its_limit_is_shared(stub_endpoint):
@@ -380,7 +389,7 @@ def test_two_requests_in_two_event_loops_score_a_large_rubric_identically(stub_e
 
     assert [body["score"] for body in rounds] == [1.0, 1.0]
     verdicts = [verdict for body in rounds for verdict in body["criterion_results"]]
-    assert [verdict["failed"] for verdict in verdicts] == [False] * 40
+    assert [verdict["score"] for verdict in verdicts] == [2.0] * 40
 
 
 def test_a_nan_weight_is_rejected_instead_of_scoring_null(client):
@@ -427,7 +436,6 @@ def test_the_comparison_carries_every_published_field(client):
         "average_score_delta", "median_score_delta", "variance_delta",
         "standard_deviation_delta", "average_criterion_score_delta",
         "criteria_fulfillment_rate_delta", "cases_with_score_zero_count_delta",
-        "failed_criteria_count_delta",
     }
     assert set(body["summary"]) == {
         "improved_case_ids", "stable_case_ids", "worsened_case_ids", "improvement", "worsening",
@@ -489,9 +497,9 @@ def test_a_batch_judged_on_a_custom_scale_reports_its_raw_grades_and_a_normalize
 
 
 def test_a_judge_grading_above_its_own_scale_is_a_bug_and_not_a_score(unconfigured_client):
-    """The one judge failure that is *not* contained: an outage costs one criterion, but a
-    verdict off the declared scale is a broken judge, and a broken judge must not come back
-    as a plausible 200 with a case score nobody can tell from a real one."""
+    """A broken judge is a 500, where an unreachable one is a 503: the request is not worth
+    repeating, and a case score nobody can tell from a real one must not come back as a 200
+    either way."""
     use_judge(FakeJudge({1: 5, 2: 0}))
 
     assert unconfigured_client.post("/evaluate", json=CASE).status_code == 500

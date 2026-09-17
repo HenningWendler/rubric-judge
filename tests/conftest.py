@@ -57,8 +57,8 @@ BATCH_VERDICTS = {1: 2, 2: 0, 21: 1, 31: 0}
 
 
 class FakeJudge:
-    """Scores from a lookup table: `{1: 2, 2: ValueError("down")}` scores criterion 1 with a
-    2 and lets the judge die on criterion 2. No LLM, no network, no retries.
+    """Scores from a lookup table: `{1: 2, 2: JudgeUnavailableError("down")}` scores criterion
+    1 with a 2 and lets the judge fail on criterion 2. No LLM, no network, no retries.
 
     Carries a `scale` like every `Judge` does, so a test can hand the evaluation layer a
     judge that grades 0..10 without an endpoint that grades 0..10 existing anywhere."""

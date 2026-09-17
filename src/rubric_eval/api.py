@@ -12,7 +12,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from rubric_eval import comparison, evaluation
-from rubric_eval.judge import Judge, JudgeConfig, OpenAIJudge
+from rubric_eval.judge import Judge, JudgeConfig, JudgeUnavailableError, OpenAIJudge
 from rubric_eval.models import (
     Batch,
     BatchResult,
@@ -44,7 +44,8 @@ def get_judge() -> Judge:
     Raises:
         RuntimeError: The judge cannot be configured; the message names every missing
             variable. Surfaces as a 500, which is correct — an unconfigured service is a
-            server fault, not a bad request, and must never fall back to a fake score.
+            server fault, not a bad request, and must never fall back to a fake score. A
+            judge that is configured but unreachable is a 503 instead, raised per request.
     """
     return OpenAIJudge(JudgeConfig.from_env())
 
@@ -65,13 +66,24 @@ async def report_invalid_request(_: Request, error: RequestValidationError) -> J
     return JSONResponse(status_code=422, content={"detail": reportable})
 
 
+@app.exception_handler(JudgeUnavailableError)
+async def report_unavailable_judge(_: Request, error: JudgeUnavailableError) -> JSONResponse:
+    """Answer 503 for a run the judge could not finish, never a partial 200.
+
+    A criterion nobody graded has no score, and the 0 that would stand in for it turns the
+    whole run into a plausible number no reader can tell from a real result. So the run is
+    dropped rather than patched, and the caller is told to try again when the judge is back.
+    """
+    return JSONResponse(status_code=503, content={"detail": str(error)})
+
+
 @app.get("/health", summary="Liveness and readiness probe")
 async def health() -> dict[str, str]:
     """Readiness probe for container orchestration.
 
-    Answers `{"status": "ok"}` even when the judge is unconfigured, so a missing API key
-    never takes the container down — `POST /evaluate` is what fails then, loudly, with a
-    500. Liveness must not depend on a third-party endpoint.
+    Answers `{"status": "ok"}` even when the judge is unconfigured or its endpoint is down,
+    so neither takes the container down — `POST /evaluate` is what fails then, loudly, with
+    a 500 or a 503. Liveness must not depend on a third-party endpoint.
     """
     return {"status": "ok"}
 
@@ -103,9 +115,13 @@ async def evaluate_case(case: Case, judge: Annotated[Judge, Depends(get_judge)])
     `content`, or a weight that is not positive and finite. Validation happens before the
     first LLM call, so a rejected request costs nothing.
 
-    **500** only if the judge is unconfigured or the program is broken. An endpoint that is
-    merely *down* does not fail the request: each criterion it could not answer for comes
-    back with `failed: true` and `score: 0`, which lowers the case score visibly.
+    **503** if the judge could not answer for a criterion — its endpoint refused, timed out,
+    ran out of quota, or never replied usably within `RUBRIC_EVAL_JUDGE_MAX_ATTEMPTS`
+    attempts. You get no result at all then, on purpose: a criterion nobody graded would have
+    to be scored `0`, and a run with one invented `0` in it is a plausible number you could
+    not tell from a real one. Retry the request once the judge is reachable again.
+
+    **500** if the judge is unconfigured or the program is broken.
     """
     return await evaluation.evaluate_case(judge, case)
 
@@ -118,8 +134,8 @@ async def evaluate_batch(batch: Batch, judge: Annotated[Judge, Depends(get_judge
 
     Returns a `BatchResult`: `case_results` holds one entry per case — each one **the same
     document** `POST /evaluate` returns for that case — and `metrics` aggregates them:
-    average, median, spread, criteria fulfillment, which cases scored zero, the weakest
-    cases above zero, and how many criteria the judge failed to answer.
+    average, median, spread, criteria fulfillment, which cases scored zero and the weakest
+    cases above zero.
 
     **Labels.** Tag your cases (`"labels": ["table"]`) and `label_metrics` reports that whole
     set of numbers again for each label on its own — the breakdown that tells a generally
@@ -142,6 +158,11 @@ async def evaluate_batch(batch: Batch, judge: Annotated[Judge, Depends(get_judge
     case at all — the message lists the labels your batch does carry, with counts, because
     that is nearly always a typo.
 
+    **503** if the judge could not answer for a single criterion of a single case — the whole
+    run is dropped, not the one case. The metrics average the cases against each other, so a
+    run with one fabricated `0` in it reports a number you could not tell from a real one.
+    Nothing is stored here, so a retry costs only the judge calls.
+
     Concurrency is bounded by the judge, not by the batch: every case of this request shares
     one budget, and so does every other request in flight.
     """
@@ -161,10 +182,6 @@ async def compare_runs(runs: RunPair) -> ComparisonResult:
     for the two counting fields, where fewer is better. `summary` says how that is distributed:
     which cases improved, stayed, or got worse, biggest movers first, and how large the moves
     were on each side. `case_comparison_results` goes down to the individual criterion.
-
-    Read `metrics_delta.failed_criteria_count_delta` first. Anything but 0 means the two runs
-    suffered different amounts of judge outage, and every other number is then partly an
-    artefact of that rather than of the answers.
 
     `label_metrics_deltas` repeats `metrics_delta` for each label the cases carry, which is
     what says whether an average that rose did so by fixing one kind of case or by lifting

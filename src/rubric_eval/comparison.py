@@ -62,9 +62,8 @@ def compare_runs(run_pair: RunPair) -> ComparisonResult:
         A `ComparisonResult`. `metrics_delta` says whether the run got better, `summary` how
         that is distributed over the cases, `label_metrics_deltas` which *kind* of case moved,
         and `case_comparison_results` — ordered by `case_id` — which criterion is responsible.
-        Read `metrics_delta.failed_criteria_count_delta` first: anything but 0 means the two
-        runs suffered different amounts of judge outage, and every other number is then partly
-        an artefact of that.
+        Both runs are complete by construction: a run whose judge failed anywhere was never
+        handed back, so no delta here is an artefact of an outage on one side.
 
         `label_filter` is deliberately *not* compared: two runs covering the same case ids are
         comparable however each of them was selected, and two different filters can legitimately
@@ -128,9 +127,6 @@ def _metrics_delta(baseline: RunMetrics, candidate: RunMetrics) -> RunMetricsDel
         ),
         cases_with_score_zero_count_delta=(
             candidate.cases_with_score_zero_count - baseline.cases_with_score_zero_count
-        ),
-        failed_criteria_count_delta=(
-            candidate.failed_criteria_count - baseline.failed_criteria_count
         ),
     )
 

@@ -1,11 +1,34 @@
 import asyncio
 
+import httpx
 import pytest
+from openai import APIConnectionError, APITimeoutError, InternalServerError, RateLimitError
 
 from rubric_eval import Batch, Case, evaluate_batch, evaluate_case
-from rubric_eval.judge import JudgeConfig, OpenAIJudge, parse_verdict
+from rubric_eval.judge import (
+    JudgeConfig,
+    JudgeUnavailableError,
+    OpenAIJudge,
+    UnusableReplyError,
+    parse_verdict,
+)
 from rubric_eval.prompt import JUDGE_EN
 from rubric_eval.models import DEFAULT_SCALE, Criterion, Scale
+
+_REQUEST = httpx.Request("POST", "http://x/v1/chat/completions")
+"""The request every faked transport failure claims to have been raised for — the openai
+exceptions carry one, and none of the code under test reads it."""
+
+
+def rate_limited(message: str = "rate limited") -> RateLimitError:
+    """A real `openai.RateLimitError`, because the judge decides what to retry by the SDK's
+    own exception types and a stand-in would prove nothing about that."""
+    return RateLimitError(message, response=httpx.Response(429, request=_REQUEST), body=None)
+
+
+def server_error(message: str = "bad gateway") -> InternalServerError:
+    """The other retryable status family, built the same way."""
+    return InternalServerError(message, response=httpx.Response(502, request=_REQUEST), body=None)
 
 
 def test_parses_reasoning_and_score():
@@ -25,7 +48,7 @@ def test_survives_code_fences_and_extra_keys():
 
 
 def test_rejects_a_reply_without_json():
-    with pytest.raises(ValueError, match="no JSON object"):
+    with pytest.raises(UnusableReplyError, match="no JSON object"):
         parse_verdict("I think it is fully covered.")
 
 
@@ -58,11 +81,30 @@ class FakeCompletions:
         return _completion(reply)
 
 
-def _completion(content):
+def _completion(content, finish_reason="stop"):
+    """A chat completion shaped like the SDK's, down to the `finish_reason` the judge quotes
+    when an endpoint answers with no content at all."""
+
     class Response:
-        choices = [type("Choice", (), {"message": type("Message", (), {"content": content})})]
+        choices = [
+            type(
+                "Choice",
+                (),
+                {
+                    "message": type("Message", (), {"content": content}),
+                    "finish_reason": finish_reason,
+                },
+            )
+        ]
 
     return Response
+
+
+@pytest.fixture(autouse=True)
+def instant_backoff(monkeypatch):
+    """No real waiting between retries. Reaching for the private constant on purpose: the
+    backoff has no public surface, and a suite that really slept would only be slower."""
+    monkeypatch.setattr("rubric_eval.judge._FIRST_BACKOFF_SECONDS", 0)
 
 
 def _judge(replies, **overrides):
@@ -71,6 +113,19 @@ def _judge(replies, **overrides):
     fake = FakeCompletions(replies)
     judge.client.chat.completions = fake
     return judge, fake
+
+
+def _judge_answering(response, **overrides):
+    """A judge whose endpoint always hands back one prepared response object — for the
+    answers that are not reply text at all: no content, or not even a choice to read it
+    from."""
+    judge, _ = _judge([], **overrides)
+
+    async def create(**kwargs):
+        return response
+
+    judge.client.chat.completions = type("C", (), {"create": staticmethod(create)})
+    return judge
 
 
 CRITERION = Criterion(id=1, content="Send an email", weight=1)
@@ -93,8 +148,11 @@ async def test_retries_with_the_concrete_error_appended():
 
 
 async def test_gives_up_after_max_attempts():
+    """Three unusable replies are a judge that cannot answer, and the run dies with it —
+    `JudgeUnavailableError` rather than a plain `ValueError`, so the HTTP layer can tell this
+    apart from a bug and answer 503."""
     judge, fake = _judge(["nope"] * 3, max_attempts=3)
-    with pytest.raises(ValueError, match="no valid answer in 3 attempts"):
+    with pytest.raises(JudgeUnavailableError, match="no usable answer in 3 attempts"):
         await judge.score("How?", "Vaguely.", CRITERION)
     assert len(fake.calls) == 3
 
@@ -202,7 +260,7 @@ def test_a_score_object_echoed_from_the_answer_wins_because_the_last_one_counts(
 
 async def test_a_single_attempt_budget_asks_exactly_once():
     judge, fake = _judge(["no json at all"], max_attempts=1)
-    with pytest.raises(ValueError, match="no valid answer in 1 attempts"):
+    with pytest.raises(JudgeUnavailableError, match="no usable answer in 1 attempts"):
         await judge.score("How?", "Vaguely.", CRITERION)
     assert len(fake.calls) == 1
 
@@ -230,20 +288,113 @@ async def test_every_attempt_keeps_the_whole_correction_transcript():
     ]
 
 
-async def test_a_reply_without_content_counts_as_unparseable():
-    """Some endpoints answer with `content: null` (tool-call or filter path). That must cost
-    one attempt, not raise an AttributeError out of the judge."""
+async def test_a_reply_without_content_names_the_finish_reason_instead_of_blaming_the_model():
+    """Some endpoints answer with `content: null` — a truncated reply, a content filter, a
+    tool-call path. Read as an empty string it fails to parse, and the judge is then told
+    "your reply contained no JSON object": a complaint about something the model never wrote,
+    and a retry that cannot possibly heal it. The `finish_reason` is what says which of the
+    three it was, so it is in the message."""
     judge, fake = _judge([None, 'Reasoning.\n{"score": 0}'])
-    assert (await judge.score("How?", "Vaguely.", CRITERION)).score == 0
+
+    with pytest.raises(JudgeUnavailableError, match="no content, finish_reason 'stop'"):
+        await judge.score("How?", "Vaguely.", CRITERION)
+
+    assert len(fake.calls) == 1  # not reprompted: no wording of the question would fix it
+
+
+async def test_a_truncated_reply_says_so():
+    """The likeliest cause of an empty reply is a token budget too small for the argument
+    *and* the closing JSON — and `finish_reason` is the only thing that says so."""
+    judge = _judge_answering(_completion(None, finish_reason="length"))
+
+    with pytest.raises(JudgeUnavailableError, match="finish_reason 'length'"):
+        await judge.score("How?", "Vaguely.", CRITERION)
+
+
+async def test_a_reply_without_a_single_choice_is_the_endpoints_fault_not_a_bug():
+    """An empty `choices` list used to be an `IndexError` — indistinguishable from a
+    programming error, and reported as one. It is an endpoint answering with nothing."""
+    judge = _judge_answering(type("Response", (), {"choices": []}))
+
+    with pytest.raises(JudgeUnavailableError, match="without a single choice"):
+        await judge.score("How?", "Vaguely.", CRITERION)
+
+
+async def test_a_rate_limit_is_waited_out_rather_than_thrown_away():
+    """Under the invalidate-the-run policy a single 429 would otherwise cost a whole
+    catalog's worth of judging. There is nothing to correct in the conversation, so the
+    criterion is simply asked again."""
+    judge, fake = _judge([rate_limited(), 'Covered.\n{"score": 2}'], max_attempts=3)
+
+    verdict = await judge.score("How?", "Send an email.", CRITERION)
+
+    assert verdict.score == 2
     assert len(fake.calls) == 2
+    assert fake.calls[1] == fake.calls[0]  # asked again, not corrected
 
 
-async def test_a_transport_error_is_not_retried_and_reaches_the_caller():
-    """Self-healing repairs *replies*, not connections: a dead endpoint is handed to
-    `evaluation.py`, which marks the single criterion `failed` instead of burning attempts."""
-    judge, fake = _judge([ConnectionError("endpoint unreachable")], max_attempts=3)
+async def test_a_timeout_and_a_broken_gateway_are_retried_too():
+    """The three retryable shapes of "the endpoint is having a bad day", by the SDK's own
+    types: unreachable, rate limited, 5xx."""
+    judge, fake = _judge(
+        [APITimeoutError(request=_REQUEST), server_error(), 'Covered.\n{"score": 2}'],
+        max_attempts=3,
+    )
 
-    with pytest.raises(ConnectionError, match="endpoint unreachable"):
+    assert (await judge.score("How?", "Yes.", CRITERION)).score == 2
+    assert len(fake.calls) == 3
+
+
+def test_the_wait_after_a_transport_failure_doubles_and_stops_at_the_last_attempt(monkeypatch):
+    """Backing off is the whole point of retrying a rate limit: asking again immediately is
+    what got throttled in the first place. Read off the private schedule rather than from the
+    clock — a test that really waited would be slow and still prove nothing exactly."""
+    monkeypatch.setattr("rubric_eval.judge._FIRST_BACKOFF_SECONDS", 0.5)
+    judge, _ = _judge([], max_attempts=3)
+
+    assert [judge._backoff_seconds(failed) for failed in range(3)] == [0.5, 1.0, 0.0]
+
+
+async def test_an_endpoint_that_stays_down_invalidates_the_run():
+    """The attempts are spent and the judge has no verdict: that is `JudgeUnavailableError`,
+    with the transport failure chained so the real cause is still readable."""
+    judge, fake = _judge([rate_limited("slow down")] * 3, max_attempts=3)
+
+    with pytest.raises(JudgeUnavailableError, match="slow down") as given_up:
+        await judge.score("How?", "Vaguely.", CRITERION)
+
+    assert len(fake.calls) == 3
+    assert isinstance(given_up.value.__cause__, RateLimitError)
+
+
+async def test_a_failure_without_a_message_still_names_its_cause():
+    """`str(APIConnectionError(...))` can be empty, and a connection that never came up is
+    the likeliest judge failure of all — then the class name is the only cause to report."""
+    judge, _ = _judge([_ConnectionErrorWithoutMessage(request=_REQUEST)], max_attempts=1)
+
+    with pytest.raises(JudgeUnavailableError, match="_ConnectionErrorWithoutMessage"):
+        await judge.score("How?", "Vaguely.", CRITERION)
+
+
+class _ConnectionErrorWithoutMessage(APIConnectionError):
+    """An SDK transport failure whose `str()` is empty — the SDK's own always has a message,
+    a custom `http_client` raising through it need not."""
+
+    def __init__(self, *, request):
+        super().__init__(message="", request=request)
+
+
+async def test_an_unretryable_endpoint_error_is_not_asked_again():
+    """A rejected key, an unknown model, a malformed request: repeating those only delays the
+    report. They travel up as themselves, and the HTTP layer answers 500 — a configuration
+    fault is not "try again later"."""
+
+    class AuthenticationFailed(Exception):
+        pass
+
+    judge, fake = _judge([AuthenticationFailed("invalid api key")], max_attempts=3)
+
+    with pytest.raises(AuthenticationFailed, match="invalid api key"):
         await judge.score("How?", "Vaguely.", CRITERION)
 
     assert len(fake.calls) == 1
@@ -346,16 +497,16 @@ async def test_a_single_slot_still_lets_a_criterion_retry():
 
 
 async def test_a_slot_is_released_even_when_the_call_fails():
-    """A transport error must not leak its slot, or a flaky endpoint starves the judge."""
+    """A transport failure must not leak its slot, or a flaky endpoint starves the judge —
+    which with one slot and a retry would be a deadlock against itself."""
     judge, fake = _judge(
-        [ConnectionError("down"), 'Covered.\n{"score": 2}'], max_concurrent=1
+        [rate_limited(), 'Covered.\n{"score": 2}'], max_concurrent=1, max_attempts=2
     )
 
-    with pytest.raises(ConnectionError):
-        await judge.score("How?", "Yes.", CRITERION)
     verdict = await asyncio.wait_for(judge.score("How?", "Yes.", CRITERION), timeout=5)
 
     assert verdict.score == 2
+    assert fake.peak_in_flight == 1
 
 
 def test_a_concurrency_limit_below_one_is_rejected():

@@ -2,7 +2,14 @@
 
 from rubric_eval.comparison import RunsNotComparableError, compare_runs
 from rubric_eval.evaluation import evaluate_batch, evaluate_case, filter_cases_by_labels
-from rubric_eval.judge import Judge, JudgeConfig, OpenAIJudge, Verdict
+from rubric_eval.judge import (
+    Judge,
+    JudgeConfig,
+    JudgeUnavailableError,
+    OpenAIJudge,
+    UnusableReplyError,
+    Verdict,
+)
 from rubric_eval.metrics import case_score, label_metrics, run_metrics
 from rubric_eval.models import (
     DEFAULT_SCALE,
@@ -48,6 +55,7 @@ __all__ = [
     "CriterionResult",
     "Judge",
     "JudgeConfig",
+    "JudgeUnavailableError",
     "LabelMetrics",
     "LabelMetricsDelta",
     "LabelSelection",
@@ -57,6 +65,7 @@ __all__ = [
     "RunPair",
     "RunsNotComparableError",
     "Scale",
+    "UnusableReplyError",
     "Verdict",
     "case_score",
     "compare_runs",
