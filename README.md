@@ -65,7 +65,7 @@ a committed file. Copy [.env.example](.env.example) to `.env` and fill it in.
 | `RUBRIC_EVAL_JUDGE_MODEL` | string | **required** | Model name as *that* endpoint knows it: `gpt-4o-mini`, `qwen3:8b`, … |
 | `RUBRIC_EVAL_JUDGE_TEMPERATURE` | float ≥ 0 | `0.0` | Keep at `0.0`: it is as reproducible as the endpoint gets, which matters while each criterion is judged once. Not a guarantee — see [Repeatability](#repeatability) |
 | `RUBRIC_EVAL_JUDGE_MAX_TOKENS` | int ≥ 1 | `768` | Budget per judge call. Must fit the reasoning **and** the closing JSON — a reply cut off before the JSON is unparseable and costs a retry |
-| `RUBRIC_EVAL_JUDGE_MAX_ATTEMPTS` | int ≥ 1 | `3` | Tries per criterion, **the first one included**. Raise it for a small model that formats badly |
+| `RUBRIC_EVAL_JUDGE_MAX_ATTEMPTS` | int ≥ 1 | `3` | Tries per criterion, **the first one included** — an unusable reply and a failed connection each cost one. Running out fails the whole run with a `503`. Raise it for a small model that formats badly, or for a flaky endpoint |
 | `RUBRIC_EVAL_JUDGE_MAX_CONCURRENT` | int ≥ 1 | `8` | Judge calls in flight at once. Raise for a local vLLM or Ollama, lower for a small hosted tier |
 
 An empty value counts as missing. **All** missing or invalid variables are reported in one
@@ -380,8 +380,7 @@ the one a stored result is read on when it names none.
 | `score` | `float` | `0.0 … scale.maximum` | The judge's **raw** grade, not normalized. On the default scale: `2` fully covered · `1` partially · `0` not covered. A float so averaging repeated runs cannot change the type. Bounded by `CaseResult.scale`, which is the object that knows it |
 | `is_present` | `bool` | — | `score >= scale.presence_threshold`, using the scale of the `CaseResult` above. Never asked of the judge, and a `CaseResult` **refuses** a verdict whose value here contradicts its own score |
 | `spread` | `float` | `>= 0` | Standard deviation across repeated runs of this criterion. Always `0.0` today: each criterion is judged exactly once |
-| `failed` | `bool` | — | `true` when the judge produced no usable verdict even after all retries. The criterion still counts as `0` and keeps its weight |
-| `reasoning` | `str \| None` | — | The judge's argument for the score — or, when `failed`, the error that prevented one |
+| `reasoning` | `str \| None` | — | The judge's own argument for the score |
 
 #### `CaseResult` — one whole answer
 
@@ -417,7 +416,6 @@ twenty criteria would outvote nineteen cases with one.
 | `cases_with_score_zero` | `list[int]` | — | Ids of answers that missed their rubric completely. Read these first |
 | `cases_with_score_zero_count` | `int` | `>= 0` | Length of that list. Derived, so the two can never disagree |
 | `weakest_cases_above_zero` | `list[int]` | ≤ 5 entries | The weakest cases that still scored *something*, weakest first. Kept apart from the zeros because a total miss and a partial answer usually have different causes |
-| `failed_criteria_count` | `int` | `>= 0` | Criteria the judge never answered for. **Read this before the average**: anything above `0` means the run is depressed by outages, not only by the answers |
 
 #### `LabelMetrics` — one label's slice of a run
 
@@ -500,7 +498,6 @@ the movement of cases instead.
 | `average_criterion_score_delta` | `float` | Change on the runs' shared raw scale, ignoring weights and case boundaries. Moves independently of `average_score_delta` |
 | `criteria_fulfillment_rate_delta` | `float` | Change in the mean share of criteria counting as covered |
 | `cases_with_score_zero_count_delta` | `int` | Change in how many answers missed completely. **Negative is the good direction here** |
-| `failed_criteria_count_delta` | `int` | Change in judge outages. **Read this first**: anything but `0` and every other number above is partly an artefact of the outage rather than of the answers |
 
 #### `LabelMetricsDelta` — one label's slice of a comparison
 
@@ -557,8 +554,9 @@ says whether every case rose a little or one rose a lot while another collapsed.
 ```python
 async def evaluate_case(judge: Judge, case: Case) -> CaseResult
 ```
-Judges one case. Fans out over the criteria concurrently, contains judge failures
-(see [Failure and load](#failure-and-load)), folds the verdicts into one score.
+Judges one case. Fans out over the criteria concurrently and folds the verdicts into one
+score — or raises `JudgeUnavailableError` and returns nothing at all, see
+[Failure and load](#failure-and-load).
 
 ```python
 async def evaluate_batch(judge: Judge, batch: Batch) -> BatchResult
@@ -685,8 +683,7 @@ The JSON shapes are exactly the models above. `POST /evaluate/batch`:
     "average_criterion_score": 1.0,
     "criteria_fulfillment_rate": 0.5,
     "cases_with_score_zero": [2], "cases_with_score_zero_count": 1,
-    "weakest_cases_above_zero": [1],
-    "failed_criteria_count": 0
+    "weakest_cases_above_zero": [1]
   },
   "label_metrics": [
     { "label": "links",
@@ -694,7 +691,7 @@ The JSON shapes are exactly the models above. `POST /evaluate/batch`:
                    "variance": 0.0, "standard_deviation": 0.0,
                    "average_criterion_score": 0.0, "criteria_fulfillment_rate": 0.0,
                    "cases_with_score_zero": [2], "cases_with_score_zero_count": 1,
-                   "weakest_cases_above_zero": [], "failed_criteria_count": 0 } },
+                   "weakest_cases_above_zero": [] } },
     { "label": "table",
       "metrics": { "total_cases": 2, "average_score": 0.5, "…": "the whole table again" } }
   ],
@@ -706,7 +703,7 @@ The JSON shapes are exactly the models above. `POST /evaluate/batch`:
                                          "0": "Not covered. …" } },
       "criterion_results": [
         { "criterion_id": 1, "weight": 3.0, "score": 2.0, "is_present": true,
-          "spread": 0.0, "failed": false, "reasoning": "The answer instructs …" } ],
+          "spread": 0.0, "reasoning": "The answer instructs …" } ],
       "labels": ["table"] },
     { "case_id": 2, "score": 0.0, "scale": { … }, "criterion_results": [ … ],
       "labels": ["table", "links"] }
@@ -773,8 +770,7 @@ fell `1.0 → 0.5` — the response, printed verbatim:
     "variance_delta": -0.265625, "standard_deviation_delta": -0.3171420192563591,
     "average_criterion_score_delta": 0.5,
     "criteria_fulfillment_rate_delta": 0.33333333333333337,
-    "cases_with_score_zero_count_delta": -1,
-    "failed_criteria_count_delta": 0
+    "cases_with_score_zero_count_delta": -1
   },
   "summary": {
     "improved_case_ids": [1], "stable_case_ids": [2], "worsened_case_ids": [3],
@@ -810,8 +806,9 @@ tolerance and not an `==` — see `SCORE_EQUALITY_TOLERANCE` under
 [Functions](#functions).
 
 `GET /health` answers even when the judge is unconfigured, so a missing key never takes the
-container down. `POST /evaluate` is what fails then, loudly, with a `500`. `POST /compare`
-needs no judge at all and answers correctly with no API key configured.
+container down. `POST /evaluate` is what fails then, loudly, with a `500` — and with a
+`503` when the judge is configured but its endpoint cannot answer. `POST /compare` needs no
+judge at all and answers correctly with no API key configured.
 
 ### Errors
 
@@ -832,9 +829,10 @@ Everything is validated **before** the first LLM call, so a malformed request co
 | Two runs not comparable: a different grading scale, different case ids, different criteria within a case, different weights, or a case whose **labels** changed between the runs | `RunsNotComparableError` (a `ValueError`) naming **every** difference at once | `422` |
 | A judge returning a score above the `scale` it declares | `ValueError` out of `evaluate_case()` naming the criterion — a bug in the judge, not an outage | `500` |
 | Judge not configured (missing env vars) | `RuntimeError` naming every missing variable | `500` |
-| Judge endpoint refused / timed out / out of quota | **contained** — that criterion gets `failed: true`, `score: 0`, cause in `reasoning` | `200` |
-| Judge reply unparseable after `MAX_ATTEMPTS` | **contained**, same way | `200` |
-| A bug in the program (`TypeError`, `AttributeError`, `NameError`, `ImportError`, `RuntimeError`) | re-raised | `500` |
+| Judge endpoint unreachable, timed out, rate limited or answering `5xx` | retried up to `MAX_ATTEMPTS` times with a doubling wait, then `JudgeUnavailableError` — **the whole run is dropped** | `503` |
+| Judge reply unparseable after `MAX_ATTEMPTS`, or carrying no content at all | `JudgeUnavailableError` naming the last complaint, or the endpoint's `finish_reason` | `503` |
+| Judge endpoint rejecting the key, the model or the request | the `openai` SDK's own exception, unretried — repeating it would not help | `500` |
+| A bug in the program | propagates as itself | `500` |
 | Request cancelled (client disconnect, shutdown) | `asyncio.CancelledError` propagates | — |
 
 The `422` body carries only `loc`, `msg` and `type`. Pydantic's own `input` is dropped, so
@@ -897,8 +895,9 @@ Worked example — three criteria, weights 3 / 2 / 1, scored 2 / 1 / 0 on the de
 
 `4.0 / 6 = 0.667`. Only the ratios matter, so weights `30 / 20 / 10` give the same `0.667`.
 
-A criterion the judge never answered for stays in the denominator with `score = 0` — an
-outage lowers the score **visibly** rather than silently shrinking the rubric.
+Every `s` in that sum is a grade the judge really gave. A criterion it could not answer for
+has no score and gets none: the run is dropped instead, see
+[A dead judge invalidates the run](#a-dead-judge-invalidates-the-run).
 
 ### One run
 
@@ -960,16 +959,30 @@ scale (`3`, `1.5`), the **concrete cause** is fed back to it together with its o
 reply, and the call is repeated up to `RUBRIC_EVAL_JUDGE_MAX_ATTEMPTS` times. Not a blind
 retry — the model is told what was wrong with what it wrote.
 
-### A dead judge costs one criterion, never the case
+A refused connection, a timeout, a `429` or a `5xx` costs an attempt from the same budget,
+and is waited out instead: `0.5s` after the first failure, doubling after each further one.
+There is nothing to correct in the conversation, so the criterion is simply asked again.
 
-A criterion the judge could not answer for is marked `failed: true`, counts as `score = 0`,
-keeps its weight, and reports the cause in its `reasoning`. The case and the run still
-finish. `RunMetrics.failed_criteria_count` is how you notice.
+One thing is never retried: a reply with **no content at all**. Truncation, a content filter
+or a tool-call path produce one, and no rewording of the question fixes any of them — so the
+run fails immediately, naming the endpoint's own `finish_reason`.
 
-Only *endpoint* failures are contained this way — refused connections, timeouts, quota
-errors, unparseable replies. Errors that mean the **program** is wrong are re-raised: a
-criterion scored `0` because of a bug is indistinguishable from a real result, which is far
-worse than a crash.
+### A dead judge invalidates the run
+
+A criterion the judge could not answer for gets **no result, and neither does anything
+around it**: `POST /evaluate` answers `503`, `POST /evaluate/batch` drops the whole run
+including the cases that were judged, and the library functions raise
+`JudgeUnavailableError`.
+
+That is a deliberate reversal of the obvious alternative — scoring the criterion `0` and
+carrying on. A `0` nobody judged is indistinguishable from an answer that really missed the
+criterion, so the run comes back looking like a finished measurement and reading like a bad
+system. An evaluator that invents one number has no credible ones left, and the metrics
+average the cases against each other, so a single fabricated `0` moves every figure in the
+document. Nothing is stored server-side, so a retry costs only judge calls.
+
+A **bug** in the program ends the run too, but as itself, with a `500`: "your endpoint is
+down, try again" and "this program is broken" are different messages to get.
 
 ### Concurrency
 
@@ -1140,13 +1153,15 @@ Three responsibilities come with it:
   `ValueError: criteria [1] scored above the scale 0..2 …` out of `evaluate_case()` rather than
   folding into a case score above `1.0`. It fails loudly on purpose: an out-of-scale verdict
   is a bug in the judge, and a bug must never come back as a plausible number (see
-  [Failure and load](#failure-and-load)). It is not contained as an outage — only what
-  `judge.score()` *raises* is.
+  [Failure and load](#failure-and-load)).
 - **Throttling.** `evaluate_case()` hands out one task per criterion whatever the rubric's
   size, because only your implementation knows what your backend tolerates. `OpenAIJudge`
   bounds itself with `max_concurrent`; yours needs its own bound.
-- **Raising on failure.** Return a valid `Verdict` or raise. Anything you raise that is not
-  a programming error becomes one `failed` criterion.
+- **Raising on failure.** Return a valid `Verdict` or raise — never a made-up `0`. Raise
+  `JudgeUnavailableError` (importable from `rubric_eval`, and subclassable if you want to
+  keep your own type) for anything your endpoint did: refused, timed out, out of quota, no
+  usable reply. That is what invalidates the run and answers `503`. Anything else you raise
+  is read as a bug in the program and answers `500`.
 
 ---
 
@@ -1157,10 +1172,10 @@ Seven modules, each with one job. A request walks straight down through them:
 | Step | File | Responsibility |
 |---|---|---|
 | 1 | [api.py](src/rubric_eval/api.py) | FastAPI endpoints: validate the body, inject the judge, hand back JSON. No domain logic |
-| 2 | [evaluation.py](src/rubric_eval/evaluation.py) | `evaluate_case()` and `evaluate_batch()` — fan out, contain failures, fold the verdicts |
+| 2 | [evaluation.py](src/rubric_eval/evaluation.py) | `evaluate_case()` and `evaluate_batch()` — fan out over the rubric and fold the verdicts |
 | 3 | [judge.py](src/rubric_eval/judge.py) | `Judge` protocol, OpenAI-compatible client, reply parsing, retries, throttle, env config |
 | 4 | [prompt.py](src/rubric_eval/prompt.py) | every word the judge is told, written from the scale |
-| — | [models.py](src/rubric_eval/models.py) | the types below, `Scale` and `DEFAULT_SCALE`, `CriterionResult.judged()` / `.unjudged()` |
+| — | [models.py](src/rubric_eval/models.py) | the types below, `Scale` and `DEFAULT_SCALE`, `CriterionResult.judged()` |
 | — | [metrics.py](src/rubric_eval/metrics.py) | `case_score()` and `run_metrics()` — the formulas, nothing else |
 | — | [comparison.py](src/rubric_eval/comparison.py) | `compare_runs()` — two finished runs into their differences. Reads no judge and no config |
 
@@ -1205,7 +1220,7 @@ The result types draw the layer boundary and answer the question by themselves:
 ```python
 Verdict:          score, reasoning                            # what the model replied
 CriterionResult:  criterion_id, weight, score, is_present,     # what the system concluded
-                  spread, failed, reasoning
+                  spread, reasoning
 CaseResult:       case_id, score, scale, criterion_results,    # one whole case
                   labels
 RunMetrics:       the aggregate over many case results
@@ -1215,7 +1230,7 @@ LabelMetrics:     that aggregate again, per label
 `judge.py` speaks `Verdict` — prompts, parsing and retries are *its* business, and another
 implementation may do all three differently. Everything that has to hold no matter who
 judges — how a grade becomes a share of the reachable points, the weighting, "a dead judge
-costs one criterion" — lives outside it, or two judges would produce incomparable scores.
+invalidates the run" — lives outside it, or two judges would produce incomparable scores.
 
 The grading scale is the one setting that belongs to the judge *and* has to be known outside
 it: a judge owns it, every `CaseResult` carries a copy, so `metrics.py` and `comparison.py`
@@ -1272,11 +1287,11 @@ field tables in [Reference](#reference). One text, never three — they cannot d
 .venv/bin/python -m pytest
 ```
 
-308 tests, no real LLM ever called. Mocked at two levels:
+311 tests, no real LLM ever called. Mocked at two levels:
 
 - **`FakeJudge`** ([conftest.py](tests/conftest.py)) replaces the `Judge` protocol and scores
-  from a lookup table — `{1: 2, 2: ValueError("down")}` scores criterion 1 with a `2` and
-  lets the judge die on criterion 2. `CASE` and `BATCH` live in the same file, so the domain
+  from a lookup table — `{1: 2, 2: JudgeUnavailableError("down")}` scores criterion 1 with a
+  `2` and lets the judge fail on criterion 2. `CASE` and `BATCH` live in the same file, so the domain
   tests and the HTTP tests describe literally the same input. `BATCH` is deliberately uneven
   (`0.75`, `0.5`, `0.0`) because uniform scores make most run metrics indistinguishable.
 - **`StubJudgeEndpoint`** ([test_api.py](tests/test_api.py)) is a stdlib HTTP server speaking
@@ -1294,7 +1309,7 @@ field tables in [Reference](#reference). One text, never three — they cannot d
 |---|---|
 | [test_metrics.py](tests/test_metrics.py) | the scoring formula, float extremes, every run metric |
 | [test_evaluation.py](tests/test_evaluation.py) | fan-out, ordering, failure policy, batch aggregation |
-| [test_judge.py](tests/test_judge.py) | the parser reply by reply, the retry loop, the concurrency limit |
+| [test_judge.py](tests/test_judge.py) | the parser reply by reply, both retry loops, what is not retried, the concurrency limit |
 | [test_comparison.py](tests/test_comparison.py) | deltas and their direction, the three statuses, ordering, and every refusal |
 | [test_prompt.py](tests/test_prompt.py) | the prompt a scale generates, held against the hand-written original |
 | [test_scale.py](tests/test_scale.py) | what a valid scale is, and what it does to a verdict, a run and a comparison |
