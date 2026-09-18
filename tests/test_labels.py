@@ -82,7 +82,7 @@ CATALOG = [
     case_with(3, ["agentic"]),
     case_with(4, ["images"]),
 ]
-"""Four cases covering every shape a selection can ask for: one carrying both labels of a
+"""Four cases covering every shape a label filter can ask for: one carrying both labels of a
 two-label group, one carrying only part of it, one matching a second group, and one matching
 nothing — so a test can tell AND, OR and their combination apart."""
 
@@ -108,7 +108,7 @@ def test_an_or_of_ands_is_the_whole_point():
 
 
 def test_a_case_matching_two_groups_is_selected_once():
-    """The groups overlap freely; the result is a selection of cases, not of matches."""
+    """The groups overlap freely; the result is a label filter of cases, not of matches."""
     selected = filter_cases_by_labels(CATALOG, [["table"], ["split_infos"]])
 
     assert [case.id for case in selected] == [1, 2]
@@ -120,14 +120,14 @@ def test_a_case_carrying_more_than_a_group_still_matches():
     assert filter_cases_by_labels([case_with(1, ["table", "images"])], [["table"]]) != []
 
 
-def test_an_empty_selection_selects_everything():
-    """What "no selection" means — the same thing an absent `label_filter` means on a run."""
+def test_an_empty_label_filter_selects_everything():
+    """What "no filter" means — the same thing an absent `label_filter` means on a run."""
     assert filter_cases_by_labels(CATALOG, []) == CATALOG
 
 
 def test_no_match_is_an_empty_list_and_not_an_exception():
-    """A filter behaves like a filter, so it composes. What an empty selection *means* is the
-    caller's to decide — `Run` is what refuses to run one."""
+    """A filter behaves like a filter, so it composes. What an empty label filter *means*
+    is the caller's to decide — `Run` is what refuses to run one."""
     assert filter_cases_by_labels(CATALOG, [["tabel"]]) == []
 
 
@@ -139,10 +139,10 @@ def test_a_flat_list_of_labels_is_refused_rather_than_read_as_characters():
         filter_cases_by_labels(CATALOG, ["table"])
 
 
-def test_a_selection_is_read_the_same_way_however_its_labels_are_spaced():
+def test_a_label_filter_is_read_the_same_way_however_its_labels_are_spaced():
     """`filter_cases_by_labels` is documented as the *preview* of what a `Run` would run, so
-    the two have to agree on what a label is. A case's labels are stripped on the way in, so a
-    selection's have to be too — otherwise a label copied out of a spreadsheet with a trailing
+    the two have to agree on what a label is. A case's labels are stripped on the way in, so
+    a filter's have to be too — otherwise a label copied out of a spreadsheet with a trailing
     space previews as "nothing matches" and then runs two cases."""
     padded = [["  table  "]]
 
@@ -152,7 +152,7 @@ def test_a_selection_is_read_the_same_way_however_its_labels_are_spaced():
 
 
 def test_a_preview_refuses_the_selections_a_run_refuses():
-    """The other half of reading it the same way: a selection a `Run` would never accept has
+    """The other half of reading it the same way: a label filter a `Run` would never accept has
     no cases it "would pick", so answering one would be inventing a result."""
     with pytest.raises(ValidationError, match="label groups must be unique"):
         filter_cases_by_labels(CATALOG, [["table"], ["table"]])
@@ -240,11 +240,11 @@ def test_the_breakdown_can_be_computed_on_stored_results():
     assert [bucket.label for bucket in buckets] == ["table"]
 
 
-# --- the selection a run runs -------------------------------------------------------------
+# --- the label filter a run runs -------------------------------------------------------------
 
 
 def test_a_run_runs_only_the_cases_its_selection_covers():
-    """Hand it the catalog and the selection: `cases` is what you have, `selected_cases` is
+    """Hand it the catalog and the label filter: `cases` is what you have, `selected_cases` is
     what runs."""
     run = Run(cases=CATALOG, label_filter=[["table", "split_infos"], ["agentic"]])
 
@@ -278,12 +278,12 @@ def test_a_stored_run_refuses_a_selection_its_results_do_not_match():
     stored = run_of({1: 2}, {2: 0}, labels_by_case_id={1: ["table"]}).model_dump()
 
     with pytest.raises(ValidationError, match=r"cases \[2\] match none of its groups"):
-        RunResult(**{**stored, "label_filter": [["table"]]})
+        RunResult(**{**stored, "applied_label_filter": [["table"]]})
 
 
 def test_a_run_may_hold_cases_its_selection_excludes():
     """The asymmetry with the result above, stated outright: an instruction cannot lie, and
-    passing a catalog plus a selection is the entire point."""
+    passing a catalog plus a label filter is the entire point."""
     assert Run(cases=CATALOG, label_filter=[["agentic"]]).cases == CATALOG
 
 
@@ -321,7 +321,7 @@ async def test_a_run_covers_the_selected_cases_and_records_what_picked_them():
 
     assert [result.case_id for result in run_result.case_results] == [1]
     assert run_result.case_results[0].labels == ["table"]
-    assert run_result.label_filter == [["table"]]
+    assert run_result.applied_label_filter == [["table"]]
     assert [bucket.label for bucket in run_result.label_metrics] == ["table"]
 
 
@@ -420,13 +420,13 @@ def test_reordering_a_case_s_labels_is_not_a_change():
 
 
 def test_runs_recorded_under_different_filters_still_compare():
-    """`label_filter` is provenance, not a comparability rule: the case ids are the real check
-    and two different filters can legitimately arrive at the same cases."""
+    """`applied_label_filter` is provenance, not a comparability rule: the case ids are the
+    real check, and two different filters can legitimately arrive at the same cases."""
     baseline = run_of({1: 2}, labels_by_case_id={1: ["table", "images"]})
     candidate = run_of({1: 0}, labels_by_case_id={1: ["table", "images"]})
     runs = RunComparison(
-        baseline=RunResult(**{**baseline.model_dump(), "label_filter": [["table"]]}),
-        candidate=RunResult(**{**candidate.model_dump(), "label_filter": [["images"]]}),
+        baseline=RunResult(**{**baseline.model_dump(), "applied_label_filter": [["table"]]}),
+        candidate=RunResult(**{**candidate.model_dump(), "applied_label_filter": [["images"]]}),
     )
 
     assert compare_runs(runs).metrics_delta.average_score_delta == pytest.approx(-1.0)

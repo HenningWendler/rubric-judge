@@ -25,8 +25,8 @@ from rubric_eval.models import (
     CriterionResult,
     Run,
     RunResult,
-    matches_label_selection,
-    read_label_selection,
+    matches_label_filter,
+    read_label_filter,
 )
 
 
@@ -90,7 +90,7 @@ async def evaluate_run(judge: Judge, run: Run) -> RunResult:
 
     Which cases run is the `Run`'s own business: `evaluate_run` judges
     `run.selected_cases`, so handing it a whole catalog and a `label_filter` runs the
-    subset and records what picked it. An empty selection runs everything.
+    subset and records what picked it. An empty label filter runs everything.
 
     Concurrency — no second throttle is applied here on purpose. The cases fan out *and*
     every case fans out over its criteria, so the coroutines multiply (50 cases x 10
@@ -104,14 +104,14 @@ async def evaluate_run(judge: Judge, run: Run) -> RunResult:
         judge: As for `evaluate_case`. The same instance serves every case of the run,
             which is what makes the shared limit above work.
         run: At least one case, with unique case ids (Pydantic has checked both). Its
-            `label_filter` decides which of them run — also already checked, so a selection
+            `label_filter` decides which of them run — also already checked, so a filter
             matching no case never reaches here.
 
     Returns:
         A `RunResult`: one `case_results` entry per **selected** case in request order —
         fewer than `run.cases` when a `label_filter` narrowed the run — `metrics` over them,
-        `label_metrics` the same aggregate once per label the cases carry, and `label_filter`
-        echoed from the run. Every selected case is in it, or the run raised instead.
+        `label_metrics` the same aggregate once per label the cases carry, and
+        `applied_label_filter` recording what picked them. Every selected case is in it, or the run raised instead.
 
     Raises:
         JudgeUnavailableError: As `evaluate_case`. One criterion the judge could not answer
@@ -133,30 +133,30 @@ async def evaluate_run(judge: Judge, run: Run) -> RunResult:
     return RunResult(
         metrics=run_metrics(results),
         label_metrics=label_metrics(results),
-        label_filter=run.label_filter,
+        applied_label_filter=run.label_filter,
         case_results=results,
     )
 
 
-def filter_cases_by_labels(cases: list[Case], selection: list[list[str]]) -> list[Case]:
-    """Pick the cases a `LabelSelection` covers — any group, every label of it.
+def filter_cases_by_labels(cases: list[Case], label_filter: list[list[str]]) -> list[Case]:
+    """Pick the cases a `LabelFilter` covers — any group, every label of it.
 
     The same rule `Run.selected_cases` runs by and the per-label metrics bucket by, so "the
     run selected by `table`" and "the `table` bucket of the full run" are the same cases.
 
-    You rarely need this to *run* a subset — hand `Run` the catalog and the selection and it
-    does exactly this. Reach for it to see what a selection would pick before spending a judge
-    call on it, or to select by something a `Run` never sees.
+    You rarely need this to *run* a subset — hand `Run` the catalog and the label filter
+    and it does exactly this. Reach for it to see what a label filter would pick before
+    spending a judge call on it, or to select by something a `Run` never sees.
 
     A filter, and it behaves like one: no match is an empty list, not an exception, so it
-    composes. `Run` is what refuses to *run* an empty selection.
+    composes. `Run` is what refuses to *run* an empty label filter.
 
-    The selection is read as the `LabelSelection` a `Run` would read it as, so a preview and
+    The label filter is read as the `LabelFilter` a `Run` would read it as, so a preview and
     the run it previews can never pick different cases.
 
     Args:
         cases: The catalog to select from; returned in its own order, never reordered.
-        selection: Groups of required labels, read as an OR of ANDs. Empty selects every
+        label_filter: Groups of required labels, read as an OR of ANDs. Empty selects every
             case.
 
     Returns:
@@ -166,20 +166,20 @@ def filter_cases_by_labels(cases: list[Case], selection: list[list[str]]) -> lis
         TypeError: For a flat `["table"]`, which would otherwise compare *characters* and
             quietly return the wrong cases — the message names both readings you may have
             meant.
-        pydantic.ValidationError: For a selection a `Run` would refuse too — a blank label,
-            or the same group twice.
+        pydantic.ValidationError: For a label filter a `Run` would refuse too — a blank
+            label, or the same group twice.
 
     Example:
         filter_cases_by_labels(catalog, [["table", "split_infos"], ["agentic"]])
     """
-    if any(isinstance(group, str) for group in selection):
+    if any(isinstance(group, str) for group in label_filter):
         raise TypeError(
-            "a selection is a list of label *groups*, not a list of labels: pass "
-            f"{[list(selection)]} to require all of them, or "
-            f"{[[label] for label in selection]} to require any of them"
+            "a label filter is a list of label *groups*, not a list of labels: pass "
+            f"{[list(label_filter)]} to require all of them, or "
+            f"{[[label] for label in label_filter]} to require any of them"
         )
-    selection = read_label_selection(selection)
-    return [case for case in cases if matches_label_selection(case.labels, selection)]
+    label_filter = read_label_filter(label_filter)
+    return [case for case in cases if matches_label_filter(case.labels, label_filter)]
 
 
 async def _judge_criterion(judge: Judge, case: Case, criterion: Criterion) -> CriterionResult:

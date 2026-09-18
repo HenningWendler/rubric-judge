@@ -125,7 +125,7 @@ def test_the_run_result_carries_every_published_field(client):
 
     body = client.post("/evaluate/run", json=RUN).json()
 
-    assert set(body) == {"metrics", "label_metrics", "label_filter", "case_results"}
+    assert set(body) == {"metrics", "label_metrics", "applied_label_filter", "case_results"}
     assert set(body["metrics"]) == {
         "total_cases", "average_score", "median_score", "variance", "standard_deviation",
         "average_criterion_score", "criteria_fulfillment_rate", "cases_with_score_zero",
@@ -605,14 +605,14 @@ def test_a_run_reports_its_metrics_once_per_label(client):
 
 
 def test_a_label_filter_in_the_body_runs_only_the_matching_cases(client):
-    """No query string: the selection travels in the body, and the server runs the subset."""
+    """No query string: the label filter travels in the body, and the server runs the subset."""
     use_judge(FakeJudge(RUN_VERDICTS))
     narrowed = {**LABELLED_RUN, "label_filter": [["links"]]}
 
     body = client.post("/evaluate/run", json=narrowed).json()
 
     assert [case["case_id"] for case in body["case_results"]] == [3]
-    assert body["label_filter"] == [["links"]]
+    assert body["applied_label_filter"] == [["links"]]
 
 
 def test_one_group_requires_every_label_in_it(client):

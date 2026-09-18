@@ -177,13 +177,13 @@ answer actually has to meet belongs in `criteria`, where it is checkable and wei
 adding a label cannot move a single score.
 
 **Running only part of the catalog** — hand the whole thing to a `Run` together with a
-`label_filter`. It runs the cases the selection covers and records what picked them:
+`label_filter`. It runs the cases the label filter covers and records what picked them:
 
 ```python
 run_result = await evaluate_run(judge, Run(cases=catalog, label_filter=[["table"]]))
 
 [r.case_id for r in run_result.case_results]  # [2, 3] — only table cases were judged
-run_result.label_filter                       # [['table']]
+run_result.applied_label_filter               # [['table']]
 ```
 
 The extra bracket is the whole boolean story. A `label_filter` is an **OR of ANDs**: a case
@@ -200,13 +200,13 @@ Groups and labels combine freely, and every boolean combination of labels can be
 way — which is why one extra level of list replaces an expression grammar. The general shape
 is `[["table", "split_infos"], ["agentic"]]`, meaning `(table AND split_infos) OR agentic`.
 
-A selection matching no case is rejected when the `Run` is built — before a single judge
+A label filter matching no case is rejected when the `Run` is built — before a single judge
 call — and the error names the labels your catalog does carry, with counts, because that is
 nearly always a typo. Negation is not expressible: "table but not images" needs something
 this deliberately does not have yet.
 
-`filter_cases_by_labels(catalog, selection)` applies the same rule without running anything,
-for when you want to see what a selection would pick first.
+`filter_cases_by_labels(catalog, label filter)` applies the same rule without running anything,
+for when you want to see what a label filter would pick first.
 
 ### Comparing two runs
 
@@ -331,7 +331,7 @@ both paths — see [the vocabulary](#the-vocabulary).
 | Field | Type | Required | Rules |
 |---|---|---|---|
 | `cases` | `list[Case]` | yes | At least one. Case ids must be unique |
-| `label_filter` | `list[list[str]]` | no, default `[]` | Which of those cases to run, as an **OR of ANDs**: a case runs when it carries every label of at least one group. `[]` runs all of them. A selection matching *no* case is rejected, naming the labels the run does carry |
+| `label_filter` | `list[list[str]]` | no, default `[]` | Which of those cases to run, as an **OR of ANDs**: a case runs when it carries every label of at least one group. `[]` runs all of them. A label filter matching *no* case is rejected, naming the labels the run does carry |
 
 `cases` is what you have; `label_filter` decides what runs. Post a whole catalog with
 `[["table", "split_infos"], ["agentic"]]` and the run covers the cases carrying both `table`
@@ -341,8 +341,8 @@ Every boolean combination of labels can be written as an OR of ANDs, which is wh
 level of list replaces an expression grammar. Negation is the exception and is absent by
 design: "table but not images" cannot be written.
 
-On a `Run` this field is an **instruction**; on a `RunResult` the same field is a
-**record** of what ran, and there it is validated — see below.
+On a `Run` this field is an **instruction**; the `RunResult` carries the same groups back as
+`applied_label_filter`, a **record** of what ran, and there it is validated — see below.
 
 #### `RunComparison` — two finished runs to hold against each other
 
@@ -439,7 +439,7 @@ stale number under a familiar name.
 |---|---|---|
 | `metrics` | `RunMetrics` | The aggregate over every case of the run |
 | `label_metrics` | `list[LabelMetrics]` | The same aggregate once per label, **in alphabetical label order**. One entry per label occurring anywhere in `case_results` and no others — `[]` for a run of untagged cases |
-| `label_filter` | `list[list[str]]` | The selection that picked these cases, echoed from `Run.label_filter` so a stored run still says which subset it is. `[]` for an unfiltered run. Here it is a *record*, so it is checked: every case result must match it |
+| `applied_label_filter` | `list[list[str]]` | The label filter that picked these cases, copied from `Run.label_filter` so a stored run still says which subset it is. `[]` for an unfiltered run. Named apart from the input field because it is a *record*, so it is checked: every case result must match it |
 | `case_results` | `list[CaseResult]` | ≥ 1 entry. One per **selected** case, in request order — fewer than `Run.cases` when a `label_filter` narrowed the run — so any suspicious number can be traced back. Never empty: `run_metrics` refuses a run of no cases, so such a run was never producible. Case ids must be unique: cases are paired by id when two runs are compared |
 
 #### `ChangeStatus` — which way a score moved
@@ -567,13 +567,13 @@ apart. Which cases run is the `Run`'s own business: it judges `run.selected_case
 whole catalog plus a `label_filter` runs the subset and records what picked it.
 
 ```python
-def filter_cases_by_labels(cases: list[Case], selection: list[list[str]]) -> list[Case]
+def filter_cases_by_labels(cases: list[Case], label_filter: list[list[str]]) -> list[Case]
 ```
-The cases a selection covers — any group, every label of it. The same rule
+The cases a label filter covers — any group, every label of it. The same rule
 `Run.selected_cases` runs by and the buckets bucket by, so "the run selected by `table`"
 and "the `table` bucket of the full run" are the same cases. You rarely need it to *run* a
-subset; reach for it to see what a selection would pick first. No match is an empty list,
-never an exception — `Run` is what refuses to run one. The selection itself is held to the
+subset; reach for it to see what a label filter would pick first. No match is an empty list,
+never an exception — `Run` is what refuses to run one. The label filter itself is held to the
 same rules as `Run.label_filter`, so a preview and the run it previews can never pick
 different cases. Raises `TypeError` for a flat `["table"]`, which would otherwise compare
 characters and quietly return the wrong cases.
@@ -695,7 +695,7 @@ The JSON shapes are exactly the models above. `POST /evaluate/run`:
     { "label": "table",
       "metrics": { "total_cases": 2, "average_score": 0.5, "…": "the whole table again" } }
   ],
-  "label_filter": [],
+  "applied_label_filter": [],
   "case_results": [
     { "case_id": 1, "score": 1.0,
       "scale": { "maximum": 2, "presence_threshold": 0.5,
@@ -715,8 +715,8 @@ Case 1 carries one label and case 2 carries two, so case 2 counts in **both** bu
 is why `links` reports one case and `table` reports two, over a run of two.
 
 To run only part of the catalog, add a `label_filter` to the body — there is no query
-parameter, so the library and the API take the selection in exactly one place and in exactly
-one form. It is an **OR of ANDs**: a case runs when it carries every label of at least one
+parameter, so the library and the API take the label filter in exactly one place and in
+exactly one form. It is an **OR of ANDs**: a case runs when it carries every label of at least one
 group.
 
 ```json
@@ -726,12 +726,12 @@ group.
 
 Against the run above that runs case 2 — it carries both `table` and `links` — plus any
 case carrying `agentic`. One group is a plain AND, several one-label groups are a plain OR, and an absent
-`label_filter` runs everything. It comes back on the response, and `metrics`, `label_metrics`
-and `case_results` all describe the **selected** cases only — a narrowed run never reports
-numbers for cases it did not judge.
+`label_filter` runs everything. It comes back as `applied_label_filter`, and `metrics`,
+`label_metrics` and `case_results` all describe the **selected** cases only — a narrowed run
+never reports numbers for cases it did not judge.
 
 Filtering here does not save you the upload: the whole run travels either way, so for a
-large catalog prefer posting only the cases you want. A selection matching no case is a `422`
+large catalog prefer posting only the cases you want. A label filter matching no case is a `422`
 naming the labels your run does carry, with counts, because that is nearly always a typo:
 
 ```json
@@ -819,11 +819,11 @@ Everything is validated **before** the first LLM call, so a malformed request co
 | `criteria`, `cases`, `criterion_results` or `case_results` empty; duplicate ids in any of them; `content` blank; `weight` `0`, negative, `Infinity` or `NaN`; missing field | `pydantic.ValidationError` | `422` |
 | A run posted to `/compare` whose numbers leave the ranges the [output tables](#outputs) give — a score above its own `scale.maximum` or off `0 … 1`, a non-positive weight, any `Infinity` or `NaN` | `pydantic.ValidationError` | `422` |
 | A run whose cases name more than one `scale`; a verdict whose `is_present` contradicts its own score | `pydantic.ValidationError` | `422` |
-| A blank label, or the same label twice — on one case, or in one group of a selection | `pydantic.ValidationError` | `422` |
-| The same group twice in a selection, in any order — in a `label_filter` or in `filter_cases_by_labels()` | `pydantic.ValidationError` | `422` |
+| A blank label, or the same label twice — on one case, or in one group of a label filter | `pydantic.ValidationError` | `422` |
+| The same group twice in a label filter, in any order — in a `label_filter` or in `filter_cases_by_labels()` | `pydantic.ValidationError` | `422` |
 | A `Run` whose `label_filter` matches no case at all | `pydantic.ValidationError` naming the labels the run does carry, with counts | `422` |
-| A stored `RunResult` whose `label_filter` does not describe the cases it holds | `pydantic.ValidationError` naming the offending case ids | `422` |
-| A flat `["table"]` where a selection is expected — to `filter_cases_by_labels()`, or in a request body | `TypeError` naming both readings you may have meant | `422` (schema) |
+| A stored `RunResult` whose `applied_label_filter` does not describe the cases it holds | `pydantic.ValidationError` naming the offending case ids | `422` |
+| A flat `["table"]` where a label filter is expected — to `filter_cases_by_labels()`, or in a request body | `TypeError` naming both readings you may have meant | `422` (schema) |
 | A stored run whose `label_metrics` does not describe exactly the labels its cases carry | `pydantic.ValidationError` | `422` |
 | A `Scale` describing only some of its grades, or a grade it does not have | `pydantic.ValidationError` | `422` |
 | Two runs not comparable: a different grading scale, different case ids, different criteria within a case, different weights, or a case whose **labels** changed between the runs | `RunsNotComparableError` (a `ValueError`) naming **every** difference at once | `422` |

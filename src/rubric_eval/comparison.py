@@ -65,9 +65,9 @@ def compare_runs(run_comparison: RunComparison) -> RunComparisonResult:
         Both runs are complete by construction: a run whose judge failed anywhere was never
         handed back, so no delta here is an artefact of an outage on one side.
 
-        `label_filter` is deliberately *not* compared: two runs covering the same case ids are
-        comparable however each of them was selected, and two different filters can legitimately
-        arrive at the same cases.
+        `applied_label_filter` is deliberately *not* compared: two runs covering the same case
+        ids are comparable however each of them was selected, and two different filters can
+        legitimately arrive at the same cases.
 
     Raises:
         RunsNotComparableError: A `ValueError`. The runs do not describe the same catalog,
@@ -83,12 +83,13 @@ def compare_runs(run_comparison: RunComparison) -> RunComparisonResult:
         result.summary.worsened_case_ids           # [5] — what the win cost
         result.summary.improvement.largest         # +0.31
     """
-    _reject_incomparable_runs(run_comparison.baseline, run_comparison.candidate)
-    case_comparison_results = _compare_cases(run_comparison.baseline, run_comparison.candidate)
+    baseline, candidate = run_comparison.baseline, run_comparison.candidate
+    _reject_incomparable_runs(baseline, candidate)
+    case_comparison_results = _compare_cases(baseline, candidate)
     return RunComparisonResult(
-        metrics_delta=_metrics_delta(run_comparison.baseline.metrics, run_comparison.candidate.metrics),
+        metrics_delta=_metrics_delta(baseline.metrics, candidate.metrics),
         summary=_summarize(case_comparison_results),
-        label_metrics_deltas=_label_metrics_deltas(run_comparison.baseline, run_comparison.candidate),
+        label_metrics_deltas=_label_metrics_deltas(baseline, candidate),
         case_comparison_results=case_comparison_results,
     )
 

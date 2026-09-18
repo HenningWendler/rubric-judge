@@ -146,7 +146,7 @@ async def evaluate_run(run: Run, judge: Annotated[Judge, Depends(get_judge)]) ->
     of ANDs**: `[["table", "split_infos"], ["agentic"]]` runs the cases carrying both `table`
     and `split_infos`, plus the cases carrying `agentic`. One group is a plain AND, several
     one-label groups are a plain OR, and an absent `label_filter` runs everything. It comes
-    back on the response, so a stored run still says which subset it is.
+    back as `applied_label_filter`, so a stored run still says which subset it is.
 
     Synchronous: the response arrives when the last selected case is done. Sizing the request
     is therefore yours to do — the whole catalog is one HTTP timeout, whether or not a
@@ -185,8 +185,8 @@ async def compare_runs(run_comparison: RunComparison) -> RunComparisonResult:
 
     `label_metrics_deltas` repeats `metrics_delta` for each label the cases carry, which is
     what says whether an average that rose did so by fixing one kind of case or by lifting
-    all of them. `label_filter` is not compared: two runs covering the same case ids are
-    comparable however each was selected.
+    all of them. `applied_label_filter` is not compared: two runs covering the same case ids
+    are comparable however each was selected.
 
     **422** if a body is invalid, or if the two runs are not comparable — a different grading
     scale, different case ids, different criteria within a case, different weights, or a case
