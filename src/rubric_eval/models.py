@@ -39,13 +39,26 @@ Identifier = TypeVar("Identifier", int, str)
 and criteria, and the string labels of a case."""
 
 
-def _duplicates(values: Iterable[Identifier]) -> list[Identifier]:
-    """One check for the rubric, the run and the labels: each of them matches something back
-    by an identifier, so a repeat breaks all three the same way. Empty when every value is
-    unique, which is what lets it read as a validator condition.
+def _reject_duplicates(subject: str, values: Iterable[Identifier]) -> None:
+    """One check and one wording for every repeated identifier in this package.
+
+    The criterion ids of a rubric, the case ids of a run, the same two again on the results
+    of either, and the labels of a case: each of them matches something back by that
+    identifier, so a repeat breaks all five the same way. Written out per model, the five
+    refusals would eventually word one rule five ways.
+
+    Args:
+        subject: What is repeated, as the message says it — "criterion ids", "case ids",
+            "labels". Plural, because the sentence reads "<subject> must be unique".
+        values: The identifiers to check, all of one type. Order is irrelevant.
+
+    Raises:
+        ValueError: At least one value occurs twice. The message names every repeat at once,
+            sorted, so one fix can address the whole collision.
     """
     counted = Counter(values)
-    return sorted(value for value, count in counted.items() if count > 1)
+    if repeated := sorted(value for value, count in counted.items() if count > 1):
+        raise ValueError(f"{subject} must be unique, repeated: {repeated}")
 
 
 LevelDescription = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
@@ -65,8 +78,7 @@ should change the grade belongs in a `Criterion`, where it is checkable and weig
 def _reject_duplicate_labels(labels: list[Label]) -> list[Label]:
     """Labels are read as a set everywhere — bucketing, filtering, comparing two runs — so a
     repeat is a caller mistake that no downstream code could ever act on."""
-    if repeated := _duplicates(labels):
-        raise ValueError(f"labels must be unique, repeated: {repeated}")
+    _reject_duplicates("labels", labels)
     return labels
 
 
@@ -572,8 +584,7 @@ class Case(DocumentedModel):
     def _reject_duplicate_criterion_ids(cls, criteria: list[Criterion]) -> list[Criterion]:
         """Every result is labelled with its `Criterion.id`, so a repeated id makes results
         ambiguous: a caller keying by id would drop one result or count another twice."""
-        if repeated := _duplicates(criterion.id for criterion in criteria):
-            raise ValueError(f"criterion ids must be unique, repeated: {repeated}")
+        _reject_duplicates("criterion ids", (criterion.id for criterion in criteria))
         return criteria
 
 
@@ -628,10 +639,10 @@ class CaseResult(DocumentedModel):
         """`Case.criteria` already rejects repeated ids, so `evaluate_case` can never produce
         them — but a stored result is postable to `/compare`, which keys results by id to
         pair the two runs up and would silently drop one of a repeated pair."""
-        if repeated := _duplicates(
-            criterion_result.criterion_id for criterion_result in criterion_results
-        ):
-            raise ValueError(f"criterion ids must be unique, repeated: {repeated}")
+        _reject_duplicates(
+            "criterion ids",
+            (criterion_result.criterion_id for criterion_result in criterion_results),
+        )
         return criterion_results
 
     @model_validator(mode="after")
@@ -692,8 +703,7 @@ class Run(DocumentedModel):
     def _reject_duplicate_case_ids(cls, cases: list[Case]) -> list[Case]:
         """Same reason as for criterion ids: a repeated id makes the run metrics ambiguous,
         because `cases_with_score_zero` and the weakest-case shortlist name cases by id."""
-        if repeated := _duplicates(case.id for case in cases):
-            raise ValueError(f"case ids must be unique, repeated: {repeated}")
+        _reject_duplicates("case ids", (case.id for case in cases))
         return cases
 
     @property
@@ -858,8 +868,9 @@ class RunResult(DocumentedModel):
         them — but a stored run is postable to `/compare`, which keys cases by id to pair the
         two runs up. A repeated id would silently drop a case there and report deltas over
         fewer cases than `metrics` describes, with a 200."""
-        if repeated := _duplicates(case_result.case_id for case_result in case_results):
-            raise ValueError(f"case ids must be unique, repeated: {repeated}")
+        _reject_duplicates(
+            "case ids", (case_result.case_id for case_result in case_results)
+        )
         return case_results
 
     @property
