@@ -11,8 +11,8 @@ from tests.conftest import run_of
 from rubric_eval import (
     SCORE_EQUALITY_TOLERANCE,
     ChangeStatus,
+    RunComparison,
     RunMetricsDelta,
-    RunPair,
     RunsNotComparableError,
     compare_runs,
 )
@@ -22,7 +22,7 @@ from rubric_eval.models import CaseResult, CriterionResult, RunResult
 
 def compared(baseline: RunResult, candidate: RunResult):
     """The result of comparing two runs — the whole file's one line of setup."""
-    return compare_runs(RunPair(baseline=baseline, candidate=candidate))
+    return compare_runs(RunComparison(baseline=baseline, candidate=candidate))
 
 
 UNEVEN_BASELINE = run_of({1: 0, 2: 0}, {3: 0, 4: 1}, {5: 0, 6: 2})
@@ -48,7 +48,7 @@ class TestDirection:
         assert result.case_comparison_results[0].score_delta == -1.0
 
     def test_swapping_the_sides_flips_the_whole_document_not_only_the_average(self):
-        """`RunPair` exists because a swapped pair would be undetectable. What such a swap
+        """`RunComparison` exists because a swapped pair would be undetectable. What such a swap
         would cost is every number in the result, so every number has to invert: each delta
         changes sign, the movers trade lists, and each magnitude mirrors the other side."""
         forward = compared(UNEVEN_BASELINE, UNEVEN_CANDIDATE)

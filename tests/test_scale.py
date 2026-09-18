@@ -11,13 +11,13 @@ from pydantic import ValidationError
 from tests.conftest import CASE, FakeJudge, run_of
 from rubric_eval import (
     DEFAULT_SCALE,
-    RunResult,
     Case,
     CaseResult,
     Criterion,
     CriterionResult,
     JudgeUnavailableError,
-    RunPair,
+    RunComparison,
+    RunResult,
     RunsNotComparableError,
     Scale,
     Verdict,
@@ -330,17 +330,17 @@ async def test_a_judge_scoring_above_the_scale_it_declared_is_refused():
 
 def test_refuses_to_compare_runs_judged_on_different_scales():
     with pytest.raises(RunsNotComparableError, match="different scales"):
-        compare_runs(RunPair(baseline=run_of({1: 2}), candidate=run_of({1: 7}, scale=TEN_POINT)))
+        compare_runs(RunComparison(baseline=run_of({1: 2}), candidate=run_of({1: 7}, scale=TEN_POINT)))
 
 
 def test_the_refusal_names_both_scales():
     with pytest.raises(RunsNotComparableError, match=r"0\.\.2.*0\.\.10"):
-        compare_runs(RunPair(baseline=run_of({1: 2}), candidate=run_of({1: 7}, scale=TEN_POINT)))
+        compare_runs(RunComparison(baseline=run_of({1: 2}), candidate=run_of({1: 7}, scale=TEN_POINT)))
 
 
 def test_two_runs_on_the_same_custom_scale_compare_normally():
     comparison = compare_runs(
-        RunPair(
+        RunComparison(
             baseline=run_of({1: 3}, scale=TEN_POINT),
             candidate=run_of({1: 8}, scale=TEN_POINT),
         )
@@ -367,7 +367,7 @@ def test_a_run_of_cases_on_different_scales_has_no_metrics_to_report():
 def test_two_scales_sharing_a_maximum_are_still_two_scales():
     strict = Scale(maximum=2, presence_threshold=2)
     with pytest.raises(RunsNotComparableError, match="different scales"):
-        compare_runs(RunPair(baseline=run_of({1: 1}), candidate=run_of({1: 1}, scale=strict)))
+        compare_runs(RunComparison(baseline=run_of({1: 1}), candidate=run_of({1: 1}, scale=strict)))
 
 
 def test_a_run_stored_before_scales_existed_compares_with_a_new_one():
@@ -388,7 +388,7 @@ def test_a_run_stored_before_scales_existed_compares_with_a_new_one():
         }
     )
     assert stored.scale == DEFAULT_SCALE
-    comparison = compare_runs(RunPair(baseline=stored, candidate=run_of({1: 2})))
+    comparison = compare_runs(RunComparison(baseline=stored, candidate=run_of({1: 2})))
     assert comparison.metrics_delta.average_score_delta == 0.0
 
 
@@ -444,7 +444,7 @@ def test_rewording_a_level_makes_it_a_different_scale():
     )
     assert reworded != DEFAULT_SCALE
     with pytest.raises(RunsNotComparableError, match="different scales"):
-        compare_runs(RunPair(baseline=run_of({1: 1}), candidate=run_of({1: 1}, scale=reworded)))
+        compare_runs(RunComparison(baseline=run_of({1: 1}), candidate=run_of({1: 1}, scale=reworded)))
 
 
 def test_the_refusal_says_which_grade_was_reworded_when_the_scales_print_alike():
@@ -454,7 +454,7 @@ def test_the_refusal_says_which_grade_was_reworded_when_the_scales_print_alike()
         update={"level_descriptions": DEFAULT_SCALE.level_descriptions | {1: "Halfway there."}}
     )
     with pytest.raises(RunsNotComparableError, match=r"the wording of \[1\] differs"):
-        compare_runs(RunPair(baseline=run_of({1: 1}), candidate=run_of({1: 1}, scale=reworded)))
+        compare_runs(RunComparison(baseline=run_of({1: 1}), candidate=run_of({1: 1}, scale=reworded)))
 
 
 def test_a_run_says_which_grade_was_reworded_too_when_its_cases_print_alike():
@@ -481,7 +481,7 @@ def test_a_refusal_over_different_maximums_stays_short():
     """The two names already explain it, so listing eleven reworded grades would be noise."""
     ten_point = Scale(maximum=10, presence_threshold=5)
     with pytest.raises(RunsNotComparableError, match=r"candidate 0\.\.10 \(covered from 5\.0\)$"):
-        compare_runs(RunPair(baseline=run_of({1: 1}), candidate=run_of({1: 1}, scale=ten_point)))
+        compare_runs(RunComparison(baseline=run_of({1: 1}), candidate=run_of({1: 1}, scale=ten_point)))
 
 
 def test_descriptions_survive_a_json_round_trip_with_their_grades_as_numbers():

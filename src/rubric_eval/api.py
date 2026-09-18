@@ -16,9 +16,9 @@ from rubric_eval.judge import Judge, JudgeConfig, JudgeUnavailableError, OpenAIJ
 from rubric_eval.models import (
     Case,
     CaseResult,
-    ComparisonResult,
     Run,
-    RunPair,
+    RunComparison,
+    RunComparisonResult,
     RunResult,
 )
 
@@ -170,15 +170,15 @@ async def evaluate_run(run: Run, judge: Annotated[Judge, Depends(get_judge)]) ->
 
 
 @app.post("/compare", summary="Hold two finished runs against each other")
-async def compare_runs(runs: RunPair) -> ComparisonResult:
+async def compare_runs(run_comparison: RunComparison) -> RunComparisonResult:
     """Compare two runs of the same catalog — did your change help, where, and what did it cost.
 
-    Send a `RunPair`: the `baseline` run to compare against and the `candidate` run under
-    test, each one exactly the `RunResult` document `POST /evaluate/run` returned. Runs
+    Send a `RunComparison`: the `baseline` run to compare against and the `candidate` run
+    under test, each one exactly the `RunResult` document `POST /evaluate/run` returned. Runs
     stored as JSON months apart compare just like runs produced a second ago.
 
-    Returns a `ComparisonResult` at three grains. `metrics_delta` holds `candidate - baseline`
-    for every run metric, so a positive number always means the candidate did better — except
+    Returns a `RunComparisonResult` at three grains. `metrics_delta` holds
+    `candidate - baseline` for every run metric, so a positive number always means the candidate did better — except
     for the two counting fields, where fewer is better. `summary` says how that is distributed:
     which cases improved, stayed, or got worse, biggest movers first, and how large the moves
     were on each side. `case_comparison_results` goes down to the individual criterion.
@@ -201,6 +201,6 @@ async def compare_runs(runs: RunPair) -> ComparisonResult:
     the service has no API key configured.
     """
     try:
-        return comparison.compare_runs(runs)
+        return comparison.compare_runs(run_comparison)
     except comparison.RunsNotComparableError as incomparable:
         raise HTTPException(status_code=422, detail=str(incomparable)) from incomparable

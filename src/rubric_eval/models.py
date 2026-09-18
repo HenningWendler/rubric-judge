@@ -1228,15 +1228,16 @@ class ChangeSummary(DocumentedModel):
         return self.improved_case_count + self.stable_case_count + self.worsened_case_count
 
 
-class RunPair(DocumentedModel):
-    """The input to `compare_runs`: two finished runs to hold against each other.
+class RunComparison(DocumentedModel):
+    """The comparison to make: the two finished runs to hold against each other.
 
-    A named pair rather than two arguments on purpose. Both sides have the exact same type,
-    so a swapped pair of positional arguments would be impossible to detect and would invert
-    the sign of every number in the result.
+    One named argument rather than two positional ones on purpose. Both sides have the exact
+    same type, so a swapped pair would be impossible to detect and would invert the sign of
+    every number in the result. Named like every other input here — `Run` produces a
+    `RunResult`, a `RunComparison` produces a `RunComparisonResult`.
 
     Example:
-        RunPair(baseline=last_weeks_run, candidate=todays_run)
+        RunComparison(baseline=last_weeks_run, candidate=todays_run)
     """
 
     baseline: RunResult
@@ -1247,7 +1248,7 @@ class RunPair(DocumentedModel):
     positive number always means this one did better."""
 
 
-class ComparisonResult(DocumentedModel):
+class RunComparisonResult(DocumentedModel):
     """What `compare_runs` returns: the same comparison at three grains.
 
     `metrics_delta` says whether the run got better, `summary` says how that is distributed

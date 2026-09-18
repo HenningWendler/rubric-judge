@@ -15,7 +15,7 @@ from rubric_eval import (
     Criterion,
     LabelMetrics,
     Run,
-    RunPair,
+    RunComparison,
     RunResult,
     RunsNotComparableError,
     compare_runs,
@@ -367,7 +367,7 @@ def test_a_comparison_reports_a_delta_per_label():
     baseline = run_of({1: 2}, {2: 0}, labels_by_case_id=labels)
     candidate = run_of({1: 0}, {2: 2}, labels_by_case_id=labels)
 
-    result = compare_runs(RunPair(baseline=baseline, candidate=candidate))
+    result = compare_runs(RunComparison(baseline=baseline, candidate=candidate))
 
     deltas = {bucket.label: bucket.metrics_delta for bucket in result.label_metrics_deltas}
     assert result.metrics_delta.average_score_delta == pytest.approx(0.0)
@@ -377,7 +377,7 @@ def test_a_comparison_reports_a_delta_per_label():
 
 def test_the_label_deltas_are_alphabetical():
     labels = {1: ["table"], 2: ["agentic_search"]}
-    runs = RunPair(
+    runs = RunComparison(
         baseline=run_of({1: 2}, {2: 0}, labels_by_case_id=labels),
         candidate=run_of({1: 2}, {2: 0}, labels_by_case_id=labels),
     )
@@ -391,7 +391,7 @@ def test_the_label_deltas_are_alphabetical():
 
 
 def test_two_unlabelled_runs_compare_with_no_label_deltas():
-    runs = RunPair(baseline=run_of({1: 2}), candidate=run_of({1: 0}))
+    runs = RunComparison(baseline=run_of({1: 2}), candidate=run_of({1: 0}))
 
     assert compare_runs(runs).label_metrics_deltas == []
 
@@ -399,7 +399,7 @@ def test_two_unlabelled_runs_compare_with_no_label_deltas():
 def test_a_case_relabelled_between_the_runs_is_refused():
     """The two buckets of the same name would hold different cases, so every delta under them
     would silently compare two different populations."""
-    runs = RunPair(
+    runs = RunComparison(
         baseline=run_of({1: 2}, labels_by_case_id={1: ["table"]}),
         candidate=run_of({1: 2}, labels_by_case_id={1: ["images"]}),
     )
@@ -411,7 +411,7 @@ def test_a_case_relabelled_between_the_runs_is_refused():
 def test_reordering_a_case_s_labels_is_not_a_change():
     """Labels are read as a set everywhere, so the same labelling written in another order
     must not refuse a comparison that is perfectly sound."""
-    runs = RunPair(
+    runs = RunComparison(
         baseline=run_of({1: 2}, labels_by_case_id={1: ["table", "images"]}),
         candidate=run_of({1: 0}, labels_by_case_id={1: ["images", "table"]}),
     )
@@ -424,7 +424,7 @@ def test_runs_recorded_under_different_filters_still_compare():
     and two different filters can legitimately arrive at the same cases."""
     baseline = run_of({1: 2}, labels_by_case_id={1: ["table", "images"]})
     candidate = run_of({1: 0}, labels_by_case_id={1: ["table", "images"]})
-    runs = RunPair(
+    runs = RunComparison(
         baseline=RunResult(**{**baseline.model_dump(), "label_filter": [["table"]]}),
         candidate=RunResult(**{**candidate.model_dump(), "label_filter": [["images"]]}),
     )

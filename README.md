@@ -210,18 +210,18 @@ for when you want to see what a selection would pick first.
 
 ### Comparing two runs
 
-Two `RunResult`s of the **same catalog** → one `ComparisonResult`: did your change help,
+Two `RunResult`s of the **same catalog** → one `RunComparisonResult`: did your change help,
 where, and what did it cost. No judge, no network, no cost — runs stored as JSON months
 apart compare exactly like runs produced a second ago.
 
 ```python
 from pathlib import Path
-from rubric_eval import RunResult, RunPair, compare_runs
+from rubric_eval import RunResult, RunComparison, compare_runs
 
 baseline = RunResult.model_validate_json(Path("run_before.json").read_text())
 candidate = RunResult.model_validate_json(Path("run_after.json").read_text())
 
-result = compare_runs(RunPair(baseline=baseline, candidate=candidate))
+result = compare_runs(RunComparison(baseline=baseline, candidate=candidate))
 
 result.metrics_delta.average_score_delta   # +0.125  — the run got better on average
 result.metrics_delta.median_score_delta    # -0.125  — but the typical case did not
@@ -231,9 +231,9 @@ result.summary.worsening.largest           # -0.5
 ```
 
 Every delta is **candidate minus baseline**, so a positive number always means the candidate
-did better. `compare_runs` takes a `RunPair` rather than two arguments on purpose: both
+did better. `compare_runs` takes a `RunComparison` rather than two arguments on purpose: both
 sides have the same type, so a swapped pair would be undetectable and would invert every
-sign. Only what comes back carries `Result` in its name — `RunPair` is what you hand in.
+sign. Only what comes back carries `Result` in its name — `RunComparison` is what you hand in.
 
 Drill down when a number needs explaining — run, case, criterion:
 
@@ -250,7 +250,7 @@ dropped.status                                         # ChangeStatus.WORSENED
 Comparing runs of **different** catalogs is refused rather than approximated:
 
 ```python
-compare_runs(RunPair(baseline=run_of_8_cases, candidate=run_of_7_cases))
+compare_runs(RunComparison(baseline=run_of_8_cases, candidate=run_of_7_cases))
 # RunsNotComparableError: the runs are not comparable: cases only in the baseline: [6]
 ```
 
@@ -344,7 +344,7 @@ design: "table but not images" cannot be written.
 On a `Run` this field is an **instruction**; on a `RunResult` the same field is a
 **record** of what ran, and there it is validated — see below.
 
-#### `RunPair` — two finished runs to hold against each other
+#### `RunComparison` — two finished runs to hold against each other
 
 | Field | Type | Required | Rules |
 |---|---|---|---|
@@ -540,7 +540,7 @@ says whether every case rose a little or one rose a lot while another collapsed.
 | `stability_rate` | `float` | `0 … 1` | Share that did not move |
 | `worsening_rate` | `float` | `0 … 1` | Share that got worse. Every case lands in exactly one list, so the three **counts** always add up to the run; the three rates are three separate divisions and sum to `1.0` only to within float rounding |
 
-#### `ComparisonResult` — one whole comparison
+#### `RunComparisonResult` — one whole comparison
 
 | Field | Type | Meaning |
 |---|---|---|
@@ -607,7 +607,7 @@ level, and the reply format down to the grades the model may answer with. `examp
 appended verbatim. Raises `ValueError` for a scale with no `level_descriptions`.
 
 ```python
-def compare_runs(run_pair: RunPair) -> ComparisonResult
+def compare_runs(run_comparison: RunComparison) -> RunComparisonResult
 ```
 Holds two finished runs against each other at three grains — run, case, criterion — plus
 one delta per label. Pure computation: no judge, no network, no cost. Raises
@@ -656,7 +656,7 @@ different order, far below the smallest difference a rubric can actually produce
 |---|---|---|---|
 | `POST` | `/evaluate` | a `Case` | a `CaseResult` |
 | `POST` | `/evaluate/run` | a `Run` | a `RunResult` |
-| `POST` | `/compare` | a `RunPair` | a `ComparisonResult` |
+| `POST` | `/compare` | a `RunComparison` | a `RunComparisonResult` |
 | `GET` | `/health` | — | `{"status": "ok"}` |
 
 The JSON shapes are exactly the models above. `POST /evaluate/run`:
@@ -1188,7 +1188,7 @@ Three grains, each a pair of *what goes in* and *what comes back*:
 | one requirement | `Criterion` | `CriterionResult` |
 | one answer | `Case` | `CaseResult` |
 | a whole catalog | `Run` | `RunResult` |
-| two whole runs | `RunPair` | `ComparisonResult` |
+| two whole runs | `RunComparison` | `RunComparisonResult` |
 
 Plus `RunMetrics`, which is `RunResult.metrics` and nothing else, `Scale`, which every
 verdict carries, and `Verdict`, which never leaves `judge.py`.
@@ -1202,7 +1202,7 @@ a label plus the aggregate of the grain above, composed rather than copied, so t
 Comparing repeats the same three grains one level up, and the names say so: a
 `CriterionComparisonResult` sits inside a `CaseComparisonResult` exactly as a
 `CriterionResult` sits inside a `CaseResult`. **Only a produced type carries `Result`** —
-`RunPair` is what you hand in, everything ending in `Result` is what comes back.
+`RunComparison` is what you hand in, everything ending in `Result` is what comes back.
 
 Two rules hold the naming together — worth knowing before adding a field:
 

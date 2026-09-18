@@ -20,12 +20,12 @@ from rubric_eval.models import (
     ChangeMagnitude,
     ChangeStatus,
     ChangeSummary,
-    ComparisonResult,
     LabelMetrics,
     LabelMetricsDelta,
+    RunComparison,
+    RunComparisonResult,
     RunMetrics,
     RunMetricsDelta,
-    RunPair,
     RunResult,
     reworded_grades_clause,
 )
@@ -41,25 +41,25 @@ class RunsNotComparableError(ValueError):
     """
 
 
-def compare_runs(run_pair: RunPair) -> ComparisonResult:
+def compare_runs(run_comparison: RunComparison) -> RunComparisonResult:
     """Compare two finished runs of the same catalog at three grains: run, case, criterion.
 
     Every delta is `candidate - baseline`, so a positive number always means the candidate
     did better — with the two counting fields of `RunMetricsDelta` as the documented
     exception, where fewer is better.
 
-    Takes a `RunPair` rather than two arguments because both sides have the same type:
+    Takes a `RunComparison` rather than two arguments because both sides have the same type:
     a swapped pair would be undetectable and would silently invert the whole document.
 
     Args:
-        run_pair: The `baseline` run to compare against and the `candidate` run under
+        run_comparison: The `baseline` run to compare against and the `candidate` run under
             test. Both must have been judged on the same scale and must cover the same case
             ids, the same criterion ids per case, the same weights and the same labels per
             case — see Raises. Nothing else is required of them: results loaded back from
             stored JSON compare exactly like results just computed.
 
     Returns:
-        A `ComparisonResult`. `metrics_delta` says whether the run got better, `summary` how
+        A `RunComparisonResult`. `metrics_delta` says whether the run got better, `summary` how
         that is distributed over the cases, `label_metrics_deltas` which *kind* of case moved,
         and `case_comparison_results` — ordered by `case_id` — which criterion is responsible.
         Both runs are complete by construction: a run whose judge failed anywhere was never
@@ -77,18 +77,18 @@ def compare_runs(run_pair: RunPair) -> ComparisonResult:
             first, so one fix can address all of them.
 
     Example:
-        result = compare_runs(RunPair(baseline=last_weeks_run, candidate=todays_run))
+        result = compare_runs(RunComparison(baseline=last_weeks_run, candidate=todays_run))
         result.metrics_delta.average_score_delta   # +0.084
         result.label_metrics_deltas[0].label       # "agentic_search"
         result.summary.worsened_case_ids           # [5] — what the win cost
         result.summary.improvement.largest         # +0.31
     """
-    _reject_incomparable_runs(run_pair.baseline, run_pair.candidate)
-    case_comparison_results = _compare_cases(run_pair.baseline, run_pair.candidate)
-    return ComparisonResult(
-        metrics_delta=_metrics_delta(run_pair.baseline.metrics, run_pair.candidate.metrics),
+    _reject_incomparable_runs(run_comparison.baseline, run_comparison.candidate)
+    case_comparison_results = _compare_cases(run_comparison.baseline, run_comparison.candidate)
+    return RunComparisonResult(
+        metrics_delta=_metrics_delta(run_comparison.baseline.metrics, run_comparison.candidate.metrics),
         summary=_summarize(case_comparison_results),
-        label_metrics_deltas=_label_metrics_deltas(run_pair.baseline, run_pair.candidate),
+        label_metrics_deltas=_label_metrics_deltas(run_comparison.baseline, run_comparison.candidate),
         case_comparison_results=case_comparison_results,
     )
 
