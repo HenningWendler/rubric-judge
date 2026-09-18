@@ -9,6 +9,7 @@ from rubric_eval.judge import (
     JudgeUnavailableError,
     OpenAIJudge,
     UnusableReplyError,
+    parse_judge_reply,
 )
 from rubric_eval.metrics import case_score, label_metrics, run_metrics
 from rubric_eval.models import (
@@ -74,5 +75,6 @@ __all__ = [
     "filter_cases_by_labels",
     "judge_prompt",
     "label_metrics",
+    "parse_judge_reply",
     "run_metrics",
 ]

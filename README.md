@@ -869,6 +869,16 @@ level, and the reply format down to the grades the model may answer with. `examp
 appended verbatim. Raises `ValueError` for a scale with no `level_descriptions`.
 
 ```python
+def parse_judge_reply(reply: str, scale: Scale) -> JudgeReply
+```
+Pulls the score and the argument out of one raw judge reply: the **last** `{"score": …}`
+object in it wins, and everything before it is the reasoning. `OpenAIJudge` calls it for you;
+reach for it to check what your own judge's endpoint replies, or to reuse the parsing in a
+judge of your own. Raises `UnusableReplyError` — a `ValueError` — for a reply with no score
+object, unparseable JSON, or a grade off `scale`. **That message is the corrective prompt**
+the retry loop sends back to the model, not a report for a human.
+
+```python
 def compare_runs(run_comparison: RunComparison) -> RunComparisonResult
 ```
 Holds two finished runs against each other at three grains — run, case, criterion — plus

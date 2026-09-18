@@ -229,6 +229,25 @@ def test_a_nested_score_object_asks_for_a_flat_one_instead_of_guessing():
         )
 
 
+def test_a_second_score_key_the_regex_never_saw_is_a_complaint_and_not_a_crash():
+    """JSON keeps the *last* of two identical keys while the regex matched the first, so the
+    grade the parser reads back can be something `float()` refuses outright. A model that
+    corrects itself inside one object produces this, and it has to arrive as a complaint the
+    retry loop can send back — not as a `TypeError` reported to the caller as a 500."""
+    with pytest.raises(UnusableReplyError, match="could not be parsed"):
+        parse_judge_reply('Reasoning.\n{"score": 2, "score": null}', DEFAULT_SCALE)
+
+
+def test_the_parser_is_importable_beside_the_error_it_raises():
+    """`UnusableReplyError` is part of the package's published surface, and this is the only
+    thing that raises it — its own docstring shows the two used together, so exporting one
+    without the other leaves that example unrunnable."""
+    import rubric_eval
+
+    assert rubric_eval.parse_judge_reply is parse_judge_reply
+    assert "parse_judge_reply" in rubric_eval.__all__
+
+
 def test_a_quoted_score_counts_as_no_score_at_all():
     """`"2"` is a string, not a number — the regex does not match it and the judge is asked
     again rather than a quoted grade being accepted silently."""
