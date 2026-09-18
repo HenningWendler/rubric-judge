@@ -31,6 +31,12 @@ from rubric_eval.models import (
 )
 
 
+_METRIC_DELTA_SUFFIX = "_delta"
+"""What every field of `RunMetricsDelta` is called after the `RunMetrics` field it reports the
+change in — `average_score` becomes `average_score_delta`. Read back rather than merely
+followed, so the deltas are subtracted from the model instead of listed a second time here."""
+
+
 class RunsNotComparableError(ValueError):
     """The two runs do not describe the same catalog, so their scores do not subtract.
 
@@ -116,24 +122,64 @@ def _case_results_by_id(run: RunResult) -> dict[int, CaseResult]:
 
 
 def _metrics_delta(baseline: RunMetrics, candidate: RunMetrics) -> RunMetricsDelta:
-    """Candidate minus baseline, field by field. `total_cases` is absent because the
-    comparability check has already guaranteed it is equal, and the id lists are absent
-    because a set of ids does not subtract."""
-    return RunMetricsDelta(
-        average_score_delta=candidate.average_score - baseline.average_score,
-        median_score_delta=candidate.median_score - baseline.median_score,
-        variance_delta=candidate.variance - baseline.variance,
-        standard_deviation_delta=candidate.standard_deviation - baseline.standard_deviation,
-        average_criterion_score_delta=(
-            candidate.average_criterion_score - baseline.average_criterion_score
-        ),
-        criteria_fulfillment_rate_delta=(
-            candidate.criteria_fulfillment_rate - baseline.criteria_fulfillment_rate
-        ),
-        cases_with_score_zero_count_delta=(
-            candidate.cases_with_score_zero_count - baseline.cases_with_score_zero_count
-        ),
+    """Candidate minus baseline, one subtraction per delta `RunMetricsDelta` declares.
+
+    Derived from the model rather than written out, so a metric that gains a delta field
+    gains its subtraction with it: the alternative is a new metric that reports 0.0 in every
+    comparison forever because one of three places was not edited.
+
+    `total_cases` and the two id lists of `RunMetrics` are never reached, because they have
+    no delta field — the case count is guaranteed equal by the comparability check, and a set
+    of ids does not subtract.
+    """
+    return RunMetricsDelta.model_validate(
+        {
+            delta_field: _metric_difference(delta_field, baseline, candidate)
+            for delta_field in RunMetricsDelta.model_fields
+        }
     )
+
+
+def _metric_difference(
+    delta_field: str, baseline: RunMetrics, candidate: RunMetrics
+) -> float:
+    """How far one metric moved, found by the name of the delta field reporting it.
+
+    Args:
+        delta_field: A field name of `RunMetricsDelta`, `<metric>` plus
+            `_METRIC_DELTA_SUFFIX`.
+        baseline: The metrics of the run compared against.
+        candidate: The metrics of the run under test.
+
+    Returns:
+        `candidate` minus `baseline` for that metric, positive when the candidate scored
+        higher — including for the counting fields, where higher is the worse direction.
+
+    Raises:
+        AttributeError: The delta field names no `RunMetrics` field. A delta nobody can
+            subtract must stop the comparison rather than be skipped, because a delta left
+            out reads as "this metric did not move".
+        TypeError: The metric is not a number — an id list, or a magnitude left as `None`
+            because there was nothing to measure. Same reason.
+
+    Example:
+        _metric_difference("average_score_delta", baseline.metrics, candidate.metrics)
+    """
+    metric_name = delta_field.removesuffix(_METRIC_DELTA_SUFFIX)
+    return _subtractable_metric(candidate, metric_name) - _subtractable_metric(
+        baseline, metric_name
+    )
+
+
+def _subtractable_metric(metrics: RunMetrics, metric_name: str) -> float:
+    """One metric read back by name, refused unless it is a number two runs can differ in."""
+    value = getattr(metrics, metric_name)
+    if not isinstance(value, int | float):
+        raise TypeError(
+            f"RunMetrics.{metric_name} does not subtract: {value!r} is no number, so "
+            f"{metric_name}{_METRIC_DELTA_SUFFIX} cannot be computed"
+        )
+    return value
 
 
 def _label_metrics_deltas(

@@ -18,6 +18,7 @@ from rubric_eval import (
     RunsNotComparableError,
     compare_runs,
 )
+from rubric_eval.comparison import _metric_difference
 from rubric_eval.metrics import case_score, run_metrics
 from rubric_eval.models import DEFAULT_SCALE, CaseResult, CriterionResult, RunResult
 
@@ -77,6 +78,16 @@ class TestDirection:
         assert delta.average_criterion_score_delta == pytest.approx(1.1666666666666667)
         assert delta.criteria_fulfillment_rate_delta == pytest.approx(0.6666666666666667)
         assert delta.cases_with_score_zero_count_delta == -1
+
+    def test_a_metric_that_cannot_be_subtracted_is_refused_not_skipped(self):
+        """The deltas are derived from the fields `RunMetricsDelta` declares, so a delta
+        naming a metric that does not subtract — an id list, say — has to stop the comparison.
+        Skipped instead, it would leave the field at whatever a missing value defaults to and
+        report "this metric did not move"."""
+        metrics = UNEVEN_BASELINE.metrics
+
+        with pytest.raises(TypeError, match="cases_with_score_zero does not subtract"):
+            _metric_difference("cases_with_score_zero_delta", metrics, metrics)
 
     def test_a_run_compared_with_itself_moves_nothing(self):
         """The fixed point of a comparison, and the cheapest check that every delta really
