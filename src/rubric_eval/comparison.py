@@ -166,9 +166,9 @@ def _summarize(case_comparison_results: list[CaseComparisonResult]) -> ChangeSum
     worsened = _ranked_by_movement(case_comparison_results, ChangeStatus.WORSENED)
     stable = _with_status(case_comparison_results, ChangeStatus.STABLE)
     return ChangeSummary(
-        improved_case_ids=[case.case_id for case in improved],
-        stable_case_ids=[case.case_id for case in stable],
-        worsened_case_ids=[case.case_id for case in worsened],
+        improved_case_ids=[case_comparison.case_id for case_comparison in improved],
+        stable_case_ids=[case_comparison.case_id for case_comparison in stable],
+        worsened_case_ids=[case_comparison.case_id for case_comparison in worsened],
         improvement=_magnitude_of(improved),
         worsening=_magnitude_of(worsened),
     )
@@ -178,7 +178,11 @@ def _with_status(
     case_comparison_results: list[CaseComparisonResult], status: ChangeStatus
 ) -> list[CaseComparisonResult]:
     """One place to pick a side out, so the three lists of a summary are cut the same way."""
-    return [case for case in case_comparison_results if case.status is status]
+    return [
+        case_comparison
+        for case_comparison in case_comparison_results
+        if case_comparison.status is status
+    ]
 
 
 def _ranked_by_movement(
@@ -188,19 +192,23 @@ def _ranked_by_movement(
     delta, for regressions the most negative one. Ordering the complete list this way is what
     makes a separate "top five" field unnecessary: the top five are its first five."""
     moved = _with_status(case_comparison_results, status)
-    return sorted(moved, key=attrgetter("score_delta"), reverse=status is ChangeStatus.IMPROVED)
+    return sorted(
+        moved, key=attrgetter("score_delta"), reverse=status is ChangeStatus.IMPROVED
+    )
 
 
-def _magnitude_of(moved_cases: list[CaseComparisonResult]) -> ChangeMagnitude:
+def _magnitude_of(moved_case_comparisons: list[CaseComparisonResult]) -> ChangeMagnitude:
     """How large the moves on one side were. All zero for an empty side: `statistics.mean`
     raises on an empty list, and a run where nothing got worse has no worsening to report.
 
     Reads `largest` off the front of the list because both sides arrive ordered biggest-move
     first, so the extreme is the first entry either way.
     """
-    if not moved_cases:
+    if not moved_case_comparisons:
         return ChangeMagnitude(largest=0.0, mean=0.0, median=0.0)
-    deltas = [case.score_delta for case in moved_cases]
+    deltas = [
+        case_comparison.score_delta for case_comparison in moved_case_comparisons
+    ]
     return ChangeMagnitude(
         largest=deltas[0],
         mean=statistics.mean(deltas),
@@ -250,7 +258,7 @@ def _label_differences(case_id: int, baseline: CaseResult, candidate: CaseResult
 
 def _scale_differences(baseline: RunResult, candidate: RunResult) -> list[str]:
     """Reported first, because it is the difference that makes every other number meaningless:
-    a 2 out of 2 and a 2 out of 10 are not the same verdict, so subtracting them would turn a
+    a 2 out of 2 and a 2 out of 10 are not the same grade, so subtracting them would turn a
     change of judge into a collapse of the system under test."""
     if baseline.scale == candidate.scale:
         return []
@@ -305,4 +313,7 @@ def _weight_differences(
 def _weights_by_criterion_id(result: CaseResult) -> dict[int, float]:
     """Keyed by id because the two runs are checked criterion by criterion, not position by
     position — the criteria of a stored result come in whatever order it was saved in."""
-    return {verdict.criterion_id: verdict.weight for verdict in result.criterion_results}
+    return {
+        criterion_result.criterion_id: criterion_result.weight
+        for criterion_result in result.criterion_results
+    }

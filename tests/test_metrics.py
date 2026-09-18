@@ -18,7 +18,7 @@ _NEXT_CRITERION_ID = itertools.count(1)
 
 
 def _result(weight: float, score: float) -> CriterionResult:
-    """A verdict written as weight and score alone — the only two things the formulas read.
+    """A criterion result written as weight and score alone — all the formulas read.
     The id is handed out fresh each call, because a `CaseResult` rejects a repeated one."""
     criterion = Criterion(id=next(_NEXT_CRITERION_ID), content="x", weight=weight)
     return CriterionResult.judged(criterion, score, None, DEFAULT_SCALE)
@@ -45,7 +45,7 @@ def test_an_empty_rubric_is_a_clear_error_not_a_division_by_zero():
 
 def test_a_rubric_missed_completely_scores_zero_rather_than_erroring():
     """An answer that covers nothing is a 0, not an exception — and a real one, because a run
-    that lost a verdict to an outage never reaches the formulas at all."""
+    that lost a grade to an outage never reaches the formulas at all."""
     assert case_score([_result(3, 0), _result(1, 0)], DEFAULT_SCALE) == 0.0
 
 
@@ -78,8 +78,8 @@ def test_huge_weights_do_not_overflow_the_weight_sum():
 # --- run metrics: one run folded into the numbers a run is judged by ---------------------
 
 
-def _case(case_id: int, *verdicts: CriterionResult) -> CaseResult:
-    criterion_results = list(verdicts)
+def _case(case_id: int, *judged_criteria: CriterionResult) -> CaseResult:
+    criterion_results = list(judged_criteria)
     return CaseResult(
         case_id=case_id,
         score=case_score(criterion_results, DEFAULT_SCALE),
@@ -163,9 +163,9 @@ def test_an_empty_run_is_a_clear_error_not_a_division_by_zero():
         run_metrics([])
 
 
-def test_a_case_result_always_carries_at_least_one_verdict():
-    """`Case.criteria` rejects an empty rubric, so "one verdict per criterion" means at least
-    one verdict — and the fulfillment rate divides by exactly that count. Without the rule on
+def test_a_case_result_always_carries_at_least_one_criterion_result():
+    """`Case.criteria` rejects an empty rubric, so "one result per criterion" means at least
+    one result — and the fulfillment rate divides by exactly that count. Without the rule on
     the *result* type, a run loaded back from disk reaches `run_metrics` as a division by
     zero instead of a clean rejection."""
     with pytest.raises(ValueError):

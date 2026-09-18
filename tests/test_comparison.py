@@ -261,7 +261,7 @@ class TestOrderIndependence:
     def test_criteria_are_sorted_by_id_even_when_neither_run_stored_them_that_way(self):
         """Ordering by id is what makes the document independent of both storage orders. Here
         neither run is in id order and the two disagree with each other, so a comparison that
-        trusted either order — or sorted only one side — would pair unrelated verdicts and
+        trusted either order — or sorted only one side — would pair unrelated results and
         report deltas for criteria that never moved."""
         case = compared(
             run_of({300: 0, 7: 1, 50: 2}),
@@ -372,11 +372,11 @@ class TestRefusal:
             RunResult(metrics=run.metrics, case_results=twice)
 
     def test_a_case_naming_the_same_criterion_twice_cannot_exist_to_be_compared(self):
-        """Same hole one level down: verdicts are paired by criterion id, so a repeated one
-        would drop a verdict out of the comparison while still counting in the case score."""
-        verdicts = run_of({1: 1}).case_results[0].criterion_results
+        """Same hole one level down: results are paired by criterion id, so a repeated one
+        would drop a result out of the comparison while still counting in the case score."""
+        criterion_results = run_of({1: 1}).case_results[0].criterion_results
         with pytest.raises(ValidationError, match=r"criterion ids must be unique, repeated: \[1\]"):
-            CaseResult(case_id=1, score=0.5, criterion_results=verdicts * 2)
+            CaseResult(case_id=1, score=0.5, criterion_results=criterion_results * 2)
 
     def test_nothing_is_computed_before_the_refusal(self):
         """The check runs first on purpose — a half-built document is worse than none."""
@@ -404,8 +404,10 @@ def _reweighted(run: RunResult, weights: dict[int, float]) -> RunResult:
         _rebuilt(
             result,
             [
-                verdict.model_copy(update={"weight": weights[verdict.criterion_id]})
-                for verdict in result.criterion_results
+                criterion_result.model_copy(
+                    update={"weight": weights[criterion_result.criterion_id]}
+                )
+                for criterion_result in result.criterion_results
             ],
         )
         for result in run.case_results
@@ -414,7 +416,7 @@ def _reweighted(run: RunResult, weights: dict[int, float]) -> RunResult:
 
 
 def _rebuilt(result: CaseResult, criterion_results: list[CriterionResult]) -> CaseResult:
-    """A case result re-scored from changed verdicts, so its `score` never lies about them."""
+    """A case result re-scored from changed criterion results, so its `score` never lies."""
     return CaseResult(
         case_id=result.case_id,
         score=case_score(criterion_results, result.scale),

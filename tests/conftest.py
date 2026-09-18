@@ -125,9 +125,9 @@ def run_of(
     case_results = [
         CaseResult(
             case_id=case_id,
-            score=case_score(_verdicts(scores, scale), scale),
+            score=case_score(_criterion_results(scores, scale), scale),
             scale=scale,
-            criterion_results=_verdicts(scores, scale),
+            criterion_results=_criterion_results(scores, scale),
             labels=labels_by_case_id.get(case_id, []),
         )
         for case_id, scores in enumerate(scores_per_case, start=1)
@@ -139,8 +139,10 @@ def run_of(
     )
 
 
-def _verdicts(scores: dict[int, float], scale: Scale = DEFAULT_SCALE) -> list[CriterionResult]:
-    """One verdict per criterion id, all weighted 1 — weights are what `run_of` keeps boring
+def _criterion_results(
+    scores: dict[int, float], scale: Scale = DEFAULT_SCALE
+) -> list[CriterionResult]:
+    """One result per criterion id, all weighted 1 — weights are what `run_of` keeps boring
     so that a comparison test reads as scores in and deltas out."""
     return [
         CriterionResult.judged(

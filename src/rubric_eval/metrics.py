@@ -1,9 +1,9 @@
 """Scoring: one case folded into one number, a whole run folded into its metrics, and that
 run sliced once per label.
 
-Every number here is folded from verdicts the judge really gave: a run that lost one to an
-outage is invalidated before it gets this far, so no average is quietly depressed by a
-criterion nobody graded.
+Every number here is folded from criterion results the judge really gave: a run that lost
+one to an outage is invalidated before it gets this far, so no average is quietly depressed
+by a criterion nobody graded.
 """
 
 import math
@@ -34,10 +34,10 @@ def case_score(criterion_results: list[CriterionResult], scale: Scale) -> float:
     number is normalized rather than reported raw.
 
     Args:
-        criterion_results: The verdicts of one case, all of them. Only `weight` and `score`
+        criterion_results: The results of one case, all of them. Only `weight` and `score`
             are read, so results loaded back from a stored run score identically.
         scale: The scale they were given on — `CaseResult.scale`, or `judge.scale` while the
-            case result is still being built. A verdict does not carry it: one case is judged
+            case result is still being built. A result does not carry it: one case is judged
             by one judge on one scale, so one copy per case is the honest place for it.
 
     Returns:
@@ -48,7 +48,7 @@ def case_score(criterion_results: list[CriterionResult], scale: Scale) -> float:
     Raises:
         ValueError: The list is empty — an empty rubric has no meaningful score, and
             returning 0.0 for it would be indistinguishable from a completely missed answer —
-            or a verdict is graded above `scale.maximum`, which no share of the reachable
+            or a result is graded above `scale.maximum`, which no share of the reachable
             points can be made of.
 
     Example:
@@ -61,8 +61,8 @@ def case_score(criterion_results: list[CriterionResult], scale: Scale) -> float:
     scores_must_fit(criterion_results, scale)
     weights = _weights_scaled_to_at_most_one(criterion_results)
     reached_points = sum(
-        weight * result.score / scale.maximum
-        for weight, result in zip(weights, criterion_results)
+        weight * criterion_result.score / scale.maximum
+        for weight, criterion_result in zip(weights, criterion_results)
     )
     reachable_points = sum(weights)
     return reached_points / reachable_points
@@ -76,7 +76,9 @@ def _weights_scaled_to_at_most_one(
     of 1e308 overflow to `inf`, and `inf / inf` would make the whole case score `nan`.
     """
     largest_weight = max(result.weight for result in criterion_results)
-    return [result.weight / largest_weight for result in criterion_results]
+    return [
+        criterion_result.weight / largest_weight for criterion_result in criterion_results
+    ]
 
 
 def run_metrics(case_results: list[CaseResult]) -> RunMetrics:
@@ -196,9 +198,9 @@ def _variance(scores: list[float]) -> float:
 def _every_criterion_score(case_results: list[CaseResult]) -> list[float]:
     """All criteria of the run in one flat list — case boundaries and weights ignored."""
     return [
-        criterion.score
-        for result in case_results
-        for criterion in result.criterion_results
+        criterion_result.score
+        for case_result in case_results
+        for criterion_result in case_result.criterion_results
     ]
 
 
@@ -209,9 +211,9 @@ def _fulfillment_rate_per_case(case_results: list[CaseResult]) -> list[float]:
     No division by zero to guard here — `CaseResult.criterion_results` rejects an empty list.
     """
     return [
-        sum(criterion.is_present for criterion in result.criterion_results)
-        / len(result.criterion_results)
-        for result in case_results
+        sum(result.is_present for result in case_result.criterion_results)
+        / len(case_result.criterion_results)
+        for case_result in case_results
     ]
 
 

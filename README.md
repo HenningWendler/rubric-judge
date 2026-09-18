@@ -28,8 +28,8 @@ result = asyncio.run(evaluate_case(judge, Case(
 )))
 
 print(result.score)                       # 0.75  →  criterion 1 covered, criterion 2 missing
-for verdict in result.criterion_results:
-    print(verdict.criterion_id, verdict.score, verdict.reasoning)
+for criterion_result in result.criterion_results:
+    print(criterion_result.criterion_id, criterion_result.score, criterion_result.reasoning)
 # 1 2.0 The answer instructs the reader to email hr@example.com before 10:00 …
 # 2 0.0 Neither the expected last day nor any duration is mentioned …
 ```
@@ -371,14 +371,14 @@ included; two runs are comparable only if their scales are equal.
 `DEFAULT_SCALE` is the `0–2` scale the bundled prompt describes, descriptions included, and
 the one a stored result is read on when it names none.
 
-#### `CriterionResult` — the verdict for one criterion
+#### `CriterionResult` — what one criterion was given
 
 | Field | Type | Range | Meaning |
 |---|---|---|---|
-| `criterion_id` | `int` | — | The `Criterion.id` this verdict belongs to |
+| `criterion_id` | `int` | — | The `Criterion.id` this result belongs to |
 | `weight` | `float` | `> 0` | Copy of `Criterion.weight`, so a result can be re-scored without the rubric at hand |
 | `score` | `float` | `0.0 … scale.maximum` | The judge's **raw** grade, not normalized. On the default scale: `2` fully covered · `1` partially · `0` not covered. A float so averaging repeated runs cannot change the type. Bounded by `CaseResult.scale`, which is the object that knows it |
-| `is_present` | `bool` | — | `score >= scale.presence_threshold`, using the scale of the `CaseResult` above. Never asked of the judge, and a `CaseResult` **refuses** a verdict whose value here contradicts its own score |
+| `is_present` | `bool` | — | `score >= scale.presence_threshold`, using the scale of the `CaseResult` above. Never asked of the judge, and a `CaseResult` **refuses** a result whose value here contradicts its own score |
 | `spread` | `float` | `>= 0` | Standard deviation across repeated runs of this criterion. Always `0.0` today: each criterion is judged exactly once |
 | `reasoning` | `str \| None` | — | The judge's own argument for the score |
 
@@ -388,11 +388,11 @@ the one a stored result is read on when it names none.
 |---|---|---|---|
 | `case_id` | `int` | — | The `Case.id` this result belongs to |
 | `score` | `float` | `0.0 … 1.0` | The weighted case score, see [How scoring works](#how-scoring-works). `1.0` means every criterion fully covered |
-| `scale` | `Scale` | — | What the grades below mean. Stored **once per case**, not per verdict: one case is judged by one judge on one scale, and `POST /evaluate` returns this document on its own, so this is the lowest level that always exists. Defaults to `DEFAULT_SCALE` when a stored result names none |
-| `criterion_results` | `list[CriterionResult]` | ≥ 1 entry | One verdict per criterion, **in rubric order**, so it can be zipped with `Case.criteria`. Never empty — a rubric has at least one criterion, so a result has at least one verdict. Criterion ids must be unique: verdicts are paired by id when two runs are compared |
+| `scale` | `Scale` | — | What the grades below mean. Stored **once per case**, not per criterion result: one case is judged by one judge on one scale, and `POST /evaluate` returns this document on its own, so this is the lowest level that always exists. Defaults to `DEFAULT_SCALE` when a stored result names none |
+| `criterion_results` | `list[CriterionResult]` | ≥ 1 entry | One result per criterion, **in rubric order**, so it can be zipped with `Case.criteria`. Never empty — a rubric has at least one criterion, so a case result has at least one criterion result. Criterion ids must be unique: they are what pairs the two sides when two runs are compared |
 | `labels` | `list[str]` | — | The `Case.labels` this result came from, copied over so a stored run can still be sliced without the catalog at hand. `[]` for an untagged case, and for a result written before labels existed |
 
-> Named `criterion_results`, not `criteria`: the list holds *verdicts*, one per criterion —
+> Named `criterion_results`, not `criteria`: the list holds *results*, one per criterion —
 > `Case.criteria` is the rubric, and one name must not mean two things.
 
 `RunResult.scale` reads the one scale its cases were judged on — a Python accessor, not a
@@ -466,7 +466,7 @@ improved.
 | `baseline_score` | `float` | `0.0 … scale.maximum` | What the baseline run's judge gave it, on the runs' shared raw scale |
 | `candidate_score` | `float` | `0.0 … scale.maximum` | What the candidate run's judge gave it, same scale |
 | `score_delta` | `float` | `-maximum … maximum` | `candidate_score - baseline_score`. Both runs were judged on one scale — a comparison of two is refused |
-| `status` | `ChangeStatus` | — | That delta as a verdict |
+| `status` | `ChangeStatus` | — | That delta as a status |
 
 #### `CaseComparisonResult` — one case across two runs
 
@@ -476,7 +476,7 @@ improved.
 | `baseline_score` | `float` | `0.0 … 1.0` | Its weighted score in the baseline run |
 | `candidate_score` | `float` | `0.0 … 1.0` | Its weighted score in the candidate run |
 | `score_delta` | `float` | `-1.0 … 1.0` | `candidate_score - baseline_score` |
-| `status` | `ChangeStatus` | — | That delta as a verdict |
+| `status` | `ChangeStatus` | — | That delta as a status |
 | `criterion_comparison_results` | `list[CriterionComparisonResult]` | ≥ 1 entry | One per criterion, **ordered by `criterion_id`** — so the list reads the same whichever order either run happened to be stored in |
 
 A case can be `"stable"` while its criteria moved hard in opposite directions. That is
@@ -554,7 +554,7 @@ says whether every case rose a little or one rose a lot while another collapsed.
 ```python
 async def evaluate_case(judge: Judge, case: Case) -> CaseResult
 ```
-Judges one case. Fans out over the criteria concurrently and folds the verdicts into one
+Judges one case. Fans out over the criteria concurrently and folds the results into one
 score — or raises `JudgeUnavailableError` and returns nothing at all, see
 [Failure and load](#failure-and-load).
 
@@ -597,7 +597,7 @@ label.
 def case_score(criterion_results: list[CriterionResult], scale: Scale) -> float
 ```
 The weighted formula alone, `→ [0, 1]`. Dividing by `scale.maximum` is what makes the result
-scale-free. Raises `ValueError` on an empty list, or when a verdict is graded above the scale.
+scale-free. Raises `ValueError` on an empty list, or when a result is graded above the scale.
 
 ```python
 def judge_prompt(scale: Scale, examples: str = "") -> str
@@ -818,7 +818,7 @@ Everything is validated **before** the first LLM call, so a malformed request co
 |---|---|---|
 | `criteria`, `cases`, `criterion_results` or `case_results` empty; duplicate ids in any of them; `content` blank; `weight` `0`, negative, `Infinity` or `NaN`; missing field | `pydantic.ValidationError` | `422` |
 | A run posted to `/compare` whose numbers leave the ranges the [output tables](#outputs) give — a score above its own `scale.maximum` or off `0 … 1`, a non-positive weight, any `Infinity` or `NaN` | `pydantic.ValidationError` | `422` |
-| A run whose cases name more than one `scale`; a verdict whose `is_present` contradicts its own score | `pydantic.ValidationError` | `422` |
+| A run whose cases name more than one `scale`; a result whose `is_present` contradicts its own score | `pydantic.ValidationError` | `422` |
 | A blank label, or the same label twice — on one case, or in one group of a label filter | `pydantic.ValidationError` | `422` |
 | The same group twice in a label filter, in any order — in a `label_filter` or in `filter_cases_by_labels()` | `pydantic.ValidationError` | `422` |
 | A `Run` whose `label_filter` matches no case at all | `pydantic.ValidationError` naming the labels the run does carry, with counts | `422` |
@@ -925,7 +925,7 @@ replaced without asking you.
 What that looks like in practice is narrower than "the numbers move". Four consecutive runs of
 one three-case catalog against a hosted endpoint at temperature `0.0`, 18 criterion judgements
 per run: **every clear-cut criterion returned the same grade every time, and exactly one wavered**
-— the one whose verdict is genuinely arguable.
+— the one whose grade is genuinely arguable.
 
 The criterion was *"State the expected last day of absence"*, against an answer reading *"Send an
 email to hr@example.com before 10:00 on your first day of absence."* It names a day, but not that
@@ -945,7 +945,7 @@ reported by, with nothing about the system under test changed. So:
 
 - **A borderline criterion is a measurement instrument with a loose needle.** Phrasing it as
   [one checkable fact](#criterion--one-requirement-a-good-answer-has-to-satisfy) is not only about
-  the judge picking a compromise score — it is what makes the verdict repeatable at all.
+  the judge picking a compromise score — it is what makes the grade repeatable at all.
 - **Read a one-grade criterion move against its `weight`** before calling it a regression.
 - **Re-run the baseline before you believe a small delta.** Two runs of an *unchanged* system
   measure your noise floor, and that is the cheapest way to learn which deltas mean anything.
@@ -1121,7 +1121,7 @@ What changes with the scale, and what does not:
 
 Two runs judged on different scales are **not comparable**: `compare_runs()` refuses them the
 same way it refuses different weights, because a `2` out of `2` and a `2` out of `10` are not
-the same verdict. **The descriptions count as part of the scale**, so rewording what a grade
+the same grade. **The descriptions count as part of the scale**, so rewording what a grade
 means — even fixing a typo in it — makes new runs incomparable with old ones. That is on
 purpose: telling the judge something else about a `1` changes the grades it gives, and a
 comparison that ignored that would report a prompt edit as a change in your system.
@@ -1172,7 +1172,7 @@ Seven modules, each with one job. A request walks straight down through them:
 | Step | File | Responsibility |
 |---|---|---|
 | 1 | [api.py](src/rubric_eval/api.py) | FastAPI endpoints: validate the body, inject the judge, hand back JSON. No domain logic |
-| 2 | [evaluation.py](src/rubric_eval/evaluation.py) | `evaluate_case()` and `evaluate_run()` — fan out over the rubric and fold the verdicts |
+| 2 | [evaluation.py](src/rubric_eval/evaluation.py) | `evaluate_case()` and `evaluate_run()` — fan out over the rubric and fold the results |
 | 3 | [judge.py](src/rubric_eval/judge.py) | `Judge` protocol, OpenAI-compatible client, reply parsing, retries, throttle, env config |
 | 4 | [prompt.py](src/rubric_eval/prompt.py) | every word the judge is told, written from the scale |
 | — | [models.py](src/rubric_eval/models.py) | the types below, `Scale` and `DEFAULT_SCALE`, `CriterionResult.judged()` |
@@ -1207,7 +1207,7 @@ Comparing repeats the same three grains one level up, and the names say so: a
 Two rules hold the naming together — worth knowing before adding a field:
 
 - **A result never reuses the name of its input.** `CaseResult.criterion_results` holds
-  verdicts, so it is not called `criteria`.
+  results, so it is not called `criteria`.
 - **Exactly one type per grain.** A case evaluated alone and a case inside a run are the
   same `Case`, and both come back as the same `CaseResult`. That is why `Case.id` is
   mandatory rather than optional: an id that is sometimes there would have meant two
@@ -1312,7 +1312,7 @@ field tables in [Reference](#reference). One text, never three — they cannot d
 | [test_judge.py](tests/test_judge.py) | the parser reply by reply, both retry loops, what is not retried, the concurrency limit |
 | [test_comparison.py](tests/test_comparison.py) | deltas and their direction, the three statuses, ordering, and every refusal |
 | [test_prompt.py](tests/test_prompt.py) | the prompt a scale generates, held against the hand-written original |
-| [test_scale.py](tests/test_scale.py) | what a valid scale is, and what it does to a verdict, a run and a comparison |
+| [test_scale.py](tests/test_scale.py) | what a valid scale is, and what it does to a grade, a run and a comparison |
 | [test_labels.py](tests/test_labels.py) | what a valid label is, which cases a filter and a bucket select, and what a relabelled case does to a comparison |
 | [test_api.py](tests/test_api.py) | validation, wiring, serialization, and the end-to-end chain |
 

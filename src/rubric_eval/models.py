@@ -9,6 +9,7 @@ import math
 from collections import Counter
 from collections.abc import Iterable
 from enum import StrEnum
+from operator import attrgetter
 from typing import Annotated, TypeVar
 
 from pydantic import (
@@ -230,7 +231,7 @@ were supposed to mean. `prompt.py` renders them and owns every other word the ju
 
 
 def one_scale_of(scales: Iterable[Scale]) -> Scale:
-    """The single scale a set of verdicts was given on, or a refusal naming the mix.
+    """The single scale a set of criterion results was given on, or a refusal naming the mix.
 
     The one place the "a run is judged on exactly one scale" rule lives, so the models, the
     metrics and the comparison cannot come to different conclusions about the same run. Mixed
@@ -302,7 +303,7 @@ def reworded_grades_clause(scales: list[Scale]) -> str:
 
 
 def scores_must_fit(criterion_results: list["CriterionResult"], scale: Scale) -> None:
-    """Refuse verdicts graded above what the scale can carry.
+    """Refuse criterion results graded above what the scale can carry.
 
     The one place that rule lives, because two paths need it and must not word it differently:
     `metrics.case_score` divides by `scale.maximum` while a case is being built, and
@@ -311,18 +312,20 @@ def scores_must_fit(criterion_results: list["CriterionResult"], scale: Scale) ->
     a number that names neither the criterion nor the judge that produced it.
 
     Args:
-        criterion_results: The verdicts of one case. Only `score` and `criterion_id` are read.
+        criterion_results: The results of one case. Only `score` and `criterion_id` are read.
         scale: The scale they were given on.
 
     Raises:
-        ValueError: At least one verdict is above `scale.maximum`. The message names every
-            offending criterion at once and the scale they were held against.
+        ValueError: At least one criterion result is above `scale.maximum`. The message
+            names every offending criterion at once and the scale they were held against.
 
     Example:
         scores_must_fit(case_result.criterion_results, case_result.scale)
     """
     if off_scale := [
-        verdict.criterion_id for verdict in criterion_results if verdict.score > scale.maximum
+        criterion_result.criterion_id
+        for criterion_result in criterion_results
+        if criterion_result.score > scale.maximum
     ]:
         raise ValueError(
             f"criteria {off_scale} scored above the scale {scale} they were judged on"
@@ -455,11 +458,11 @@ class Criterion(DocumentedModel):
 
 
 class CriterionResult(DocumentedModel):
-    """The verdict for a single criterion: what the judge gave, and why.
+    """What one criterion was given: the judge's grade for it, and why.
 
     Not built by hand — use `judged()`, so the derived fields stay consistent everywhere.
-    There is no constructor for a criterion the judge never answered for: a verdict nobody
-    gave is not a verdict with a 0 in it, and the run it belongs to is invalidated instead.
+    There is no constructor for a criterion the judge never answered for: a result nobody
+    gave is not a result with a 0 in it, and the run it belongs to is invalidated instead.
 
     Every documented range is enforced, not merely described: a stored result is postable to
     `/compare`, so this model is an *input* type there and the numbers below are arithmetic
@@ -468,7 +471,7 @@ class CriterionResult(DocumentedModel):
     """
 
     criterion_id: int
-    """The `Criterion.id` this verdict belongs to."""
+    """The `Criterion.id` this result belongs to."""
 
     weight: float = Field(gt=0, allow_inf_nan=False)
     """Copy of `Criterion.weight`, so a result can be scored without the rubric at hand.
@@ -478,12 +481,12 @@ class CriterionResult(DocumentedModel):
     """The judge's **raw** grade, not normalized: on the bundled scale 2 is fully covered, 1
     partially, 0 not covered. A float rather than an int, so averaging several runs of the
     same criterion cannot change the type. Its upper bound is `CaseResult.scale.maximum` and
-    is checked there — a verdict on its own does not know which scale it was given on."""
+    is checked there — a result on its own does not know which scale it was given on."""
 
     is_present: bool
     """Whether the criterion counts as covered at all: `score >= scale.presence_threshold`,
-    with the scale of the `CaseResult` this verdict belongs to. Never asked of the judge —
-    one question less for it to get wrong — and `CaseResult` refuses a verdict whose value
+    with the scale of the `CaseResult` this result belongs to. Never asked of the judge —
+    one question less for it to get wrong — and `CaseResult` refuses a result whose value
     here contradicts its own score, so it cannot drift away from the number it describes."""
 
     spread: float = Field(default=0.0, ge=0, allow_inf_nan=False)
@@ -506,7 +509,7 @@ class CriterionResult(DocumentedModel):
                 refused rather than clamped.
             reasoning: The judge's argument, or None when the caller does not keep it.
             scale: The scale the judge works on — `judge.scale`, never a guess. Not stored
-                on the verdict (the `CaseResult` above it carries it once for the whole
+                on the result (the `CaseResult` above it carries it once for the whole
                 case); it is what `is_present` is cut at here.
 
         Returns:
@@ -565,20 +568,20 @@ class Case(DocumentedModel):
     @field_validator("criteria")
     @classmethod
     def _reject_duplicate_criterion_ids(cls, criteria: list[Criterion]) -> list[Criterion]:
-        """Every verdict is labelled with its `Criterion.id`, so a repeated id makes results
-        ambiguous: a caller keying by id would drop one verdict or count another twice."""
+        """Every result is labelled with its `Criterion.id`, so a repeated id makes results
+        ambiguous: a caller keying by id would drop one result or count another twice."""
         if repeated := _duplicates(criterion.id for criterion in criteria):
             raise ValueError(f"criterion ids must be unique, repeated: {repeated}")
         return criteria
 
 
 class CaseResult(DocumentedModel):
-    """What `evaluate_case` returns: the case score plus the verdicts it was computed from.
+    """What `evaluate_case` returns: the case score plus the criterion results behind it.
 
     The same document whether the case was evaluated alone or inside a run — which is why
     `Case.id` is mandatory: one result type, no nullable id, nothing to reconcile.
 
-    Always complete: one verdict per criterion of the rubric, never a hole. A case the judge
+    Always complete: one result per criterion of the rubric, never a hole. A case the judge
     could not answer every criterion of produces no result at all.
 
     Example:
@@ -592,21 +595,21 @@ class CaseResult(DocumentedModel):
 
     score: float = Field(ge=0, le=1, allow_inf_nan=False)
     """Weighted case score in [0, 1], see `metrics.case_score`. 1.0 means every criterion
-    was fully covered. Bounded for the same reason the verdict scores under it are: this
+    was fully covered. Bounded for the same reason the criterion scores under it are: this
     model is what `/compare` takes in, and every delta of a comparison subtracts it."""
 
     scale: Scale = DEFAULT_SCALE
-    """The grading scale every verdict below was given on, copied off the judge once for the
-    whole case. Here rather than on each verdict because a case is judged by one judge on one
+    """The grading scale every result below was given on, copied off the judge once for the
+    whole case. Here rather than on each result because a case is judged by one judge on one
     scale, and `evaluate_case` returns this document on its own — so this is the lowest level
     that always exists. Defaulted, because a result that names no scale was written before
     scales were configurable and was therefore judged on exactly this one."""
 
     criterion_results: list[CriterionResult] = Field(min_length=1)
-    """One verdict per criterion of the case, in rubric order. At least one, because
+    """One result per criterion of the case, in rubric order. At least one, because
     `Case.criteria` rejects an empty rubric and the metrics divide by this count. Ids have to
     be unique, exactly as in the rubric this came from. Named for what it holds: `criteria`
-    would promise `Criterion` objects and deliver verdicts."""
+    would promise `Criterion` objects and deliver results."""
 
     labels: Labels = Field(default_factory=list)
     """The `Case.labels` this result came from, copied over so a stored run can still be sliced
@@ -620,15 +623,17 @@ class CaseResult(DocumentedModel):
         cls, criterion_results: list[CriterionResult]
     ) -> list[CriterionResult]:
         """`Case.criteria` already rejects repeated ids, so `evaluate_case` can never produce
-        them — but a stored result is postable to `/compare`, which keys verdicts by id to
+        them — but a stored result is postable to `/compare`, which keys results by id to
         pair the two runs up and would silently drop one of a repeated pair."""
-        if repeated := _duplicates(verdict.criterion_id for verdict in criterion_results):
+        if repeated := _duplicates(
+            criterion_result.criterion_id for criterion_result in criterion_results
+        ):
             raise ValueError(f"criterion ids must be unique, repeated: {repeated}")
         return criterion_results
 
     @model_validator(mode="after")
     def _reject_scores_off_the_scale(self) -> "CaseResult":
-        """A verdict has no upper bound of its own — this is the object that knows the scale.
+        """A result has no upper bound of its own — this is the object that knows the scale.
         The path a fresh case takes is guarded by `case_score`; this guards the other one, a
         finished run read back from JSON and posted to `/compare`."""
         scores_must_fit(self.criterion_results, self.scale)
@@ -641,11 +646,14 @@ class CaseResult(DocumentedModel):
         would otherwise raise `criteria_fulfillment_rate` at `/compare` with nothing to catch
         it. Refused rather than recomputed, because silently rewriting a caller's number would
         hide whichever of the two is actually wrong."""
-        for verdict in self.criterion_results:
-            if verdict.is_present != (verdict.score >= self.scale.presence_threshold):
+        for criterion_result in self.criterion_results:
+            on_scale = criterion_result.score >= self.scale.presence_threshold
+            if criterion_result.is_present != on_scale:
                 raise ValueError(
-                    f"criterion {verdict.criterion_id} scored {verdict.score} and claims "
-                    f"is_present={verdict.is_present}, which the scale {self.scale} does not"
+                    f"criterion {criterion_result.criterion_id} scored "
+                    f"{criterion_result.score} and claims "
+                    f"is_present={criterion_result.is_present}, which the scale "
+                    f"{self.scale} does not"
                 )
         return self
 
@@ -873,7 +881,7 @@ class RunResult(DocumentedModel):
 
     @model_validator(mode="after")
     def _reject_metrics_off_the_runs_scale(self) -> "RunResult":
-        """`RunMetrics` cannot check this bound itself — it holds numbers, not verdicts, and
+        """`RunMetrics` cannot check this bound itself — it holds numbers, not results, and
         only here is the scale they were computed on in reach. Left unchecked, a stored run
         could claim an average of 4 on a 0..2 scale and every delta computed from it at
         `/compare` would inherit the lie."""
@@ -926,7 +934,7 @@ class ChangeStatus(StrEnum):
 
 
 def _change_status(score_delta: float) -> ChangeStatus:
-    """The one place a score delta becomes a verdict, so a criterion and a case can never
+    """The one place a score delta becomes a status, so a criterion and a case can never
     classify the same movement differently.
 
     The tolerance is what keeps float noise out of the report: two runs that summed the same
@@ -965,18 +973,18 @@ class CriterionComparisonResult(DocumentedModel):
     on the same one, because a comparison of two scales is refused."""
 
     status: ChangeStatus
-    """`score_delta` as a verdict. Derived from the raw score, not from `is_present`: a
+    """`score_delta` as a status. Derived from the raw score, not from `is_present`: a
     criterion that went from 1.0 to 2.0 moved the case score and is reported as improved."""
 
     @classmethod
     def between(
         cls, baseline: CriterionResult, candidate: CriterionResult
     ) -> "CriterionComparisonResult":
-        """Compare the two verdicts one criterion got in two runs.
+        """Compare the two results one criterion got in two runs.
 
         Args:
-            baseline: The verdict from the run being compared *against*.
-            candidate: The verdict from the run *under test*, for the same criterion id and
+            baseline: The result from the run being compared *against*.
+            candidate: The result from the run *under test*, for the same criterion id and
                 weight — `comparison.compare_runs` has already refused the runs otherwise.
 
         Returns:
@@ -1021,7 +1029,7 @@ class CaseComparisonResult(DocumentedModel):
     which is the sign convention of every delta in a comparison."""
 
     status: ChangeStatus
-    """`score_delta` as a verdict, with the same tolerance a criterion gets."""
+    """`score_delta` as a status, with the same tolerance a criterion gets."""
 
     criterion_comparison_results: list[CriterionComparisonResult] = Field(min_length=1)
     """One entry per criterion of the case, ordered by `criterion_id`. At least one, because
@@ -1052,8 +1060,10 @@ class CaseComparisonResult(DocumentedModel):
             score_delta=score_delta,
             status=_change_status(score_delta),
             criterion_comparison_results=[
-                CriterionComparisonResult.between(baseline_criterion, candidate_criterion)
-                for baseline_criterion, candidate_criterion in zip(
+                CriterionComparisonResult.between(
+                    baseline_criterion_result, candidate_criterion_result
+                )
+                for baseline_criterion_result, candidate_criterion_result in zip(
                     _criterion_results_in_id_order(baseline),
                     _criterion_results_in_id_order(candidate),
                     strict=True,
@@ -1063,12 +1073,12 @@ class CaseComparisonResult(DocumentedModel):
 
 
 def _criterion_results_in_id_order(result: CaseResult) -> list[CriterionResult]:
-    """Both runs' verdicts brought into one order, so zipping them pairs the same criterion.
-    Rubric order is not enough: two runs may have been stored with their criteria in
-    different orders, and zipping those would compare unrelated verdicts. Zipped `strict`,
+    """Both runs' criterion results brought into one order, so zipping them pairs the same
+    criterion. Rubric order is not enough: two runs may have been stored with their criteria
+    in different orders, and zipping those would compare unrelated results. Zipped `strict`,
     so a caller reaching `CaseComparisonResult.between` past `compare_runs` gets a crash rather
     than a silently truncated comparison."""
-    return sorted(result.criterion_results, key=lambda verdict: verdict.criterion_id)
+    return sorted(result.criterion_results, key=attrgetter("criterion_id"))
 
 
 class RunMetricsDelta(DocumentedModel):

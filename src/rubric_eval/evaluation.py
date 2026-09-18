@@ -1,4 +1,4 @@
-"""Scoring cases: judge every criterion and fold the verdicts into scores.
+"""Scoring cases: judge every criterion and fold the results into scores.
 
 The layer between the judge and the transport, and the only place that speaks both
 languages: a `Judge` answers with a `Verdict` or raises, a caller wants a complete
@@ -6,7 +6,7 @@ languages: a `Judge` answers with a `Verdict` or raises, a caller wants a comple
 entry points as `POST /evaluate` and `POST /evaluate/run`.
 
 A judge that cannot answer invalidates everything it was judging: there is no result with a
-hole in it, because a criterion scored 0 for want of a verdict is indistinguishable from one
+hole in it, because a criterion scored 0 for want of a grade is indistinguishable from one
 the answer really missed.
 
 Three public functions, one fan-out: `evaluate_case` scores a single answer,
@@ -111,12 +111,13 @@ async def evaluate_run(judge: Judge, run: Run) -> RunResult:
         A `RunResult`: one `case_results` entry per **selected** case in request order —
         fewer than `run.cases` when a `label_filter` narrowed the run — `metrics` over them,
         `label_metrics` the same aggregate once per label the cases carry, and
-        `applied_label_filter` recording what picked them. Every selected case is in it, or the run raised instead.
+        `applied_label_filter` recording what picked them. Every selected case is in it, or
+        the run raised instead.
 
     Raises:
         JudgeUnavailableError: As `evaluate_case`. One criterion the judge could not answer
             for ends the whole run: the metrics are an average over the cases, so one case
-            missing a verdict makes every number computed alongside it untrustworthy.
+            missing a grade makes every number computed alongside it untrustworthy.
         Exception: As `evaluate_case`, and for the same reason — a programming error in any
             single case aborts the run rather than being averaged into it.
 

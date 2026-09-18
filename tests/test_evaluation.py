@@ -44,7 +44,7 @@ async def test_one_unanswered_criterion_invalidates_the_whole_case():
         await evaluate_case(judge, THE_CASE)
 
 
-async def test_verdicts_keep_the_order_of_the_rubric():
+async def test_criterion_results_keep_the_order_of_the_rubric():
     """`asyncio.gather` preserves argument order — results can be zipped with the criteria."""
     result = await evaluate_case(FakeJudge({1: 0, 2: 2}), THE_CASE)
 
@@ -74,7 +74,7 @@ async def test_an_empty_answer_is_judged_rather_than_rejected():
 async def test_duplicate_criterion_ids_are_rejected():
     """`CriterionResult.criterion_id` is documented as the way to match results to the rubric
     without relying on list order. Two criteria sharing an id make that impossible — and a
-    caller merging by id would drop or double-count a verdict."""
+    caller merging by id would drop or double-count a result."""
     with pytest.raises(ValueError):
         Case(
             id=1,
@@ -89,7 +89,7 @@ async def test_duplicate_criterion_ids_are_rejected():
 
 async def test_a_large_rubric_is_judged_completely_and_in_order():
     """The fan-out has to survive a rubric far bigger than the example case, with every
-    verdict still zippable against the criteria it came from."""
+    result still zippable against the criteria it came from."""
     many = Case(
         id=1,
         question="q",
@@ -233,7 +233,7 @@ class _JudgeByAnswer:
 
 async def test_criterion_ids_may_repeat_across_the_cases_of_a_run():
     """Criterion ids are documented as unique *within* a case. Two cases written from the
-    same rubric template share them, and their verdicts still belong to their own case."""
+    same rubric template share them, and their results still belong to their own case."""
     shared_rubric = [{"id": 1, "content": "Submit it in the HR tool", "weight": 1}]
     run = Run(cases=[
         {"id": 1, "question": "q", "answer": "In the HR tool.", "criteria": shared_rubric},

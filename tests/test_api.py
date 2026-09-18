@@ -25,7 +25,7 @@ def test_evaluate_serves_the_evaluation_of_the_case(client):
     body = client.post("/evaluate", json=CASE).json()
 
     assert body["score"] == pytest.approx(0.75)
-    assert [verdict["score"] for verdict in body["criterion_results"]] == [2.0, 0.0]
+    assert [result["score"] for result in body["criterion_results"]] == [2.0, 0.0]
 
 
 def test_criteria_must_not_be_empty(client):
@@ -388,8 +388,8 @@ def test_two_requests_in_two_event_loops_score_a_large_rubric_identically(stub_e
             rounds.append(client.post("/evaluate", json=case).json())
 
     assert [body["score"] for body in rounds] == [1.0, 1.0]
-    verdicts = [verdict for body in rounds for verdict in body["criterion_results"]]
-    assert [verdict["score"] for verdict in verdicts] == [2.0] * 40
+    graded = [result for body in rounds for result in body["criterion_results"]]
+    assert [result["score"] for result in graded] == [2.0] * 40
 
 
 def test_a_nan_weight_is_rejected_instead_of_scoring_null(client):
