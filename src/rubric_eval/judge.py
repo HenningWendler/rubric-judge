@@ -405,8 +405,8 @@ def _reasoning_before(reply: str, score_object: re.Match[str]) -> str:
 class OpenAIJudge:
     """A `Judge` backed by any OpenAI-compatible endpoint, with retries and a call limit.
 
-    OpenAI, vLLM, Azure, Ollama, Groq, OpenRouter — whatever answers at `JudgeConfig.
-    endpoint`. An unusable reply is corrected rather than merely repeated, and the endpoint's
+    OpenAI, vLLM, Azure, Ollama, Groq, OpenRouter — whatever answers at the configured
+    endpoint. An unusable reply is corrected rather than merely repeated, and the endpoint's
     rate limit is respected by holding `JudgeConfig.max_concurrent` calls in flight at most.
 
     Build it **once** and share it. The `max_concurrent` budget belongs to the instance, so
