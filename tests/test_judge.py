@@ -1,13 +1,21 @@
 import asyncio
 from types import SimpleNamespace
+from typing import Any, cast
 
 import httpx
 import pytest
-from openai import APIConnectionError, APITimeoutError, InternalServerError, RateLimitError
+from openai import (
+    APIConnectionError,
+    APITimeoutError,
+    AsyncOpenAI,
+    InternalServerError,
+    RateLimitError,
+)
 
 from rubric_eval import Case, Run, evaluate_case, evaluate_run
 from rubric_eval.judge import (
     JudgeConfig,
+    JudgeReply,
     JudgeUnavailableError,
     OpenAIJudge,
     UnusableReplyError,
@@ -15,6 +23,11 @@ from rubric_eval.judge import (
 )
 from rubric_eval.prompt import JUDGE_EN
 from rubric_eval.models import DEFAULT_SCALE, Criterion, Scale
+
+ScriptedAnswer = str | None | Exception | type
+"""One prepared answer from the stubbed endpoint: the text the model wrote, `None` for a reply
+carrying no content, an exception the transport raises instead of answering, or a whole
+prepared response object for the shapes that have no text to script."""
 
 _REQUEST = httpx.Request("POST", "http://x/v1/chat/completions")
 """The request every faked transport failure claims to have been raised for — the openai
@@ -63,30 +76,34 @@ def test_rejects_a_score_off_the_scale():
 
 
 class FakeCompletions:
-    def __init__(self, replies):
+    def __init__(self, replies: list[ScriptedAnswer]):
         self.replies = list(replies)
-        self.calls = []
+        self.calls: list[Any] = []
         self.in_flight = 0
         self.peak_in_flight = 0
 
-    async def create(self, **kwargs):
+    async def create(self, **kwargs: Any) -> type:
         self.calls.append(kwargs["messages"])
         reply = self.replies.pop(0)
         if isinstance(reply, Exception):
             raise reply
         return await self._answer_while_counting(reply)
 
-    async def _answer_while_counting(self, reply):
+    async def _answer_while_counting(self, reply: str | None | type) -> type:
         """Yields to the event loop while the call is "in flight", so concurrent callers
-        really do overlap and `peak_in_flight` measures the throttle instead of luck."""
+        really do overlap and `peak_in_flight` measures the throttle instead of luck.
+
+        A scripted reply is the text the model wrote; anything else is a whole prepared
+        response, for the answers that carry no text to begin with.
+        """
         self.in_flight += 1
         self.peak_in_flight = max(self.peak_in_flight, self.in_flight)
         await asyncio.sleep(0)
         self.in_flight -= 1
-        return _completion(reply)
+        return _completion(reply) if isinstance(reply, str | None) else reply
 
 
-def _completion(content, finish_reason="stop"):
+def _completion(content: str | None, finish_reason: str = "stop") -> type:
     """A chat completion shaped like the SDK's, down to the `finish_reason` the judge quotes
     when an endpoint answers with no content at all."""
 
@@ -432,11 +449,100 @@ async def test_an_unretryable_endpoint_error_is_not_asked_again():
     assert len(fake.calls) == 1
 
 
+async def test_a_transport_failure_and_an_unusable_reply_spend_the_same_budget():
+    """`max_attempts` is documented as one budget for both kinds of failure, because each of
+    them costs a call. A refused connection, then a reply with no JSON, then a good one is
+    exactly three attempts — and the third is allowed to answer."""
+    judge, fake = _judge(
+        [rate_limited(), "I think it is fine.", 'Covered.\n{"score": 2}'], max_attempts=3
+    )
+
+    judge_reply = await judge.score("How?", "Vaguely.", CRITERION)
+
+    assert judge_reply.score == 2
+    assert len(fake.calls) == 3
+
+
+async def test_the_shared_budget_runs_out_however_the_attempts_were_spent():
+    """Two transport failures and one unusable reply are three attempts, not "three of each":
+    two separate budgets would quietly turn three configured attempts into six paid calls."""
+    judge, fake = _judge(
+        [rate_limited(), server_error(), "I think it is fine."], max_attempts=3
+    )
+
+    with pytest.raises(JudgeUnavailableError, match="no usable answer in 3 attempts"):
+        await judge.score("How?", "Vaguely.", CRITERION)
+
+    assert len(fake.calls) == 3
+
+
+async def test_the_last_attempt_names_whichever_failure_ended_it():
+    """The report names the *last* cause, so a run that started on a rate limit and ended on
+    one is not reported as a formatting problem the model could have fixed."""
+    judge, _ = _judge(["I think it is fine.", "Still no JSON.", rate_limited()], max_attempts=3)
+
+    with pytest.raises(JudgeUnavailableError, match="3 attempts: rate limited") as given_up:
+        await judge.score("How?", "Vaguely.", CRITERION)
+
+    assert isinstance(given_up.value.__cause__, RateLimitError)
+
+
+async def test_a_reply_without_content_ends_the_run_even_with_attempts_left():
+    """Never retried is a claim about the *whole* budget, not only about a first attempt: a
+    truncation arriving on attempt two must not spend attempt three on a reprompt that cannot
+    undo it."""
+    judge, fake = _judge(
+        ["I think it is fine.", _completion(None, finish_reason="length"), 'Ok.\n{"score": 2}'],
+        max_attempts=3,
+    )
+
+    with pytest.raises(JudgeUnavailableError, match="no content, finish_reason 'length'"):
+        await judge.score("How?", "Vaguely.", CRITERION)
+
+    assert len(fake.calls) == 2  # the third attempt was never paid for
+
+
+async def test_a_response_without_choices_ends_the_run_even_with_attempts_left():
+    """The other contentless shape, held to the same rule for the same reason."""
+    judge, fake = _judge(
+        ["I think it is fine.", type("Response", (), {"choices": []}), 'Ok.\n{"score": 2}'],
+        max_attempts=3,
+    )
+
+    with pytest.raises(JudgeUnavailableError, match="without a single choice"):
+        await judge.score("How?", "Vaguely.", CRITERION)
+
+    assert len(fake.calls) == 2
+
+
+def test_a_judge_that_builds_its_own_client_switches_the_sdks_retries_off():
+    """`max_attempts` is documented as the only retry budget there is, and that is only true
+    because the SDK's own two are turned off — in series the two multiply, and three
+    configured attempts become nine paid calls."""
+    judge = OpenAIJudge(JudgeConfig(model="m", endpoint="http://x/v1", api_key="k"))
+
+    assert judge.client.max_retries == 0
+
+
+def test_a_client_you_pass_keeps_its_own_retry_budget():
+    """Documented and deliberately not enforced: the judge talks through the client it was
+    given, whatever that client was built with. Pinned so the multiplication stays a
+    documented consequence rather than a surprise — build yours with `max_retries=0`."""
+    import openai
+
+    own_client = openai.AsyncOpenAI(base_url="http://x/v1", api_key="k", max_retries=2)
+    judge = OpenAIJudge(JudgeConfig(model="m", endpoint="http://x/v1", api_key="k"),
+                        client=own_client)
+
+    assert judge.client is own_client
+    assert judge.client.max_retries == 2
+
+
 async def test_the_judge_is_asked_with_the_configured_sampling_settings():
     """Reproducibility is a promise of the config, so it has to reach the wire."""
     sent = {}
 
-    async def create(**kwargs):
+    async def create(**kwargs: Any) -> type:
         sent.update(kwargs)
         return _completion('Reasoning.\n{"score": 2}')
 

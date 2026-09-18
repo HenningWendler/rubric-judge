@@ -1206,6 +1206,12 @@ echoed back:
 | A bug in the program | propagates as itself | `500` |
 | Request cancelled (client disconnect, shutdown) | `asyncio.CancelledError` propagates | — |
 
+One exception to the `422` rows above: while the judge is **unconfigured**, `POST /evaluate`
+and `POST /evaluate/run` answer `500` even for an invalid body. FastAPI resolves the
+`get_judge` dependency before it validates the body, so the server fault is reported rather
+than the client's — which is the right way round, but it does mean the body was never read.
+`POST /compare` takes no judge and validates its body either way.
+
 ---
 
 ## How scoring works

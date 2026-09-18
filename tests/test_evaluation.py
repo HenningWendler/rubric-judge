@@ -197,6 +197,21 @@ async def test_one_unanswered_criterion_invalidates_the_whole_run():
         await evaluate_run(judge, THE_RUN)
 
 
+async def test_a_custom_outage_type_invalidates_a_whole_run_too():
+    """`JudgeUnavailableError` is documented as subclassable, so the policy has to be keyed on
+    the *type* and not on an exact match. Asserted at the run grain as well, because that is
+    where a `except JudgeUnavailableError` that missed a subclass would silently degrade into
+    the "bug in the program" path and report a 500 for an outage."""
+
+    class QuotaExceeded(JudgeUnavailableError):
+        pass
+
+    judge = FakeJudge({**RUN_SCORES, 21: QuotaExceeded("no credit left")})
+
+    with pytest.raises(QuotaExceeded, match="no credit left"):
+        await evaluate_run(judge, THE_RUN)
+
+
 async def test_a_bug_in_one_case_aborts_the_whole_run_as_itself():
     """A bug ends the run like an outage does, and stays distinguishable from one."""
     judge = FakeJudge({**RUN_SCORES, 21: RuntimeError("bound to a different event loop")})

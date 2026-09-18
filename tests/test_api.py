@@ -351,6 +351,42 @@ def test_an_outage_in_one_case_answers_503_for_the_whole_run(client):
     assert response.json()["detail"] == "endpoint down"
 
 
+def test_a_custom_outage_type_answers_503_at_every_entry_point(client):
+    """A custom judge is documented as free to raise its *own* `JudgeUnavailableError`
+    subclass and still be understood. Starlette matches a handler by walking the exception's
+    bases, so this is what turns "subclassable if you want to keep your own type" from a hope
+    into a promise — and it has to hold for the run endpoint as well as the single one."""
+
+    class QuotaExceeded(JudgeUnavailableError):
+        pass
+
+    use_judge(FakeJudge({**RUN_SCORES, 1: QuotaExceeded("my quota is used up")}))
+
+    for path, body in (("/evaluate", CASE), ("/evaluate/run", RUN)):
+        response = client.post(path, json=body)
+
+        assert response.status_code == 503
+        assert response.json() == {"detail": "my quota is used up"}
+
+
+def test_an_unconfigured_judge_is_reported_before_the_body_is_read(unconfigured_client):
+    """FastAPI resolves a dependency before it validates the body, so an unconfigured service
+    answers 500 for an invalid body too — the server fault is reported rather than the
+    client's. Pinned because it is the one place the error table's "invalid body -> 422" does
+    not hold, and because a `RuntimeError` reaching a caller as a 422 would be worse: it would
+    send them looking for a mistake in a request that was never read."""
+    assert unconfigured_client.post("/evaluate", json={"id": 1}).status_code == 500
+    assert unconfigured_client.post("/evaluate/run", json={"cases": []}).status_code == 500
+
+
+def test_compare_validates_its_body_with_no_judge_in_the_way(unconfigured_client):
+    """`/compare` takes no judge at all, so nothing stands between the body and its
+    validation: an invalid comparison is a 422 whether or not the service is configured."""
+    response = unconfigured_client.post("/compare", json={"baseline": {}})
+
+    assert response.status_code == 422
+
+
 def test_one_judge_serves_the_whole_process_so_its_limit_is_shared(monkeypatch):
     """`OpenAIJudge` carries the concurrency limit, so it only bounds anything if every
     request shares one instance — that is what caching `get_judge` is for. The one test that
