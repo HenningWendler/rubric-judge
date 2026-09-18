@@ -6,6 +6,8 @@ told in one file rather than in four fragments nobody reads together, exactly as
 story is in `test_scale.py`. The HTTP end of it lives in `test_api.py`.
 """
 
+from typing import cast
+
 import pytest
 from pydantic import ValidationError
 
@@ -23,6 +25,13 @@ from rubric_eval import (
     filter_cases_by_labels,
     label_metrics,
 )
+
+
+def flat_by_mistake(*labels: str) -> list[list[str]]:
+    """The mistake `filter_cases_by_labels` exists to catch: a list of labels where a list of
+    label *groups* belongs. Typed as the parameter it is handed to, because passing it is
+    exactly the lie the runtime check is there to refuse."""
+    return cast(list[list[str]], list(labels))
 
 
 def case_with(case_id: int, labels: list[str]) -> Case:
@@ -136,7 +145,56 @@ def test_a_flat_list_of_labels_is_refused_rather_than_read_as_characters():
     compare *characters*, returning a wrong answer with no error. The message names both
     things the caller might have meant."""
     with pytest.raises(TypeError, match=r"list of label \*groups\*"):
-        filter_cases_by_labels(CATALOG, ["table"])
+        filter_cases_by_labels(CATALOG, flat_by_mistake("table"))
+
+
+def test_a_flat_list_of_several_labels_names_the_two_filters_it_could_have_meant():
+    """AND and OR really are two different filters there, and the caller is the only one who
+    knows which was meant — so both are written out, ready to paste."""
+    with pytest.raises(TypeError) as refused:
+        filter_cases_by_labels(CATALOG, flat_by_mistake("table", "agentic"))
+
+    assert "pass [['table', 'agentic']] to require all of them" in str(refused.value)
+    assert "or [['table'], ['agentic']] to require any of them" in str(refused.value)
+
+
+def test_a_single_label_is_offered_once_because_there_is_only_one_filter_to_mean():
+    """"All of them" and "any of them" are the same filter for one label. Offering `[['table']]`
+    twice under two contradictory descriptions reads as a typo in the error message and sends
+    the reader looking for a difference that is not there."""
+    with pytest.raises(TypeError) as refused:
+        filter_cases_by_labels(CATALOG, flat_by_mistake("table"))
+
+    assert str(refused.value).endswith("pass [['table']] instead")
+    assert "require any of them" not in str(refused.value)
+
+
+def test_the_readme_filter_table_selects_exactly_the_cases_it_claims():
+    """The four lines the README prints as "what `filter_cases_by_labels` really returns",
+    against the catalog it prints them for — the first thing a reader tries by hand."""
+    readme_catalog = [
+        case_with(1, ["one_page_expected"]),
+        case_with(2, ["table", "one_page_expected"]),
+        case_with(3, ["table"]),
+    ]
+
+    def selected(label_filter: list[list[str]]) -> list[int]:
+        return [case.id for case in filter_cases_by_labels(readme_catalog, label_filter)]
+
+    assert selected([["table"]]) == [2, 3]
+    assert selected([["table", "one_page_expected"]]) == [2]
+    assert selected([["table"], ["one_page_expected"]]) == [1, 2, 3]
+    assert selected([]) == [1, 2, 3]
+
+
+def test_a_preview_refuses_a_repeated_label_inside_a_group_as_a_run_does():
+    """A group is read as a set of required labels, so `["table", "table"]` asks the same
+    question twice. `Run.label_filter` refuses it through the very same alias, and the preview
+    has to refuse what the run it previews would."""
+    with pytest.raises(ValidationError, match="labels must be unique"):
+        filter_cases_by_labels(CATALOG, [["table", "table"]])
+    with pytest.raises(ValidationError, match="labels must be unique"):
+        Run(cases=CATALOG, label_filter=[["table", "table"]])
 
 
 def test_a_label_filter_is_read_the_same_way_however_its_labels_are_spaced():

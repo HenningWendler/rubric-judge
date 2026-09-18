@@ -199,8 +199,8 @@ def filter_cases_by_labels(cases: list[Case], label_filter: list[list[str]]) -> 
 
     Raises:
         TypeError: For a flat `["table"]`, which would otherwise compare *characters* and
-            quietly return the wrong cases — the message names both readings you may have
-            meant.
+            quietly return the wrong cases. The message names both readings you may have
+            meant, or the single one there is when the labels are one.
         pydantic.ValidationError: For a label filter a `Run` would refuse too — a blank
             label, or the same group twice.
 
@@ -217,13 +217,27 @@ def filter_cases_by_labels(cases: list[Case], label_filter: list[list[str]]) -> 
         [case.id for case in selected]   # [1, 2]
     """
     if any(isinstance(group, str) for group in label_filter):
-        raise TypeError(
-            "a label filter is a list of label *groups*, not a list of labels: pass "
-            f"{[list(label_filter)]} to require all of them, or "
-            f"{[[label] for label in label_filter]} to require any of them"
-        )
+        raise TypeError(_flat_label_filter_complaint(label_filter))
     label_filter = read_label_filter(label_filter)
     return [case for case in cases if matches_label_filter(case.labels, label_filter)]
+
+
+def _flat_label_filter_complaint(labels: list[list[str]]) -> str:
+    """Name the label filter the caller meant, and name it twice only when it is two filters.
+
+    "All of them" and "any of them" are the same filter for a single label, so spelling both
+    out there would offer the same list under two contradictory descriptions and leave the
+    reader looking for the difference.
+    """
+    require_all = [list(labels)]
+    require_any = [[label] for label in labels]
+    opening = "a label filter is a list of label *groups*, not a list of labels: pass "
+    if require_all == require_any:
+        return f"{opening}{require_all} instead"
+    return (
+        f"{opening}{require_all} to require all of them, "
+        f"or {require_any} to require any of them"
+    )
 
 
 async def _judge_criterion(judge: Judge, case: Case, criterion: Criterion) -> CriterionResult:
