@@ -448,7 +448,7 @@ def test_a_negative_temperature_is_rejected():
         JudgeConfig(model="m", endpoint="http://x/v1", api_key="k", temperature=-1.0)
 
 
-def test_an_empty_environment_variable_counts_as_missing(monkeypatch):
+def test_an_empty_required_environment_variable_is_refused(monkeypatch):
     """`export RUBRIC_EVAL_JUDGE_API_KEY=` is a typo, not a configuration — an empty key would
     otherwise reach the endpoint and fail there with an unrelated 401."""
     monkeypatch.setenv("RUBRIC_EVAL_JUDGE_ENDPOINT", "http://x/v1")
@@ -683,20 +683,24 @@ async def test_a_custom_prompt_replaces_the_system_message():
     assert "Send an email" in user["content"]
 
 
-def test_an_empty_optional_environment_variable_falls_back_to_the_default(monkeypatch):
-    """An empty value counts as missing for the required variables, so it has to mean the
-    same for the optional ones — an exported but unset `MAX_CONCURRENT=` must not be read as
-    a limit of zero, which would be rejected and take the process down at startup."""
+def test_an_empty_optional_environment_variable_is_refused_like_an_empty_required_one(
+    monkeypatch,
+):
+    """`MAX_CONCURRENT=` is a half-finished export, exactly as `API_KEY=` is. One condition
+    gets one policy: falling back to the field default here would swallow the same typo the
+    required variables are refused for, and the process would start on settings nobody
+    chose. Both offending variables are named, not only the first."""
     monkeypatch.setenv("RUBRIC_EVAL_JUDGE_ENDPOINT", "http://x/v1")
     monkeypatch.setenv("RUBRIC_EVAL_JUDGE_API_KEY", "k")
     monkeypatch.setenv("RUBRIC_EVAL_JUDGE_MODEL", "m")
     monkeypatch.setenv("RUBRIC_EVAL_JUDGE_MAX_CONCURRENT", "")
     monkeypatch.setenv("RUBRIC_EVAL_JUDGE_TEMPERATURE", "")
 
-    config = JudgeConfig.from_env()
+    with pytest.raises(RuntimeError) as complaint:
+        JudgeConfig.from_env()
 
-    assert config.max_concurrent == 8
-    assert config.temperature == 0.0
+    assert "RUBRIC_EVAL_JUDGE_MAX_CONCURRENT" in str(complaint.value)
+    assert "RUBRIC_EVAL_JUDGE_TEMPERATURE" in str(complaint.value)
 
 
 # --- the scale the judge declares ----------------------------------------------------------

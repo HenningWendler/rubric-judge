@@ -68,11 +68,16 @@ a committed file. Copy [.env.example](.env.example) to `.env` and fill it in.
 | `RUBRIC_EVAL_JUDGE_MAX_ATTEMPTS` | int ≥ 1 | `3` | Tries per criterion, **the first one included** — an unusable reply and a failed connection each cost one. Running out fails the whole run with a `503`. Raise it for a small model that formats badly, or for a flaky endpoint |
 | `RUBRIC_EVAL_JUDGE_MAX_CONCURRENT` | int ≥ 1 | `8` | Judge calls in flight at once. Raise for a local vLLM or Ollama, lower for a small hosted tier |
 
-An empty value counts as missing. **All** missing or invalid variables are reported in one
-error, so configuration is fixed in a single pass instead of one restart per mistake:
+A variable exported **empty** is a half-finished configuration, not a setting, and is
+refused for every variable alike — an empty optional one does *not* fall back to its default,
+because one condition must not mean "your key is missing" on one line and "take the default"
+on the next. An optional variable that is not set **at all** is what falls back.
+
+**All** missing or empty variables are reported in one error, so configuration is fixed in a
+single pass instead of one restart per mistake:
 
 ```
-RuntimeError: Missing environment variables: RUBRIC_EVAL_JUDGE_API_KEY, RUBRIC_EVAL_JUDGE_MODEL
+RuntimeError: Unusable environment variables: RUBRIC_EVAL_JUDGE_API_KEY is missing, RUBRIC_EVAL_JUDGE_MODEL is missing, RUBRIC_EVAL_JUDGE_MAX_TOKENS is empty
 ```
 
 Any OpenAI-compatible endpoint works — OpenAI, vLLM, Azure, Ollama, Groq, OpenRouter —
@@ -832,7 +837,7 @@ Everything is validated **before** the first LLM call, so a malformed request co
 | A `Scale` describing only some of its grades, or a grade it does not have | `pydantic.ValidationError` | `422` |
 | Two runs not comparable: a different grading scale, different case ids, different criteria within a case, different weights, or a case whose **labels** changed between the runs | `RunsNotComparableError` (a `ValueError`) naming **every** difference at once | `422` |
 | A judge returning a score above the `scale` it declares | `ValueError` out of `evaluate_case()` naming the criterion — a bug in the judge, not an outage | `500` |
-| Judge not configured (missing env vars) | `RuntimeError` naming every missing variable | `500` |
+| Judge not configured: a required `RUBRIC_EVAL_JUDGE_*` variable missing, or any of them — required or optional — exported empty | `RuntimeError` naming every offending variable and which of the two it is | `500` |
 | Judge endpoint unreachable, timed out, rate limited or answering `5xx` | retried up to `MAX_ATTEMPTS` times with a doubling wait, then `JudgeUnavailableError` — **the whole run is dropped** | `503` |
 | Judge reply unparseable after `MAX_ATTEMPTS`, or carrying no content at all | `JudgeUnavailableError` naming the last complaint, or the endpoint's `finish_reason` | `503` |
 | Judge endpoint rejecting the key, the model or the request | the `openai` SDK's own exception, unretried — repeating it would not help | `500` |

@@ -189,38 +189,53 @@ class JudgeConfig(DocumentedModel):
 
         Reads `ENDPOINT`, `API_KEY`, `MODEL` (all required) plus `TEMPERATURE`,
         `MAX_TOKENS`, `MAX_ATTEMPTS` and `MAX_CONCURRENT`, each prefixed
-        `RUBRIC_EVAL_JUDGE_`. A variable that is not set is not passed on at all, so the
-        field defaults above stay the single source of truth for the optional ones.
+        `RUBRIC_EVAL_JUDGE_`. An optional variable that is not set at all is not passed on,
+        so the field defaults above stay the single source of truth for it.
+
+        Exporting a variable *empty* is a half-finished configuration and is refused for
+        every variable alike, required or optional — one condition cannot mean "your key is
+        missing" on one line and "take the default" on the next.
 
         Returns:
             A validated `JudgeConfig`. Numeric variables are parsed and range-checked by
             Pydantic, so a typo cannot turn into a silently odd setting.
 
         Raises:
-            RuntimeError: One or more required variables are missing or empty. The message
-                names *all* of them at once — fixing configuration one error per restart is
-                misery.
+            RuntimeError: A required variable is missing, or any variable is set to the empty
+                string. The message names *all* of them at once and says which of the two
+                each one is — fixing configuration one error per restart is misery.
             ValidationError: A numeric variable does not parse or is out of range. The
                 message names the offending setting.
         """
-        required = (
-            "RUBRIC_EVAL_JUDGE_ENDPOINT",
-            "RUBRIC_EVAL_JUDGE_API_KEY",
-            "RUBRIC_EVAL_JUDGE_MODEL",
-        )
-        if missing := [variable for variable in required if not os.environ.get(variable)]:
-            raise RuntimeError(f"Missing environment variables: {', '.join(missing)}")
-
-        settings = {
-            "endpoint": os.environ.get("RUBRIC_EVAL_JUDGE_ENDPOINT"),
-            "api_key": os.environ.get("RUBRIC_EVAL_JUDGE_API_KEY"),
-            "model": os.environ.get("RUBRIC_EVAL_JUDGE_MODEL"),
-            "temperature": os.environ.get("RUBRIC_EVAL_JUDGE_TEMPERATURE"),
-            "max_tokens": os.environ.get("RUBRIC_EVAL_JUDGE_MAX_TOKENS"),
-            "max_attempts": os.environ.get("RUBRIC_EVAL_JUDGE_MAX_ATTEMPTS"),
-            "max_concurrent": os.environ.get("RUBRIC_EVAL_JUDGE_MAX_CONCURRENT"),
+        variable_per_field = {
+            "endpoint": "RUBRIC_EVAL_JUDGE_ENDPOINT",
+            "api_key": "RUBRIC_EVAL_JUDGE_API_KEY",
+            "model": "RUBRIC_EVAL_JUDGE_MODEL",
+            "temperature": "RUBRIC_EVAL_JUDGE_TEMPERATURE",
+            "max_tokens": "RUBRIC_EVAL_JUDGE_MAX_TOKENS",
+            "max_attempts": "RUBRIC_EVAL_JUDGE_MAX_ATTEMPTS",
+            "max_concurrent": "RUBRIC_EVAL_JUDGE_MAX_CONCURRENT",
         }
-        return cls(**{field: value for field, value in settings.items() if value})
+        required_fields = {"endpoint", "api_key", "model"}
+        unusable = [
+            f"{variable} is missing"
+            for field, variable in variable_per_field.items()
+            if field in required_fields and variable not in os.environ
+        ] + [
+            f"{variable} is empty"
+            for variable in variable_per_field.values()
+            if os.environ.get(variable) == ""
+        ]
+        if unusable:
+            raise RuntimeError(f"Unusable environment variables: {', '.join(unusable)}")
+
+        return cls(
+            **{
+                field: os.environ[variable]
+                for field, variable in variable_per_field.items()
+                if variable in os.environ
+            }
+        )
 
 
 def parse_judge_reply(reply: str, scale: Scale) -> JudgeReply:
