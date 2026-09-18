@@ -1,9 +1,9 @@
-"""Every word the judge is told: the system prompt, the per-criterion user prompt, and the
-complaints fed back to it when a reply cannot be parsed.
+"""Every word the judge is told, as plain strings.
 
-Strings only. Wrapping them into chat messages is `judge.py`'s business — this module knows
-nothing about roles, message dicts or the OpenAI SDK, so the complete wording of an
-evaluation stays reviewable in one file, by someone who does not read Python.
+The system prompt, the per-criterion user prompt, and the complaints fed back to the judge
+when a reply cannot be parsed. Wrapping them into chat messages is `judge.py`'s business —
+this module knows nothing about roles, message dicts or the OpenAI SDK, so the complete
+wording of an evaluation stays reviewable in one file, by someone who does not read Python.
 
 The one exception is what the grades *mean*: those sentences live on the `Scale`, because a
 `CaseResult` carries them and a stored run has to keep saying what its 7 out of 10 was worth.
@@ -27,8 +27,7 @@ diffing the two drowns in reflowed whitespace."""
 
 
 def _allowed_scores(scale: Scale) -> str:
-    """Lists the grades a scale allows — 0, 1 or 2 for the bundled one — so no complaint can
-    ever offer the judge a grade its own parser would then reject."""
+    """Exists so no complaint can offer the judge a grade its own parser would then reject."""
     return ", ".join(str(grade) for grade in scale.grades[:-1]) + f" or {scale.maximum}"
 
 
@@ -111,15 +110,21 @@ def judge_prompt(scale: Scale, examples: str = "") -> str:
             examples close on grades of 0, 1 and 2.
 
     Returns:
-        The complete system prompt. For `DEFAULT_SCALE` with `WORKED_EXAMPLES_EN` that is
-        `JUDGE_EN`, byte for byte.
+        The complete system prompt, never empty. For `DEFAULT_SCALE` with
+        `WORKED_EXAMPLES_EN` that is `JUDGE_EN`, byte for byte.
 
     Raises:
         ValueError: `scale` describes no levels, so there is nothing to put under the header.
             An undescribed scale is arithmetic only and needs a prompt written by hand.
 
     Example:
-        judge_prompt(Scale(maximum=5, presence_threshold=3, level_descriptions={...}))
+        pass_fail = Scale(
+            maximum=1,
+            presence_threshold=1,
+            level_descriptions={1: "Covered.", 0: "Not covered."},
+        )
+        "Use this 0-1 scale:" in judge_prompt(pass_fail)   # True
+        "1 = Covered." in judge_prompt(pass_fail)          # True
     """
     if not scale.level_descriptions:
         raise ValueError(
@@ -134,8 +139,7 @@ def judge_prompt(scale: Scale, examples: str = "") -> str:
 
 
 def _level_lines(scale: Scale) -> str:
-    """One `<grade> = <what it means>` line per level, best grade first and wrapped like the
-    hand-written block: the judge reads the scale top down, as a marker would."""
+    """Exists so the judge reads the scale top down, best grade first, as a marker would."""
     return "\n".join(
         textwrap.fill(
             f"{grade} = {scale.level_descriptions[grade]}",
@@ -198,7 +202,13 @@ def no_json_hint(scale: Scale) -> str:
 
     Returns:
         The message, phrased as an instruction: the parser raises it as a `ValueError` and
-        the retry loop sends that text to the model unchanged.
+        the retry loop sends that text to the model unchanged. Never empty — an empty
+        correction would spend one of the judge's attempts telling it nothing.
+
+    Example:
+        no_json_hint(DEFAULT_SCALE)
+        # 'Your reply contained no JSON object with a "score" field. End your reply with
+        #  exactly one line of the form {"score": 0}, using 0, 1 or 2.'
     """
     return (
         'Your reply contained no JSON object with a "score" field. '
@@ -216,7 +226,12 @@ def out_of_range_hint(score: float, scale: Scale) -> str:
         scale: The scale it was supposed to answer on — see `no_json_hint`.
 
     Returns:
-        The message, phrased as an instruction — see `no_json_hint`.
+        The message, phrased as an instruction and never empty — see `no_json_hint`.
+
+    Example:
+        out_of_range_hint(3.0, DEFAULT_SCALE)
+        # 'You returned "score": 3.0, which is not on the scale. Reconsider and answer
+        #  with 0, 1 or 2.'
     """
     return (
         f'You returned "score": {score}, which is not on the scale. '
@@ -233,7 +248,20 @@ def malformed_json_hint(error: Exception, scale: Scale) -> str:
         scale: The scale it was supposed to answer on — see `no_json_hint`.
 
     Returns:
-        The message, phrased as an instruction — see `no_json_hint`.
+        The message, phrased as an instruction and never empty — see `no_json_hint`. It
+        stays readable for an `error` whose own text is empty, because the sentence around
+        it carries the instruction.
+
+    Example:
+        import json
+
+        try:
+            json.loads('{"score": 2,}')
+        except ValueError as broken:
+            malformed_json_hint(broken, DEFAULT_SCALE)
+        # 'Your score object could not be parsed (Expecting property name enclosed in
+        #  double quotes: line 1 column 13 (char 12)). End your reply with exactly one
+        #  line of valid JSON like {"score": 0}, using 0, 1 or 2.'
     """
     return (
         f'Your score object could not be parsed ({error}). '
@@ -252,7 +280,21 @@ def criterion_prompt(question: str, answer: str, criterion: str) -> str:
             a judge that knew how much a criterion counts could let that leak into the score.
 
     Returns:
-        The complete user message. One criterion per call is the whole design — a model
-        asked about five at once trades attention between them.
+        The complete user message, never empty — the three labels are always there, even
+        for an empty `answer`. One criterion per call is the whole design; a model asked
+        about five at once trades attention between them.
+
+    Example:
+        print(criterion_prompt("How do I report sick leave?",
+                               "Email hr@example.com.",
+                               "Report by email"))
+        # Question:
+        # How do I report sick leave?
+        #
+        # Answer:
+        # Email hr@example.com.
+        #
+        # Criterion:
+        # - Report by email
     """
     return f"Question:\n{question}\n\nAnswer:\n{answer}\n\nCriterion:\n- {criterion}\n"
