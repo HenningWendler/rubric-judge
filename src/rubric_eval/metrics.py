@@ -18,6 +18,7 @@ from rubric_eval.models import (
     RunMetrics,
     Scale,
     carries_every_label,
+    case_count_per_label,
     one_scale_of,
     scores_must_fit,
 )
@@ -167,17 +168,15 @@ def label_metrics(case_results: list[CaseResult]) -> list[LabelMetrics]:
     """
     return [
         LabelMetrics(label=label, metrics=run_metrics(_cases_carrying(label, case_results)))
-        for label in _labels_present_in(case_results)
+        for label in _labels_to_bucket_by(case_results)
     ]
 
 
-def _labels_present_in(case_results: list[CaseResult]) -> list[str]:
-    """Which buckets there are to build, alphabetically — a set so a label shared by forty
-    cases opens one bucket, sorted so the breakdown reads the same whatever order the run was
-    stored in."""
-    return sorted(
-        {label for case_result in case_results for label in case_result.labels}
-    )
+def _labels_to_bucket_by(case_results: list[CaseResult]) -> list[str]:
+    """Which buckets there are to build, alphabetically — counted so a label shared by forty
+    cases still opens one bucket, sorted so the breakdown reads the same whatever order the
+    run was stored in."""
+    return sorted(case_count_per_label(case_result.labels for case_result in case_results))
 
 
 def _cases_carrying(label: str, case_results: list[CaseResult]) -> list[CaseResult]:

@@ -435,13 +435,48 @@ def every_case_must_match(
         )
 
 
-def labels_present_in(labels_by_case_id: dict[int, list[str]]) -> str:
-    """The labels a catalog actually carries, with counts, for a label filter that picked
-    nothing — that is a typo far more often than a genuinely empty subset, and the right
-    spelling is unguessable from "nothing matched" alone."""
-    counted = Counter(
-        label for case_labels in labels_by_case_id.values() for label in case_labels
-    )
+def case_count_per_label(labels_per_case: Iterable[list[str]]) -> Counter[str]:
+    """How many of these cases carry each label — one reading of "which labels are in play".
+
+    The one place that question is answered, because two callers ask it for different
+    reasons: `metrics.label_metrics` reads the labels off it, to know which buckets exist,
+    and `labels_with_case_counts` reads the counts too. Answered twice, the two would
+    eventually stop agreeing on what is in play — the bucket breakdown of a run and the
+    refusal naming its labels have to be built from the same reading.
+
+    Args:
+        labels_per_case: The labels of each case, one list per case. A case carrying no label
+            contributes nothing; an empty iterable is fine and counts nothing.
+
+    Returns:
+        How many cases carry each label. Empty when no case carries one — which is what an
+        untagged catalog honestly looks like, not a missing answer.
+
+    Example:
+        case_count_per_label(case.labels for case in run.cases)   # {"table": 2, "images": 1}
+    """
+    return Counter(label for case_labels in labels_per_case for label in case_labels)
+
+
+def labels_with_case_counts(labels_per_case: Iterable[list[str]]) -> str:
+    """The labels a catalog actually carries, counted, as one line for a refusal to quote.
+
+    What a label filter matching nothing is missing: that is a typo far more often than a
+    genuinely empty subset, and the right spelling is unguessable from "nothing matched"
+    alone.
+
+    Args:
+        labels_per_case: The labels of each case of the catalog, one list per case.
+
+    Returns:
+        The labels in alphabetical order with the number of cases carrying each — "images
+        (1), table (2)" — or the word "none" for a catalog carrying no label at all, so the
+        sentence quoting it never trails off into nothing.
+
+    Example:
+        labels_with_case_counts(case.labels for case in run.cases)   # "images (1), table (2)"
+    """
+    counted = case_count_per_label(labels_per_case)
     carried = ", ".join(f"{label} ({count})" for label, count in sorted(counted.items()))
     return carried or "none"
 
@@ -730,10 +765,9 @@ class Run(DocumentedModel):
         was a typo only after paying for a catalog of judge calls — and because a run of no
         cases has no metrics to report, so there is nothing to hand back either."""
         if not self.selected_cases:
-            labels_by_case_id = {case.id: case.labels for case in self.cases}
             raise ValueError(
-                f"label_filter {self.label_filter} matches no case; "
-                f"labels present in this run: {labels_present_in(labels_by_case_id)}"
+                f"label_filter {self.label_filter} matches no case; labels present in this "
+                f"run: {labels_with_case_counts(case.labels for case in self.cases)}"
             )
         return self
 
