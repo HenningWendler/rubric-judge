@@ -1308,6 +1308,12 @@ That is a measurement taken against a live endpoint, not something this reposito
 reproduce on demand — which is exactly the point, and the reason the examples elsewhere in
 this README are graded from a table.
 
+A fifth run of the same case, recorded here so the table-graded headline can be checked
+against a real judge at least once: on **2026-09-18** against **`gpt-5.4-mini-2026-03-17`**
+it returned `0.75` with grades `[2.0, 0.0]` — the same numbers the
+[headline example](#rubric-eval) produces from its table. One sample agreeing is not a
+promise that yours will: the row above is what to expect.
+
 Note which explanation it rules out: it is **not** a matter of scale granularity. The same
 criterion wavered on both scales, while the sharp criteria stayed put on both.
 
