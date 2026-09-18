@@ -519,13 +519,14 @@ The mirror of `LabelMetrics`, and what answers *"my average went up — but did 
 
 | Field | Type | Meaning |
 |---|---|---|
-| `largest` | `float` | The single biggest move on this side |
-| `mean` | `float` | Mean of the moves — what a typical one was worth |
-| `median` | `float` | Median of them. Far below the mean on the improvement side means one case carries the win |
+| `largest` | `float \| null` | The single biggest move on this side |
+| `mean` | `float \| null` | Mean of the moves — what a typical one was worth |
+| `median` | `float \| null` | Median of them. Far below the mean on the improvement side means one case carries the win |
 
 All three carry the **sign of their side**, so a worsening's `largest` is the most negative
-delta, not its absolute value. All three are `0.0` when nothing moved that way — a run where
-nothing got worse has no worsening to report.
+delta, not its absolute value. All three are `null` when nothing moved that way — a run where
+nothing got worse has no worsening to report, and a `0.0` there would read as a regression of
+exactly zero to anyone holding the number rather than the id list next to it.
 
 #### `ChangeSummary` — where the run moved, case by case
 
@@ -537,8 +538,8 @@ says whether every case rose a little or one rose a lot while another collapsed.
 | `improved_case_ids` | `list[int]` | — | Cases the candidate scored higher on, **biggest improvement first**. Complete, not capped — the top three are its first three |
 | `stable_case_ids` | `list[int]` | — | Cases whose score did not move beyond the tolerance, in id order |
 | `worsened_case_ids` | `list[int]` | — | Cases the candidate scored lower on, **biggest regression first**. Read these when an average went up and you want to know what it cost |
-| `improvement` | `ChangeMagnitude` | — | Size of the moves behind `improved_case_ids`, all positive |
-| `worsening` | `ChangeMagnitude` | — | Size of the moves behind `worsened_case_ids`, all negative |
+| `improvement` | `ChangeMagnitude` | — | Size of the moves behind `improved_case_ids`, all positive. All three fields `null` when nothing improved |
+| `worsening` | `ChangeMagnitude` | — | Size of the moves behind `worsened_case_ids`, all negative. All three fields `null` when nothing got worse |
 | `improved_case_count` | `int` | `>= 0` | Length of `improved_case_ids`. Derived, so list and count cannot disagree |
 | `stable_case_count` | `int` | `>= 0` | Length of `stable_case_ids` |
 | `worsened_case_count` | `int` | `>= 0` | Length of `worsened_case_ids` |

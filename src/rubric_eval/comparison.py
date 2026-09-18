@@ -65,6 +65,10 @@ def compare_runs(run_comparison: RunComparison) -> RunComparisonResult:
         Both runs are complete by construction: a run whose judge failed anywhere was never
         handed back, so no delta here is an artefact of an outage on one side.
 
+        A side of `summary` that nobody moved to comes back empty rather than zeroed: its id
+        list is `[]` and all three magnitudes are `None`, so "nothing got worse" is never
+        read as "everything got worse by 0.0".
+
         `applied_label_filter` is deliberately *not* compared: two runs covering the same case
         ids are comparable however each of them was selected, and two different filters can
         legitimately arrive at the same cases.
@@ -198,14 +202,15 @@ def _ranked_by_movement(
 
 
 def _magnitude_of(moved_case_comparisons: list[CaseComparisonResult]) -> ChangeMagnitude:
-    """How large the moves on one side were. All zero for an empty side: `statistics.mean`
-    raises on an empty list, and a run where nothing got worse has no worsening to report.
+    """How large the moves on one side were, or three `None`s when nothing moved that way:
+    a side with no moves has no largest, mean or median, and a 0.0 in their place is a move
+    of exactly zero to every reader who does not also check the id list.
 
     Reads `largest` off the front of the list because both sides arrive ordered biggest-move
     first, so the extreme is the first entry either way.
     """
     if not moved_case_comparisons:
-        return ChangeMagnitude(largest=0.0, mean=0.0, median=0.0)
+        return ChangeMagnitude(largest=None, mean=None, median=None)
     deltas = [
         case_comparison.score_delta for case_comparison in moved_case_comparisons
     ]

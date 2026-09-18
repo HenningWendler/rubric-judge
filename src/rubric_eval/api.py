@@ -181,7 +181,9 @@ async def compare_runs(run_comparison: RunComparison) -> RunComparisonResult:
     `candidate - baseline` for every run metric, so a positive number always means the candidate did better — except
     for the two counting fields, where fewer is better. `summary` says how that is distributed:
     which cases improved, stayed, or got worse, biggest movers first, and how large the moves
-    were on each side. `case_comparison_results` goes down to the individual criterion.
+    were on each side — `largest`, `mean` and `median` are `null` for a side nothing moved to,
+    so "nothing got worse" never reads as "everything got worse by 0.0".
+    `case_comparison_results` goes down to the individual criterion.
 
     `label_metrics_deltas` repeats `metrics_delta` for each label the cases carry, which is
     what says whether an average that rose did so by fixing one kind of case or by lifting

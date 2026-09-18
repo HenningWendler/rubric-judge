@@ -4,6 +4,8 @@ Every run here is built by `run_of` from plain judge scores, so a test reads as 
 and deltas out with no judge and no event loop in between.
 """
 
+import json
+
 import pytest
 from pydantic import ValidationError
 
@@ -196,13 +198,27 @@ class TestSummary:
         assert result.summary.worsened_case_ids[0] == 2
         assert result.summary.worsening.largest == -1.0
 
-    def test_a_magnitude_is_all_zero_when_nothing_moved_that_way(self):
-        """`statistics.mean` raises on an empty list, and a run where nothing got worse has
-        no worsening to report — both have to come out as a plain zero."""
+    def test_a_magnitude_is_null_when_nothing_moved_that_way(self):
+        """A run where nothing got worse has no worsening to report, and 0.0 would report one
+        of exactly zero: a JSON consumer reading the magnitude alone cannot tell those apart,
+        because only the emptiness of the id list next to it says which it is."""
         result = compared(run_of({1: 0}), run_of({1: 2}))
-        assert result.summary.worsening.largest == 0.0
-        assert result.summary.worsening.mean == 0.0
-        assert result.summary.worsening.median == 0.0
+
+        assert result.summary.worsened_case_ids == []
+        assert result.summary.worsening.largest is None
+        assert result.summary.worsening.mean is None
+        assert result.summary.worsening.median is None
+
+    def test_a_magnitude_of_null_survives_the_json_a_stored_comparison_is_read_from(self):
+        """The `null`s are the published answer, not an in-memory nicety: a reader of the
+        stored document has to see "no data" where a zero used to stand."""
+        result = compared(run_of({1: 0}), run_of({1: 2}))
+
+        assert json.loads(result.model_dump_json())["summary"]["worsening"] == {
+            "largest": None,
+            "mean": None,
+            "median": None,
+        }
 
     def test_a_magnitude_median_sits_between_the_two_middle_moves(self):
         """Four improvements of 0.25, 0.5, 1.0 and 1.0: the median of an even-sized side lies

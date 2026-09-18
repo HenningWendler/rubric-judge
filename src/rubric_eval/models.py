@@ -1151,19 +1151,21 @@ class ChangeMagnitude(DocumentedModel):
     """How large the moves on one side of a comparison were — improvements or regressions.
 
     All three numbers carry the sign of their side, so a worsening's `largest` is the most
-    negative delta, not its absolute value. Every field is 0.0 when nothing moved that way,
-    which is the honest reading: a run where nothing got worse has no worsening to report.
+    negative delta, not its absolute value. Every field is `null` when nothing moved that way:
+    a run where nothing got worse has no worsening to report, and a 0.0 there would read as a
+    regression of exactly zero to anyone holding the number rather than the id list.
     """
 
-    largest: float
-    """The single biggest move on this side, or 0.0 if the side is empty."""
+    largest: float | None
+    """The single biggest move on this side, `None` when no case moved this way."""
 
-    mean: float
-    """Arithmetic mean of the moves on this side — how much a typical one was worth."""
+    mean: float | None
+    """Arithmetic mean of the moves on this side — how much a typical one was worth. `None`
+    when no case moved this way; there is no move to average."""
 
-    median: float
-    """Median of the moves. Far below the mean on the improvement side means one case
-    carries the win."""
+    median: float | None
+    """Median of the moves, `None` when no case moved this way. Far below the mean on the
+    improvement side means one case carries the win."""
 
 
 class ChangeSummary(DocumentedModel):
@@ -1190,10 +1192,12 @@ class ChangeSummary(DocumentedModel):
     are the ones to read when an average went up and you want to know what it cost."""
 
     improvement: ChangeMagnitude
-    """Size of the moves behind `improved_case_ids`, all positive."""
+    """Size of the moves behind `improved_case_ids`, all positive — all three fields `null`
+    when nothing improved."""
 
     worsening: ChangeMagnitude
-    """Size of the moves behind `worsened_case_ids`, all negative."""
+    """Size of the moves behind `worsened_case_ids`, all negative — all three fields `null`
+    when nothing got worse."""
 
     @computed_field
     @property
