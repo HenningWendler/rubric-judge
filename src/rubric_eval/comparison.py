@@ -1,6 +1,6 @@
 """Holding two finished runs against each other: did the change help, where, and what did it cost.
 
-Pure computation over two `BatchResult` documents — no judge, no network, no cost. Runs
+Pure computation over two `RunResult` documents — no judge, no network, no cost. Runs
 saved to disk months apart compare exactly like runs produced a second ago.
 
 One entry point, `compare_runs`, and one hard rule underneath it: two runs are comparable
@@ -15,7 +15,6 @@ import statistics
 from operator import attrgetter
 
 from rubric_eval.models import (
-    BatchResult,
     CaseComparisonResult,
     CaseResult,
     ChangeMagnitude,
@@ -27,6 +26,7 @@ from rubric_eval.models import (
     RunMetrics,
     RunMetricsDelta,
     RunPair,
+    RunResult,
     reworded_grades_clause,
 )
 
@@ -93,7 +93,7 @@ def compare_runs(run_pair: RunPair) -> ComparisonResult:
     )
 
 
-def _compare_cases(baseline: BatchResult, candidate: BatchResult) -> list[CaseComparisonResult]:
+def _compare_cases(baseline: RunResult, candidate: RunResult) -> list[CaseComparisonResult]:
     """One comparison per case, ordered by id — neither run's storage order is canonical,
     so sorting by id gives a document that does not depend on either."""
     baseline_by_id = _case_results_by_id(baseline)
@@ -104,7 +104,7 @@ def _compare_cases(baseline: BatchResult, candidate: BatchResult) -> list[CaseCo
     ]
 
 
-def _case_results_by_id(run: BatchResult) -> dict[int, CaseResult]:
+def _case_results_by_id(run: RunResult) -> dict[int, CaseResult]:
     """Cases are matched by id, never by position: two runs of the same catalog may well be
     stored in different orders, and zipping those would compare unrelated answers."""
     return {result.case_id: result for result in run.case_results}
@@ -132,12 +132,12 @@ def _metrics_delta(baseline: RunMetrics, candidate: RunMetrics) -> RunMetricsDel
 
 
 def _label_metrics_deltas(
-    baseline: BatchResult, candidate: BatchResult
+    baseline: RunResult, candidate: RunResult
 ) -> list[LabelMetricsDelta]:
     """One delta per label, in the alphabetical order both breakdowns already carry.
 
     Pairing by label needs no intersection: the comparability check has guaranteed that every
-    case carries the same labels in both runs, and `BatchResult` has guaranteed that each
+    case carries the same labels in both runs, and `RunResult` has guaranteed that each
     breakdown covers exactly the labels its cases carry — so the two label sets are equal, and
     zipping them pairs like with like.
     """
@@ -152,7 +152,7 @@ def _label_metrics_deltas(
     ]
 
 
-def _buckets_by_label(run: BatchResult) -> list[LabelMetrics]:
+def _buckets_by_label(run: RunResult) -> list[LabelMetrics]:
     """Sorted here as well as at the source, so the zip above pairs by label rather than by
     trusting the storage order of a run that was read back from JSON."""
     return sorted(run.label_metrics, key=attrgetter("label"))
@@ -207,7 +207,7 @@ def _magnitude_of(moved_cases: list[CaseComparisonResult]) -> ChangeMagnitude:
     )
 
 
-def _reject_incomparable_runs(baseline: BatchResult, candidate: BatchResult) -> None:
+def _reject_incomparable_runs(baseline: RunResult, candidate: RunResult) -> None:
     """Refuse before computing anything, naming every difference at once — fixing them one
     error message at a time would mean one full re-run per difference."""
     if differences := _differences_between(baseline, candidate):
@@ -216,7 +216,7 @@ def _reject_incomparable_runs(baseline: BatchResult, candidate: BatchResult) -> 
         )
 
 
-def _differences_between(baseline: BatchResult, candidate: BatchResult) -> list[str]:
+def _differences_between(baseline: RunResult, candidate: RunResult) -> list[str]:
     """Everything that stops these two runs from being compared, in reading order: first the
     scale, which invalidates everything under it, then the cases that are missing on one side,
     then the rubric and label changes inside the shared ones."""
@@ -247,7 +247,7 @@ def _label_differences(case_id: int, baseline: CaseResult, candidate: CaseResult
     ]
 
 
-def _scale_differences(baseline: BatchResult, candidate: BatchResult) -> list[str]:
+def _scale_differences(baseline: RunResult, candidate: RunResult) -> list[str]:
     """Reported first, because it is the difference that makes every other number meaningless:
     a 2 out of 2 and a 2 out of 10 are not the same verdict, so subtracting them would turn a
     change of judge into a collapse of the system under test."""

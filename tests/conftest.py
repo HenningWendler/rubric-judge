@@ -1,4 +1,4 @@
-"""Shared test doubles: one fake judge, one case, one batch and one run builder, used by the
+"""Shared test doubles: one fake judge, one case, one run and one run builder, used by the
 domain and the HTTP tests alike — so a domain test and an HTTP test never describe *almost*
 the same input."""
 
@@ -10,10 +10,10 @@ from rubric_eval.judge import Verdict
 from rubric_eval.metrics import case_score, label_metrics, run_metrics
 from rubric_eval.models import (
     DEFAULT_SCALE,
-    BatchResult,
     CaseResult,
     Criterion,
     CriterionResult,
+    RunResult,
     Scale,
 )
 
@@ -30,7 +30,7 @@ CASE = {
 domain tests, so both describe literally the same case."""
 
 
-BATCH = {
+RUN = {
     "cases": [
         CASE,
         {
@@ -47,12 +47,12 @@ BATCH = {
         },
     ]
 }
-"""Three cases whose criterion ids are unique across the whole batch, so one `FakeJudge`
+"""Three cases whose criterion ids are unique across the whole run, so one `FakeJudge`
 lookup table scores each criterion of each case separately. With `{1: 2, 2: 0, 21: 1, 31: 0}`
 the cases score 0.75, 0.5 and 0.0 — one strong, one partial, one total miss, which is what
 makes the run metrics say something."""
 
-BATCH_VERDICTS = {1: 2, 2: 0, 21: 1, 31: 0}
+RUN_VERDICTS = {1: 2, 2: 0, 21: 1, 31: 0}
 """The lookup table producing exactly those three scores."""
 
 
@@ -105,8 +105,8 @@ def run_of(
     *scores_per_case: dict[int, float],
     scale: Scale = DEFAULT_SCALE,
     labels_by_case_id: dict[int, list[str]] | None = None,
-) -> BatchResult:
-    """A finished `BatchResult` built straight from judge scores, no judge and no async.
+) -> RunResult:
+    """A finished `RunResult` built straight from judge scores, no judge and no async.
 
     One mapping per case: `run_of({1: 2, 2: 0}, {21: 1})` is a two-case run whose first case
     has criteria 1 and 2 scored 2 and 0. Case ids count from 1, weights are all 1, so two
@@ -114,11 +114,11 @@ def run_of(
     `scale` grades the whole run on something other than the bundled 0..2, and
     `labels_by_case_id` tags individual cases — `{1: ["table"]}` labels the first one.
 
-    The per-label breakdown is computed rather than passed in, because `BatchResult` refuses
+    The per-label breakdown is computed rather than passed in, because `RunResult` refuses
     one that does not match its cases and a test should not have to restate it.
 
     Comparison tests are about the *difference* between two runs, so building them through
-    `evaluate_batch` and a `FakeJudge` would only add an event loop between the test and the
+    `evaluate_run` and a `FakeJudge` would only add an event loop between the test and the
     numbers it is asserting on.
     """
     labels_by_case_id = labels_by_case_id or {}
@@ -132,7 +132,7 @@ def run_of(
         )
         for case_id, scores in enumerate(scores_per_case, start=1)
     ]
-    return BatchResult(
+    return RunResult(
         metrics=run_metrics(case_results),
         label_metrics=label_metrics(case_results),
         case_results=case_results,

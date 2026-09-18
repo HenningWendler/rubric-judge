@@ -4,7 +4,7 @@ import httpx
 import pytest
 from openai import APIConnectionError, APITimeoutError, InternalServerError, RateLimitError
 
-from rubric_eval import Batch, Case, evaluate_batch, evaluate_case
+from rubric_eval import Case, Run, evaluate_case, evaluate_run
 from rubric_eval.judge import (
     JudgeConfig,
     JudgeUnavailableError,
@@ -591,8 +591,8 @@ async def test_the_limit_holds_across_several_cases_judged_at_once():
     assert fake.peak_in_flight == 8
 
 
-def _batch_of(case_count: int, criteria_per_case: int) -> Batch:
-    return Batch(
+def _run_of(case_count: int, criteria_per_case: int) -> Run:
+    return Run(
         cases=[
             {
                 "id": case_number,
@@ -608,39 +608,39 @@ def _batch_of(case_count: int, criteria_per_case: int) -> Batch:
     )
 
 
-async def test_a_batch_does_not_multiply_the_concurrency_limit_by_its_cases():
-    """The guardrail the batch could plausibly break: `evaluate_batch` fans out over the cases
+async def test_a_run_does_not_multiply_the_concurrency_limit_by_its_cases():
+    """The guardrail the run could plausibly break: `evaluate_run` fans out over the cases
     *and* every case fans out over its criteria, so a naive implementation would put
     cases x criteria calls in flight. The budget belongs to the judge, so it stays the same
     eight whether 40 criteria come from one case or from five.
     """
     judge, fake = _judge(['Covered.\n{"score": 2}'] * 40, max_concurrent=8)
 
-    result = await evaluate_batch(judge, _batch_of(case_count=5, criteria_per_case=8))
+    result = await evaluate_run(judge, _run_of(case_count=5, criteria_per_case=8))
 
     assert len(fake.calls) == 40
     assert fake.peak_in_flight == 8
     assert result.metrics.average_score == 1.0
 
 
-async def test_two_batches_running_at_once_share_the_budget():
-    """Two HTTP requests, one shared judge: the second batch must queue on the same slots,
+async def test_two_runs_running_at_once_share_the_budget():
+    """Two HTTP requests, one shared judge: the second run must queue on the same slots,
     not open its own eight connections."""
     judge, fake = _judge(['Covered.\n{"score": 2}'] * 40, max_concurrent=8)
-    two_batches = [_batch_of(case_count=2, criteria_per_case=10) for _ in range(2)]
+    two_runs = [_run_of(case_count=2, criteria_per_case=10) for _ in range(2)]
 
-    await asyncio.gather(*(evaluate_batch(judge, batch) for batch in two_batches))
+    await asyncio.gather(*(evaluate_run(judge, run) for run in two_runs))
 
     assert len(fake.calls) == 40
     assert fake.peak_in_flight == 8
 
 
-async def test_a_batch_is_judged_concurrently_rather_than_case_after_case():
+async def test_a_run_is_judged_concurrently_rather_than_case_after_case():
     """A limit of 8 with 4 criteria per case only pays off if the cases overlap — awaiting
     them one after another would cap the peak at 4 and make a run as slow as a for-loop."""
     judge, fake = _judge(['Covered.\n{"score": 2}'] * 16, max_concurrent=8)
 
-    await evaluate_batch(judge, _batch_of(case_count=4, criteria_per_case=4))
+    await evaluate_run(judge, _run_of(case_count=4, criteria_per_case=4))
 
     assert fake.peak_in_flight == 8
 

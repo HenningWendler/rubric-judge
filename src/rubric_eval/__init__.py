@@ -1,7 +1,7 @@
 """rubric-eval — judge LLM answers against weighted reference criteria."""
 
 from rubric_eval.comparison import RunsNotComparableError, compare_runs
-from rubric_eval.evaluation import evaluate_batch, evaluate_case, filter_cases_by_labels
+from rubric_eval.evaluation import evaluate_case, evaluate_run, filter_cases_by_labels
 from rubric_eval.judge import (
     Judge,
     JudgeConfig,
@@ -15,8 +15,6 @@ from rubric_eval.models import (
     DEFAULT_SCALE,
     SCORE_EQUALITY_TOLERANCE,
     WEAKEST_CASES_REPORTED,
-    Batch,
-    BatchResult,
     Case,
     CaseComparisonResult,
     CaseResult,
@@ -30,9 +28,11 @@ from rubric_eval.models import (
     LabelMetrics,
     LabelMetricsDelta,
     LabelSelection,
+    Run,
     RunMetrics,
     RunMetricsDelta,
     RunPair,
+    RunResult,
     Scale,
 )
 from rubric_eval.prompt import judge_prompt
@@ -41,8 +41,6 @@ __all__ = [
     "DEFAULT_SCALE",
     "SCORE_EQUALITY_TOLERANCE",
     "WEAKEST_CASES_REPORTED",
-    "Batch",
-    "BatchResult",
     "Case",
     "CaseComparisonResult",
     "CaseResult",
@@ -60,17 +58,19 @@ __all__ = [
     "LabelMetricsDelta",
     "LabelSelection",
     "OpenAIJudge",
+    "Run",
     "RunMetrics",
     "RunMetricsDelta",
     "RunPair",
+    "RunResult",
     "RunsNotComparableError",
     "Scale",
     "UnusableReplyError",
     "Verdict",
     "case_score",
     "compare_runs",
-    "evaluate_batch",
     "evaluate_case",
+    "evaluate_run",
     "filter_cases_by_labels",
     "judge_prompt",
     "label_metrics",

@@ -82,7 +82,7 @@ def run_metrics(results: list[CaseResult]) -> RunMetrics:
     Reads as its parts: a distribution over the case scores, two views on the criteria
     underneath them, and the shortlist of cases worth reading next.
 
-    Public on purpose: `evaluate_batch` calls it, but so can you — on case results loaded
+    Public on purpose: `evaluate_run` calls it, but so can you — on case results loaded
     back from a stored run, for instance.
 
     Args:
@@ -98,7 +98,7 @@ def run_metrics(results: list[CaseResult]) -> RunMetrics:
     Raises:
         ValueError: The list is empty — a run of no cases has no distribution to describe —
             or the cases were not all judged on the same scale, which would make
-            `average_criterion_score` an average of grades in different units. `BatchResult`
+            `average_criterion_score` an average of grades in different units. `RunResult`
             refuses such a run too, but this function is documented as callable on its own
             and must not hand back a number nobody can interpret.
 
@@ -135,7 +135,7 @@ def label_metrics(results: list[CaseResult]) -> list[LabelMetrics]:
     case counts add up to more than the run. Cases with no labels land in no bucket at all;
     they are in the run-wide `run_metrics` and nowhere else.
 
-    Public for the same reason `run_metrics` is: `evaluate_batch` calls it, but so can you,
+    Public for the same reason `run_metrics` is: `evaluate_run` calls it, but so can you,
     on case results loaded back from a stored run — including one saved before you started
     labelling, once you have added the labels to its results.
 

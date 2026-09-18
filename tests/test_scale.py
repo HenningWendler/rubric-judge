@@ -11,7 +11,7 @@ from pydantic import ValidationError
 from tests.conftest import CASE, FakeJudge, run_of
 from rubric_eval import (
     DEFAULT_SCALE,
-    BatchResult,
+    RunResult,
     Case,
     CaseResult,
     Criterion,
@@ -210,7 +210,7 @@ def test_rejects_a_run_whose_cases_disagree_about_the_scale():
         criterion_results=[CriterionResult.judged(_criterion(2), 7, None, TEN_POINT)],
     )
     with pytest.raises(ValidationError, match="one scale"):
-        BatchResult(
+        RunResult(
             metrics=default_run.metrics,
             case_results=[*default_run.case_results, on_another_scale],
         )
@@ -221,7 +221,7 @@ def test_a_run_reports_the_scale_of_its_cases():
 
 
 def test_a_run_reads_its_scale_off_its_cases_instead_of_storing_it_twice():
-    """`BatchResult.scale` is a Python accessor, not a field: the cases already carry it, and
+    """`RunResult.scale` is a Python accessor, not a field: the cases already carry it, and
     a second copy on the run is a second thing that can disagree with them."""
     run = run_of({1: 7}, scale=TEN_POINT)
     assert "scale" not in run.model_dump()
@@ -247,7 +247,7 @@ def test_rejects_a_run_whose_average_criterion_score_is_off_its_own_scale():
     """The bound moved from a constant to the run's own scale, so it still has to hold."""
     run = run_of({1: 2})
     with pytest.raises(ValidationError, match="average criterion score"):
-        BatchResult(
+        RunResult(
             metrics=run.metrics.model_copy(update={"average_criterion_score": 4.0}),
             case_results=run.case_results,
         )
@@ -352,7 +352,7 @@ def test_two_runs_on_the_same_custom_scale_compare_normally():
 
 def test_a_run_of_cases_on_different_scales_has_no_metrics_to_report():
     """`run_metrics` is documented as callable on stored case results, so it cannot rely on
-    `BatchResult` having refused the mix first."""
+    `RunResult` having refused the mix first."""
     on_default = run_of({1: 2}).case_results[0]
     on_ten = CaseResult(
         case_id=2,
@@ -373,7 +373,7 @@ def test_two_scales_sharing_a_maximum_are_still_two_scales():
 def test_a_run_stored_before_scales_existed_compares_with_a_new_one():
     """Old rows name no scale and are read on the default, which is exactly the scale they
     were judged on — so a run from last month still compares against one from today."""
-    stored = BatchResult(
+    stored = RunResult(
         **{
             "metrics": run_of({1: 2}).metrics.model_dump(),
             "case_results": [
@@ -396,7 +396,7 @@ def test_a_custom_scale_survives_a_json_round_trip():
     """The scale is part of the published result, so a run written to disk on a ten-point
     scale is still a ten-point run when it is read back."""
     run = run_of({1: 7}, scale=TEN_POINT)
-    reloaded = BatchResult.model_validate_json(run.model_dump_json())
+    reloaded = RunResult.model_validate_json(run.model_dump_json())
     assert reloaded.scale == TEN_POINT
     assert reloaded.case_results[0].scale == TEN_POINT
     assert reloaded.case_results[0].criterion_results[0].is_present is True
@@ -459,7 +459,7 @@ def test_the_refusal_says_which_grade_was_reworded_when_the_scales_print_alike()
 
 def test_a_run_says_which_grade_was_reworded_too_when_its_cases_print_alike():
     """The same explanation at the run grain: `one_scale_of` fires first and on more paths —
-    `BatchResult`, `run_metrics` on stored results — so it is the message most callers hit."""
+    `RunResult`, `run_metrics` on stored results — so it is the message most callers hit."""
     reworded = DEFAULT_SCALE.model_copy(
         update={"level_descriptions": DEFAULT_SCALE.level_descriptions | {1: "Halfway there."}}
     )

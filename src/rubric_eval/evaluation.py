@@ -3,14 +3,14 @@
 The layer between the judge and the transport, and the only place that speaks both
 languages: a `Judge` answers with a `Verdict` or raises, a caller wants a complete
 `CaseResult`. Nothing here knows about HTTP, so a CLI or a notebook uses the exact same
-entry points as `POST /evaluate` and `POST /evaluate/batch`.
+entry points as `POST /evaluate` and `POST /evaluate/run`.
 
 A judge that cannot answer invalidates everything it was judging: there is no result with a
 hole in it, because a criterion scored 0 for want of a verdict is indistinguishable from one
 the answer really missed.
 
 Three public functions, one fan-out: `evaluate_case` scores a single answer,
-`evaluate_batch` scores many of them and adds the run metrics on top, and
+`evaluate_run` scores many of them and adds the run metrics on top, and
 `filter_cases_by_labels` picks the subset of a catalog to hand either of them.
 """
 
@@ -19,12 +19,12 @@ import asyncio
 from rubric_eval.judge import Judge
 from rubric_eval.metrics import case_score, label_metrics, run_metrics
 from rubric_eval.models import (
-    Batch,
-    BatchResult,
     Case,
     CaseResult,
     Criterion,
     CriterionResult,
+    Run,
+    RunResult,
     matches_label_selection,
     read_label_selection,
 )
@@ -81,59 +81,59 @@ async def evaluate_case(judge: Judge, case: Case) -> CaseResult:
     )
 
 
-async def evaluate_batch(judge: Judge, batch: Batch) -> BatchResult:
+async def evaluate_run(judge: Judge, run: Run) -> RunResult:
     """Score a whole catalog of answers and aggregate the case scores into run metrics.
 
     A fan-out over `evaluate_case` plus `run_metrics` and `label_metrics`, and deliberately
-    nothing else: one entry of `BatchResult.case_results` is exactly what `evaluate_case`
-    returns for that case, so the single and the batch path cannot drift apart.
+    nothing else: one entry of `RunResult.case_results` is exactly what `evaluate_case`
+    returns for that case, so the single and the run path cannot drift apart.
 
-    Which cases run is the batch's own business: `evaluate_batch` judges
-    `batch.selected_cases`, so handing it a whole catalog and a `label_filter` runs the
+    Which cases run is the `Run`'s own business: `evaluate_run` judges
+    `run.selected_cases`, so handing it a whole catalog and a `label_filter` runs the
     subset and records what picked it. An empty selection runs everything.
 
     Concurrency — no second throttle is applied here on purpose. The cases fan out *and*
     every case fans out over its criteria, so the coroutines multiply (50 cases x 10
     criteria is 500 of them), but coroutines are not connections: the judge's
     `max_concurrent` still caps how many calls are actually in flight. That budget belongs
-    to the judge instance, so the same cap holds across the cases of one batch, across
-    concurrent batches and across parallel HTTP requests — as long as one judge serves them
-    all. Tune it on the judge, never by shrinking the batch.
+    to the judge instance, so the same cap holds across the cases of one run, across
+    concurrent runs and across parallel HTTP requests — as long as one judge serves them
+    all. Tune it on the judge, never by shrinking the run.
 
     Args:
-        judge: As for `evaluate_case`. The same instance serves every case of the batch,
+        judge: As for `evaluate_case`. The same instance serves every case of the run,
             which is what makes the shared limit above work.
-        batch: At least one case, with unique case ids (Pydantic has checked both). Its
+        run: At least one case, with unique case ids (Pydantic has checked both). Its
             `label_filter` decides which of them run — also already checked, so a selection
             matching no case never reaches here.
 
     Returns:
-        A `BatchResult`: one `case_results` entry per **selected** case in request order —
-        fewer than `batch.cases` when a `label_filter` narrowed the run — `metrics` over them,
+        A `RunResult`: one `case_results` entry per **selected** case in request order —
+        fewer than `run.cases` when a `label_filter` narrowed the run — `metrics` over them,
         `label_metrics` the same aggregate once per label the cases carry, and `label_filter`
-        echoed from the batch. Every selected case is in it, or the run raised instead.
+        echoed from the run. Every selected case is in it, or the run raised instead.
 
     Raises:
         JudgeUnavailableError: As `evaluate_case`. One criterion the judge could not answer
             for ends the whole run: the metrics are an average over the cases, so one case
             missing a verdict makes every number computed alongside it untrustworthy.
         Exception: As `evaluate_case`, and for the same reason — a programming error in any
-            single case aborts the batch rather than being averaged into it.
+            single case aborts the run rather than being averaged into it.
 
     Example:
-        run = await evaluate_batch(judge, Batch(cases=[case_a, case_b]))
-        run.metrics.average_score           # 0.5
-        run.metrics.cases_with_score_zero   # [2]  — the answers to read first
-        run.label_metrics[0].label          # "table"
-        run.case_results[0].score           # 1.0  — every single result is still there
+        run_result = await evaluate_run(judge, Run(cases=[case_a, case_b]))
+        run_result.metrics.average_score           # 0.5
+        run_result.metrics.cases_with_score_zero   # [2]  — the answers to read first
+        run_result.label_metrics[0].label          # "table"
+        run_result.case_results[0].score           # 1.0  — every result is still there
     """
     results = await asyncio.gather(
-        *(evaluate_case(judge, case) for case in batch.selected_cases)
+        *(evaluate_case(judge, case) for case in run.selected_cases)
     )
-    return BatchResult(
+    return RunResult(
         metrics=run_metrics(results),
         label_metrics=label_metrics(results),
-        label_filter=batch.label_filter,
+        label_filter=run.label_filter,
         case_results=results,
     )
 
@@ -141,17 +141,17 @@ async def evaluate_batch(judge: Judge, batch: Batch) -> BatchResult:
 def filter_cases_by_labels(cases: list[Case], selection: list[list[str]]) -> list[Case]:
     """Pick the cases a `LabelSelection` covers — any group, every label of it.
 
-    The same rule `Batch.selected_cases` runs by and the per-label metrics bucket by, so "the
+    The same rule `Run.selected_cases` runs by and the per-label metrics bucket by, so "the
     run selected by `table`" and "the `table` bucket of the full run" are the same cases.
 
-    You rarely need this to *run* a subset — hand `Batch` the catalog and the selection and it
+    You rarely need this to *run* a subset — hand `Run` the catalog and the selection and it
     does exactly this. Reach for it to see what a selection would pick before spending a judge
-    call on it, or to select by something a `Batch` never sees.
+    call on it, or to select by something a `Run` never sees.
 
     A filter, and it behaves like one: no match is an empty list, not an exception, so it
-    composes. `Batch` is what refuses to *run* an empty selection.
+    composes. `Run` is what refuses to *run* an empty selection.
 
-    The selection is read as the `LabelSelection` a `Batch` would read it as, so a preview and
+    The selection is read as the `LabelSelection` a `Run` would read it as, so a preview and
     the run it previews can never pick different cases.
 
     Args:
@@ -166,7 +166,7 @@ def filter_cases_by_labels(cases: list[Case], selection: list[list[str]]) -> lis
         TypeError: For a flat `["table"]`, which would otherwise compare *characters* and
             quietly return the wrong cases — the message names both readings you may have
             meant.
-        pydantic.ValidationError: For a selection a `Batch` would refuse too — a blank label,
+        pydantic.ValidationError: For a selection a `Run` would refuse too — a blank label,
             or the same group twice.
 
     Example:

@@ -17,10 +17,10 @@ from rubric_eval import (
     compare_runs,
 )
 from rubric_eval.metrics import case_score, run_metrics
-from rubric_eval.models import BatchResult, CaseResult, CriterionResult
+from rubric_eval.models import CaseResult, CriterionResult, RunResult
 
 
-def compared(baseline: BatchResult, candidate: BatchResult):
+def compared(baseline: RunResult, candidate: RunResult):
     """The result of comparing two runs — the whole file's one line of setup."""
     return compare_runs(RunPair(baseline=baseline, candidate=candidate))
 
@@ -356,20 +356,20 @@ class TestRefusal:
 
     def test_a_run_without_cases_cannot_exist_to_be_compared(self):
         """`run_metrics` refuses to describe a distribution over no cases, so an empty run was
-        never producible. Without the constraint on `BatchResult` the comparison of two of
+        never producible. Without the constraint on `RunResult` the comparison of two of
         them builds fine and then divides by zero computing the rates."""
         with pytest.raises(ValidationError, match="at least 1 item"):
-            BatchResult(metrics=run_of({1: 1}).metrics, case_results=[])
+            RunResult(metrics=run_of({1: 1}).metrics, case_results=[])
 
     def test_a_run_naming_the_same_case_twice_cannot_exist_to_be_compared(self):
-        """`Batch.cases` rejects repeated ids, so `evaluate_batch` never produces such a run —
+        """`Run.cases` rejects repeated ids, so `evaluate_run` never produces such a run —
         but it is postable, and cases are paired by id. Without the constraint the second of
         a repeated pair silently replaces the first, and the comparison reports deltas over
         fewer cases than its own `metrics` block describes."""
         run = run_of({1: 1}, {2: 1})
         twice = [run.case_results[0], run.case_results[1].model_copy(update={"case_id": 1})]
         with pytest.raises(ValidationError, match=r"case ids must be unique, repeated: \[1\]"):
-            BatchResult(metrics=run.metrics, case_results=twice)
+            RunResult(metrics=run.metrics, case_results=twice)
 
     def test_a_case_naming_the_same_criterion_twice_cannot_exist_to_be_compared(self):
         """Same hole one level down: verdicts are paired by criterion id, so a repeated one
@@ -398,7 +398,7 @@ def _case_status_for_score(candidate_score: float) -> ChangeStatus:
     return compared(baseline, candidate).case_comparison_results[0].status
 
 
-def _reweighted(run: BatchResult, weights: dict[int, float]) -> BatchResult:
+def _reweighted(run: RunResult, weights: dict[int, float]) -> RunResult:
     """A run whose criteria carry different weights — the one thing `run_of` keeps constant."""
     case_results = [
         _rebuilt(
@@ -410,7 +410,7 @@ def _reweighted(run: BatchResult, weights: dict[int, float]) -> BatchResult:
         )
         for result in run.case_results
     ]
-    return BatchResult(metrics=run_metrics(case_results), case_results=case_results)
+    return RunResult(metrics=run_metrics(case_results), case_results=case_results)
 
 
 def _rebuilt(result: CaseResult, criterion_results: list[CriterionResult]) -> CaseResult:

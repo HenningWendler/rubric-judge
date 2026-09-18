@@ -9,20 +9,20 @@ import asyncio
 import pytest
 from pydantic import ValidationError
 
-from tests.conftest import BATCH, BATCH_VERDICTS, CASE, FakeJudge
+from tests.conftest import CASE, RUN, RUN_VERDICTS, FakeJudge
 
 from rubric_eval import (
     DEFAULT_SCALE,
-    Batch,
     Case,
     JudgeUnavailableError,
+    Run,
     Verdict,
-    evaluate_batch,
     evaluate_case,
+    evaluate_run,
 )
 
 THE_CASE = Case(**CASE)
-THE_BATCH = Batch(**BATCH)
+THE_RUN = Run(**RUN)
 
 
 async def test_weighted_score_and_reasoning():
@@ -157,68 +157,68 @@ async def test_a_verdict_off_the_scale_is_refused_rather_than_folded_into_the_sc
         await evaluate_case(OffScaleJudge(), THE_CASE)
 
 
-# --- batch: many cases in one call ----------------------------------------------------------
+# --- run: many cases in one call ----------------------------------------------------------
 
-THE_BATCH = Batch(**BATCH)
+THE_RUN = Run(**RUN)
 
 
-async def test_a_batch_returns_every_case_result_in_request_order():
-    result = await evaluate_batch(FakeJudge(BATCH_VERDICTS), THE_BATCH)
+async def test_a_run_returns_every_case_result_in_request_order():
+    result = await evaluate_run(FakeJudge(RUN_VERDICTS), THE_RUN)
 
     assert [case.case_id for case in result.case_results] == [1, 2, 3]
     assert [case.score for case in result.case_results] == pytest.approx([0.75, 0.5, 0.0])
 
 
-async def test_a_batch_folds_its_case_scores_into_run_metrics():
-    """The point of the batch over calling `evaluate_case` in a loop: one aggregate."""
-    result = await evaluate_batch(FakeJudge(BATCH_VERDICTS), THE_BATCH)
+async def test_a_run_folds_its_case_scores_into_run_metrics():
+    """The point of the run over calling `evaluate_case` in a loop: one aggregate."""
+    result = await evaluate_run(FakeJudge(RUN_VERDICTS), THE_RUN)
 
     assert result.metrics.total_cases == 3
     assert result.metrics.average_score == pytest.approx((0.75 + 0.5 + 0.0) / 3)
     assert result.metrics.cases_with_score_zero == [3]
 
 
-async def test_a_batch_entry_is_the_very_same_result_as_a_single_evaluation():
+async def test_a_run_entry_is_the_very_same_result_as_a_single_evaluation():
     """Both paths return a `CaseResult`, so there is nothing left that could disagree. The
     one type is what guarantees it — this test only keeps the two entry points honest."""
-    judge = FakeJudge(BATCH_VERDICTS)
+    judge = FakeJudge(RUN_VERDICTS)
 
-    batched = (await evaluate_batch(judge, THE_BATCH)).case_results[0]
+    in_run = (await evaluate_run(judge, THE_RUN)).case_results[0]
     alone = await evaluate_case(judge, THE_CASE)
 
-    assert batched == alone
+    assert in_run == alone
 
 
 async def test_one_unanswered_criterion_invalidates_the_whole_run():
     """The same policy one grain up, and the reason it has to reach that far: the run metrics
     average the cases against each other, so a single fabricated 0 moves every number in the
     document — including the ones about cases the judge answered for perfectly well."""
-    judge = FakeJudge({**BATCH_VERDICTS, 21: JudgeUnavailableError("endpoint down")})
+    judge = FakeJudge({**RUN_VERDICTS, 21: JudgeUnavailableError("endpoint down")})
 
     with pytest.raises(JudgeUnavailableError, match="endpoint down"):
-        await evaluate_batch(judge, THE_BATCH)
+        await evaluate_run(judge, THE_RUN)
 
 
-async def test_a_bug_in_one_case_aborts_the_whole_batch_as_itself():
+async def test_a_bug_in_one_case_aborts_the_whole_run_as_itself():
     """A bug ends the run like an outage does, and stays distinguishable from one."""
-    judge = FakeJudge({**BATCH_VERDICTS, 21: RuntimeError("bound to a different event loop")})
+    judge = FakeJudge({**RUN_VERDICTS, 21: RuntimeError("bound to a different event loop")})
 
     with pytest.raises(RuntimeError):
-        await evaluate_batch(judge, THE_BATCH)
+        await evaluate_run(judge, THE_RUN)
 
 
 async def test_duplicate_case_ids_are_rejected():
     """Run metrics name cases by id — `cases_with_score_zero` would be ambiguous otherwise."""
     with pytest.raises(ValueError, match="case ids must be unique"):
-        Batch(
-            cases=[{**BATCH["cases"][0], "id": 5}, {**BATCH["cases"][1], "id": 5}]
+        Run(
+            cases=[{**RUN["cases"][0], "id": 5}, {**RUN["cases"][1], "id": 5}]
         )
 
 
-async def test_an_empty_batch_is_rejected_before_any_judge_call():
+async def test_an_empty_run_is_rejected_before_any_judge_call():
     """An empty run has no meaningful metrics, and a 422 costs nothing."""
     with pytest.raises(ValueError):
-        Batch(cases=[])
+        Run(cases=[])
 
 
 class _JudgeByAnswer:
@@ -231,16 +231,16 @@ class _JudgeByAnswer:
         return Verdict(score=2 if "HR tool" in answer else 0, reasoning=answer)
 
 
-async def test_criterion_ids_may_repeat_across_the_cases_of_a_batch():
+async def test_criterion_ids_may_repeat_across_the_cases_of_a_run():
     """Criterion ids are documented as unique *within* a case. Two cases written from the
     same rubric template share them, and their verdicts still belong to their own case."""
     shared_rubric = [{"id": 1, "content": "Submit it in the HR tool", "weight": 1}]
-    batch = Batch(cases=[
+    run = Run(cases=[
         {"id": 1, "question": "q", "answer": "In the HR tool.", "criteria": shared_rubric},
         {"id": 2, "question": "q", "answer": "No idea.", "criteria": shared_rubric},
     ])
 
-    result = await evaluate_batch(_JudgeByAnswer(), batch)
+    result = await evaluate_run(_JudgeByAnswer(), run)
 
     assert [case.case_id for case in result.case_results] == [1, 2]
     assert [case.score for case in result.case_results] == [1.0, 0.0]

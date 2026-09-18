@@ -14,12 +14,12 @@ from fastapi.responses import JSONResponse
 from rubric_eval import comparison, evaluation
 from rubric_eval.judge import Judge, JudgeConfig, JudgeUnavailableError, OpenAIJudge
 from rubric_eval.models import (
-    Batch,
-    BatchResult,
     Case,
     CaseResult,
     ComparisonResult,
+    Run,
     RunPair,
+    RunResult,
 )
 
 app = FastAPI(title="rubric-eval", version="0.1.0")
@@ -108,7 +108,7 @@ async def evaluate_case(case: Case, judge: Annotated[Judge, Depends(get_judge)])
     normalized precisely so that it can be read without one.
 
     Any `labels` you send come back untouched on the result. They are never shown to the
-    judge and cannot move a score — they exist to slice a batch (see `POST /evaluate/batch`).
+    judge and cannot move a score — they exist to slice a run (see `POST /evaluate/run`).
     A requirement the answer must actually meet belongs in `criteria`.
 
     **422** if the body is invalid — an empty rubric, duplicate criterion ids, a blank
@@ -126,13 +126,13 @@ async def evaluate_case(case: Case, judge: Annotated[Judge, Depends(get_judge)])
     return await evaluation.evaluate_case(judge, case)
 
 
-@app.post("/evaluate/batch", summary="Score a catalog of answers and aggregate the run")
-async def evaluate_batch(batch: Batch, judge: Annotated[Judge, Depends(get_judge)]) -> BatchResult:
+@app.post("/evaluate/run", summary="Score a catalog of answers and aggregate the run")
+async def evaluate_run(run: Run, judge: Annotated[Judge, Depends(get_judge)]) -> RunResult:
     """Score a whole catalog of answers in one request and get metrics over the run.
 
-    Send a `Batch`: a list of exactly the cases `POST /evaluate` takes, with unique ids.
+    Send a `Run`: a list of exactly the cases `POST /evaluate` takes, with unique ids.
 
-    Returns a `BatchResult`: `case_results` holds one entry per case — each one **the same
+    Returns a `RunResult`: `case_results` holds one entry per case — each one **the same
     document** `POST /evaluate` returns for that case — and `metrics` aggregates them:
     average, median, spread, criteria fulfillment, which cases scored zero and the weakest
     cases above zero.
@@ -153,9 +153,9 @@ async def evaluate_batch(batch: Batch, judge: Annotated[Judge, Depends(get_judge
     `label_filter` narrows what is judged.
 
     **422** on the single-case rules, plus an empty `cases` or duplicate case ids. One
-    invalid case rejects the whole batch: a run that is partly judged and partly refused
+    invalid case rejects the whole run: a run that is partly judged and partly refused
     would produce metrics nobody can compare. Also **422** when `label_filter` matches no
-    case at all — the message lists the labels your batch does carry, with counts, because
+    case at all — the message lists the labels your run does carry, with counts, because
     that is nearly always a typo.
 
     **503** if the judge could not answer for a single criterion of a single case — the whole
@@ -163,10 +163,10 @@ async def evaluate_batch(batch: Batch, judge: Annotated[Judge, Depends(get_judge
     run with one fabricated `0` in it reports a number you could not tell from a real one.
     Nothing is stored here, so a retry costs only the judge calls.
 
-    Concurrency is bounded by the judge, not by the batch: every case of this request shares
+    Concurrency is bounded by the judge, not by the run: every case of this request shares
     one budget, and so does every other request in flight.
     """
-    return await evaluation.evaluate_batch(judge, batch)
+    return await evaluation.evaluate_run(judge, run)
 
 
 @app.post("/compare", summary="Hold two finished runs against each other")
@@ -174,7 +174,7 @@ async def compare_runs(runs: RunPair) -> ComparisonResult:
     """Compare two runs of the same catalog — did your change help, where, and what did it cost.
 
     Send a `RunPair`: the `baseline` run to compare against and the `candidate` run under
-    test, each one exactly the `BatchResult` document `POST /evaluate/batch` returned. Runs
+    test, each one exactly the `RunResult` document `POST /evaluate/run` returned. Runs
     stored as JSON months apart compare just like runs produced a second ago.
 
     Returns a `ComparisonResult` at three grains. `metrics_delta` holds `candidate - baseline`

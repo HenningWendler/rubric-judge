@@ -39,7 +39,7 @@ and criteria, and the string labels of a case."""
 
 
 def _duplicates(values: Iterable[Identifier]) -> list[Identifier]:
-    """One check for the rubric, the batch and the labels: each of them matches something back
+    """One check for the rubric, the run and the labels: each of them matches something back
     by an identifier, so a repeat breaks all three the same way. Empty when every value is
     unique, which is what lets it read as a validator condition.
     """
@@ -102,8 +102,8 @@ for yet."""
 
 read_label_selection = TypeAdapter(LabelSelection).validate_python
 """The same rule, applied to a selection pydantic has not been through — the one
-`filter_cases_by_labels` takes straight from a caller rather than off a `Batch` field. Without
-it a label with a stray space would match nothing where the identical selection on a `Batch`
+`filter_cases_by_labels` takes straight from a caller rather than off a `Run` field. Without
+it a label with a stray space would match nothing where the identical selection on a `Run`
 matches two cases, and the preview would contradict the run it previews."""
 
 
@@ -253,7 +253,7 @@ def one_scale_of(scales: Iterable[Scale]) -> Scale:
         ValueError: They do not agree. The message names every distinct scale found.
 
     Example:
-        one_scale_of(result.scale for result in batch_result.case_results)
+        one_scale_of(result.scale for result in run_result.case_results)
     """
     distinct: list[Scale] = []
     for scale in scales:
@@ -356,13 +356,13 @@ def matches_label_selection(case_labels: list[str], selection: list[list[str]]) 
     """Whether one case is covered by a `LabelSelection` — any group, every label of it.
 
     The OR half of the rule, on top of the AND half above. One place, for the same reason:
-    `Batch` selects the cases to run with it, `BatchResult` validates what ran with it, and
+    `Run` selects the cases to run with it, `RunResult` validates what ran with it, and
     `filter_cases_by_labels` lets you ask which cases it would pick without running them.
 
     Args:
         case_labels: The labels the case carries.
         selection: Groups of required labels. Empty selects every case, which is what "no
-            selection" means — and what keeps an unfiltered batch a batch.
+            selection" means — and what keeps an unfiltered run a run.
 
     Returns:
         True when the case carries every label of at least one group.
@@ -390,8 +390,8 @@ def every_case_must_match(
     catalog, and every number read off it later would answer a different question than its
     name promises.
 
-    Only results are held to this. On a `Batch` the same field is an *instruction*, and an
-    instruction cannot lie: the batch is expected to carry cases the selection excludes,
+    Only results are held to this. On a `Run` the same field is an *instruction*, and an
+    instruction cannot lie: the run is expected to carry cases the selection excludes,
     which is the entire point of handing it a catalog and a selection.
 
     Args:
@@ -529,7 +529,7 @@ class CriterionResult(DocumentedModel):
 
 class Case(DocumentedModel):
     """One thing to evaluate: a question, the answer some system gave, and the rubric to
-    hold it against. The unit of work everywhere — `POST /evaluate` takes one, a batch takes
+    hold it against. The unit of work everywhere — `POST /evaluate` takes one, a run takes
     a list of them.
 
     Stateless: the caller owns questions, answers and rubric; nothing here is stored.
@@ -557,7 +557,7 @@ class Case(DocumentedModel):
 
     labels: Labels = Field(default_factory=list)
     """What kind of case this is — `["table", "multi_page_expected"]`. Free-form tags in your
-    own vocabulary, used to slice a run: `BatchResult.label_metrics` reports a full set of
+    own vocabulary, used to slice a run: `RunResult.label_metrics` reports a full set of
     numbers per label, and `filter_cases_by_labels` selects by them. Optional, because an
     untagged catalog is still a catalog. Never shown to the judge, so adding a label cannot
     move a single score — a requirement the answer has to meet belongs in `criteria`."""
@@ -575,7 +575,7 @@ class Case(DocumentedModel):
 class CaseResult(DocumentedModel):
     """What `evaluate_case` returns: the case score plus the verdicts it was computed from.
 
-    The same document whether the case was evaluated alone or inside a batch — which is why
+    The same document whether the case was evaluated alone or inside a run — which is why
     `Case.id` is mandatory: one result type, no nullable id, nothing to reconcile.
 
     Always complete: one verdict per criterion of the rubric, never a hole. A case the judge
@@ -650,12 +650,12 @@ class CaseResult(DocumentedModel):
         return self
 
 
-class Batch(DocumentedModel):
-    """The input to `evaluate_batch`: several cases evaluated in one go, so a whole test
+class Run(DocumentedModel):
+    """The input to `evaluate_run`: several cases evaluated in one go, so a whole test
     catalog produces one set of run metrics instead of many isolated scores.
 
     Example:
-        Batch(cases=[
+        Run(cases=[
             Case(id=1, question="How do I report sick leave?", answer="...", criteria=[...]),
             Case(id=2, question="How do I request vacation?", answer="...", criteria=[...]),
         ])
@@ -687,15 +687,15 @@ class Batch(DocumentedModel):
 
     @property
     def selected_cases(self) -> list[Case]:
-        """The cases this batch actually runs: those matching `label_filter`.
+        """The cases this run actually judges: those matching `label_filter`.
 
         Returns:
             The entries of `cases` covered by the selection, in their original order — all of
             them when the selection is empty. Never empty: a selection matching nothing is
-            refused when the batch is built.
+            refused when the run is built.
 
         Example:
-            Batch(cases=catalog, label_filter=[["table"]]).selected_cases
+            Run(cases=catalog, label_filter=[["table"]]).selected_cases
         """
         return [
             case
@@ -704,21 +704,21 @@ class Batch(DocumentedModel):
         ]
 
     @model_validator(mode="after")
-    def _reject_a_selection_that_matches_no_case(self) -> "Batch":
-        """Caught while the batch is built, because the alternative is being told the label
+    def _reject_a_selection_that_matches_no_case(self) -> "Run":
+        """Caught while the run is built, because the alternative is being told the label
         was a typo only after paying for a catalog of judge calls — and because a run of no
         cases has no metrics to report, so there is nothing to hand back either."""
         if not self.selected_cases:
             labels_by_case_id = {case.id: case.labels for case in self.cases}
             raise ValueError(
                 f"label_filter {self.label_filter} matches no case; "
-                f"labels present in this batch: {labels_present_in(labels_by_case_id)}"
+                f"labels present in this run: {labels_present_in(labels_by_case_id)}"
             )
         return self
 
 
 class RunMetrics(DocumentedModel):
-    """What a whole batch is judged by: the distribution of the case scores plus the few
+    """What a whole run is judged by: the distribution of the case scores plus the few
     numbers that say where to look when it is bad.
 
     Every case counts once, whatever the size of its rubric — a case with 20 criteria must
@@ -753,7 +753,7 @@ class RunMetrics(DocumentedModel):
     diagnosing; read it next to the run's `scale`. Unlike `average_score` it ignores both
     weights and case boundaries, so it answers "how well does the judge rate an average
     statement" rather than "how good is the average answer". Its upper bound is the run's
-    `scale.maximum` and is enforced by `BatchResult`, which is the first place that knows
+    `scale.maximum` and is enforced by `RunResult`, which is the first place that knows
     the scale."""
 
     criteria_fulfillment_rate: float = Field(ge=0, le=1, allow_inf_nan=False)
@@ -804,16 +804,16 @@ class LabelMetrics(DocumentedModel):
     cases carry this label."""
 
 
-class BatchResult(DocumentedModel):
-    """What `evaluate_batch` returns: the aggregate plus every single case result it was
+class RunResult(DocumentedModel):
+    """What `evaluate_run` returns: the aggregate plus every single case result it was
     computed from, so a suspicious number can always be traced back to its cases.
 
     Example:
-        run.metrics.average_score              # 0.5
-        run.metrics.cases_with_score_zero      # [2]  — the answers to read first
-        run.label_metrics[0].label             # "table"
-        run.label_metrics[0].metrics.average_score   # 0.25 — where the run really hurts
-        run.case_results[0]                    # the CaseResult for case 1, in full
+        run_result.metrics.average_score           # 0.5
+        run_result.metrics.cases_with_score_zero   # [2]  — the answers to read first
+        run_result.label_metrics[0].label          # "table"
+        run_result.label_metrics[0].metrics.average_score  # 0.25 — where it really hurts
+        run_result.case_results[0]                 # the CaseResult for case 1, in full
     """
 
     metrics: RunMetrics
@@ -826,23 +826,23 @@ class BatchResult(DocumentedModel):
     `metrics.label_metrics`, which computes this and can be called on stored results too."""
 
     label_filter: LabelSelection = Field(default_factory=list)
-    """The selection that picked this run's cases, carried over from `Batch.label_filter` so a
+    """The selection that picked this run's cases, carried over from `Run.label_filter` so a
     stored run still says which subset it is. Empty for an unfiltered run. Here the field is a
     *record*, not an instruction: every case result must match it, so a run cannot call itself
     the `table` subset while holding the whole catalog."""
 
     case_results: list[CaseResult] = Field(min_length=1)
-    """One result per case of the batch, in request order. Each one is exactly what
-    `POST /evaluate` returns for that case. At least one, for the same reason `Batch.cases`
+    """One result per case of the run, in request order. Each one is exactly what
+    `POST /evaluate` returns for that case. At least one, for the same reason `Run.cases`
     needs one: `run_metrics` refuses to describe a distribution over no cases, so a run with
     an empty list could never have been produced legitimately — and anything computed from
     it later, a comparison above all, would be dividing by zero. Case ids have to be unique,
-    for the same reason they do in `Batch.cases`."""
+    for the same reason they do in `Run.cases`."""
 
     @field_validator("case_results")
     @classmethod
     def _reject_duplicate_case_ids(cls, case_results: list[CaseResult]) -> list[CaseResult]:
-        """`Batch.cases` already rejects repeated ids, so `evaluate_batch` can never produce
+        """`Run.cases` already rejects repeated ids, so `evaluate_run` can never produce
         them — but a stored run is postable to `/compare`, which keys cases by id to pair the
         two runs up. A repeated id would silently drop a case there and report deltas over
         fewer cases than `metrics` describes, with a 200."""
@@ -864,14 +864,14 @@ class BatchResult(DocumentedModel):
         return one_scale_of(result.scale for result in self.case_results)
 
     @model_validator(mode="after")
-    def _reject_a_mix_of_scales(self) -> "BatchResult":
+    def _reject_a_mix_of_scales(self) -> "RunResult":
         """Reading `scale` is the check, exactly as in `CaseResult` — a run whose cases were
         graded in different units has no `average_criterion_score` to report."""
         _ = self.scale
         return self
 
     @model_validator(mode="after")
-    def _reject_metrics_off_the_runs_scale(self) -> "BatchResult":
+    def _reject_metrics_off_the_runs_scale(self) -> "RunResult":
         """`RunMetrics` cannot check this bound itself — it holds numbers, not verdicts, and
         only here is the scale they were computed on in reach. Left unchecked, a stored run
         could claim an average of 4 on a 0..2 scale and every delta computed from it at
@@ -884,8 +884,8 @@ class BatchResult(DocumentedModel):
         return self
 
     @model_validator(mode="after")
-    def _reject_a_filter_that_does_not_describe_the_run(self) -> "BatchResult":
-        """`Batch` cannot make this check — there the field selects, so the batch is expected
+    def _reject_a_filter_that_does_not_describe_the_run(self) -> "RunResult":
+        """`Run` cannot make this check — there the field selects, so the run is expected
         to hold cases it excludes. Here it describes what actually ran, which is a claim, and
         a stored run is the path where a claim can have been edited since."""
         every_case_must_match(
@@ -894,7 +894,7 @@ class BatchResult(DocumentedModel):
         return self
 
     @model_validator(mode="after")
-    def _reject_label_metrics_that_do_not_match_the_cases(self) -> "BatchResult":
+    def _reject_label_metrics_that_do_not_match_the_cases(self) -> "RunResult":
         """Which labels have a bucket is checkable in a set comparison; whether each bucket's
         numbers are right is not, short of recomputing the whole run. So the structural lie is
         refused — a bucket for a label no case carries, or a labelled run with no breakdown at
@@ -1223,7 +1223,7 @@ class ChangeSummary(DocumentedModel):
     @property
     def _total_cases(self) -> int:
         """Every case is in exactly one of the three lists, so they add up to the run — no
-        separate total to store and keep in sync. Never 0: `BatchResult` rejects a run with
+        separate total to store and keep in sync. Never 0: `RunResult` rejects a run with
         no cases, so the three rates above can always be divided out."""
         return self.improved_case_count + self.stable_case_count + self.worsened_case_count
 
@@ -1239,10 +1239,10 @@ class RunPair(DocumentedModel):
         RunPair(baseline=last_weeks_run, candidate=todays_run)
     """
 
-    baseline: BatchResult
+    baseline: RunResult
     """The run being compared *against* — the state of things before your change."""
 
-    candidate: BatchResult
+    candidate: RunResult
     """The run *under test*. Every delta in the result is `candidate - baseline`, so a
     positive number always means this one did better."""
 

@@ -75,7 +75,7 @@ def test_huge_weights_do_not_overflow_the_weight_sum():
     assert score == pytest.approx(0.5)
 
 
-# --- run metrics: one batch folded into the numbers a run is judged by ---------------------
+# --- run metrics: one run folded into the numbers a run is judged by ---------------------
 
 
 def _case(case_id: int, *verdicts: CriterionResult) -> CaseResult:
@@ -229,9 +229,9 @@ def test_the_weakest_cases_are_the_weakest_of_the_run_not_the_first_five_found()
     assert metrics.weakest_cases_above_zero == [90, 91, 92, 93, 94]
 
 
-def test_the_readme_batch_example_reports_exactly_the_documented_numbers():
+def test_the_readme_run_example_reports_exactly_the_documented_numbers():
     """Every number in the README is claimed to be reproducible verbatim. This is the run of
-    the documented two-case batch — one perfect answer, one total miss."""
+    the documented two-case run — one perfect answer, one total miss."""
     metrics = run_metrics([_case(1, _result(3, 2)), _case(2, _result(1, 0))])
 
     assert metrics.model_dump() == {
