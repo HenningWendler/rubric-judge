@@ -76,8 +76,10 @@ should change the grade belongs in a `Criterion`, where it is checkable and weig
 
 
 def _reject_duplicate_labels(labels: list[Label]) -> list[Label]:
-    """Labels are read as a set everywhere — bucketing, filtering, comparing two runs — so a
-    repeat is a caller mistake that no downstream code could ever act on."""
+    """Exists because a repeated label is a caller mistake no code below could act on.
+
+    Labels are read as a set everywhere: bucketing, filtering, comparing two runs.
+    """
     _reject_duplicates("labels", labels)
     return labels
 
@@ -88,8 +90,11 @@ Labels = Annotated[list[Label], AfterValidator(_reject_duplicate_labels)]
 
 
 def _reject_duplicate_groups(label_filter: list[list[str]]) -> list[list[str]]:
-    """A group is read as a set of required labels, so the same group twice — in any order,
-    `["a", "b"]` and `["b", "a"]` — asks one question twice and selects nothing extra."""
+    """Exists because the same group twice selects nothing extra.
+
+    A group is read as a set of required labels, so `["a", "b"]` and `["b", "a"]` ask one
+    and the same question.
+    """
     counted = Counter(frozenset(group) for group in label_filter)
     if repeated := sorted(sorted(group) for group, count in counted.items() if count > 1):
         raise ValueError(f"label groups must be unique, repeated: {repeated}")
@@ -121,15 +126,24 @@ matches two cases, and the preview would contradict the run it previews."""
 
 
 class DocumentedModel(BaseModel):
-    """Base for every model in this package: makes attribute docstrings the field
-    descriptions, so one docstring feeds both IDE hover and the generated OpenAPI schema."""
+    """Base for every model in this package.
+
+    It turns attribute docstrings into field descriptions, so one docstring feeds both the
+    IDE hover and the generated OpenAPI schema and the two cannot drift apart.
+
+    Example:
+        Criterion.model_json_schema()["properties"]["id"]["description"]
+        # "Caller-owned identifier, echoed back as `CriterionResult.criterion_id` so results
+        #  can be matched to the rubric without relying on list order."
+    """
 
     model_config = ConfigDict(use_attribute_docstrings=True)
 
 
 class Scale(DocumentedModel):
-    """The grading scale one judge works on: how far a criterion can be covered, and from
-    where on it counts as covered at all.
+    """The grading scale one judge works on.
+
+    How far a criterion can be covered, and from where on it counts as covered at all.
 
     A judge owns its scale and the `CaseResult` it produces carries it, so nothing downstream
     has to assume the bundled 0..2. Compared by value — including the level descriptions, so
@@ -147,8 +161,13 @@ class Scale(DocumentedModel):
     reaches into that constant afterwards — which is the whole reason a result carries a scale.
 
     Example:
-        Scale(maximum=2, presence_threshold=0.5, level_descriptions={...})  # DEFAULT_SCALE
-        Scale(maximum=10, presence_threshold=5)     # arithmetic only, bring your own prompt
+        pass_fail = Scale(
+            maximum=1,
+            presence_threshold=1,
+            level_descriptions={1: "Covered.", 0: "Not covered."},
+        )
+        list(pass_fail.grades)                   # [0, 1]
+        Scale(maximum=10, presence_threshold=5)  # arithmetic only, bring your own prompt
     """
 
     model_config = ConfigDict(frozen=True, revalidate_instances="always")
@@ -176,9 +195,11 @@ class Scale(DocumentedModel):
 
     @model_validator(mode="after")
     def _reject_descriptions_that_do_not_match_the_grades(self) -> "Scale":
-        """Half a description block would generate a prompt that lists some levels and leaves
-        the judge to invent the rest — worse than the zero-shot prompt an undescribed scale
-        gets, because the omission looks deliberate."""
+        """Exists because half a description block is worse than none at all.
+
+        A prompt that lists some levels and leaves the judge to invent the rest reads as a
+        deliberate omission, where the zero-shot prompt of an undescribed scale does not.
+        """
         if self.level_descriptions and set(self.level_descriptions) != set(self.grades):
             raise ValueError(
                 f"level descriptions must describe every grade of the scale 0..{self.maximum} "
@@ -188,8 +209,11 @@ class Scale(DocumentedModel):
 
     @model_validator(mode="after")
     def _reject_a_threshold_off_the_scale(self) -> "Scale":
-        """A threshold above the maximum cannot be reached by any grade, so every criterion
-        of every run would come back absent — with no error to explain it."""
+        """Exists because an unreachable threshold would make every criterion absent.
+
+        No grade could reach it, and nothing would raise to explain the run of nothing but
+        uncovered criteria that follows.
+        """
         if self.presence_threshold > self.maximum:
             raise ValueError(
                 f"presence threshold {self.presence_threshold} is above the highest reachable "
@@ -212,7 +236,17 @@ class Scale(DocumentedModel):
         return range(self.maximum + 1)
 
     def __str__(self) -> str:
-        """Short enough for an error message that has to name two scales at once."""
+        """Name this scale the way a refusal has to name it.
+
+        Returns:
+            The bounds and the presence threshold, never the level descriptions — a message
+            holding two scales against each other would otherwise run to a paragraph per
+            scale. `reworded_grades_clause` adds the wording back, and only when it is what
+            differs.
+
+        Example:
+            str(DEFAULT_SCALE)   # "0..2 (covered from 0.5)"
+        """
         return f"0..{self.maximum} (covered from {self.presence_threshold})"
 
 
@@ -517,6 +551,16 @@ class CriterionResult(DocumentedModel):
     `/compare`, so this model is an *input* type there and the numbers below are arithmetic
     a comparison depends on. `NaN` in particular would survive every computation, serialize
     as JSON `null` where a float is promised, and classify as a regression.
+
+    Example:
+        criterion_result = CriterionResult.judged(
+            Criterion(id=1, content="Report by email before 10:00", weight=3),
+            2.0,
+            "The answer instructs the reader to email hr@example.com.",
+            DEFAULT_SCALE,
+        )
+        criterion_result.is_present   # True
+        criterion_result.spread       # 0.0 — one judge run, so no spread to report
     """
 
     criterion_id: int
@@ -569,6 +613,14 @@ class CriterionResult(DocumentedModel):
         Raises:
             ValidationError: `score` is negative or not finite. Whether it fits the scale is
                 checked by the `CaseResult` it goes into, which is the object that knows.
+
+        Example:
+            CriterionResult.judged(
+                Criterion(id=1, content="Report by email before 10:00", weight=3),
+                0.0,
+                "The answer never mentions email.",
+                DEFAULT_SCALE,
+            ).is_present   # False
         """
         return cls(
             criterion_id=criterion.id,
@@ -580,16 +632,20 @@ class CriterionResult(DocumentedModel):
 
 
 class Case(DocumentedModel):
-    """One thing to evaluate: a question, the answer some system gave, and the rubric to
-    hold it against. The unit of work everywhere — `POST /evaluate` takes one, a run takes
-    a list of them.
+    """One thing to evaluate: a question, an answer, and the rubric to hold it against.
+
+    The unit of work everywhere — `POST /evaluate` takes one, a run takes a list of them.
 
     Stateless: the caller owns questions, answers and rubric; nothing here is stored.
 
     Example:
-        Case(id=1, question="How do I report sick leave?", answer="Email hr@...",
-             criteria=[Criterion(id=1, content="Report by email before 10:00", weight=3)],
-             labels=["one_page_expected"])
+        Case(
+            id=1,
+            question="How do I report sick leave?",
+            answer="Email hr@example.com before 10:00.",
+            criteria=[Criterion(id=1, content="Report by email before 10:00", weight=3)],
+            labels=["one_page_expected"],
+        )
     """
 
     id: int
@@ -617,8 +673,11 @@ class Case(DocumentedModel):
     @field_validator("criteria")
     @classmethod
     def _reject_duplicate_criterion_ids(cls, criteria: list[Criterion]) -> list[Criterion]:
-        """Every result is labelled with its `Criterion.id`, so a repeated id makes results
-        ambiguous: a caller keying by id would drop one result or count another twice."""
+        """Exists because a repeated id makes the results of a case ambiguous.
+
+        Every result is labelled with its `Criterion.id`, so a caller keying by id would
+        drop one result or count another twice.
+        """
         _reject_duplicates("criterion ids", (criterion.id for criterion in criteria))
         return criteria
 
@@ -633,9 +692,22 @@ class CaseResult(DocumentedModel):
     could not answer every criterion of produces no result at all.
 
     Example:
-        result.score                             # 0.75  — weighted, in [0, 1]
-        result.criterion_results[0].score        # 2.0   — the raw judge score, 0 / 1 / 2
-        result.criterion_results[0].reasoning    # why the judge gave it
+        case_result = CaseResult(
+            case_id=1,
+            score=1.0,
+            scale=DEFAULT_SCALE,
+            criterion_results=[
+                CriterionResult.judged(
+                    Criterion(id=1, content="Report by email before 10:00", weight=3),
+                    2.0,
+                    "The answer instructs the reader to email hr@example.com.",
+                    DEFAULT_SCALE,
+                )
+            ],
+        )
+        case_result.score                          # 1.0 — weighted, in [0, 1]
+        case_result.criterion_results[0].score     # 2.0 — the raw judge grade
+        case_result.criterion_results[0].reasoning # why the judge gave it
     """
 
     case_id: int
@@ -671,9 +743,12 @@ class CaseResult(DocumentedModel):
     def _reject_duplicate_criterion_ids(
         cls, criterion_results: list[CriterionResult]
     ) -> list[CriterionResult]:
-        """`Case.criteria` already rejects repeated ids, so `evaluate_case` can never produce
-        them — but a stored result is postable to `/compare`, which keys results by id to
-        pair the two runs up and would silently drop one of a repeated pair."""
+        """Exists for the stored results `evaluate_case` never produced.
+
+        `Case.criteria` already rejects repeated ids, but a stored result is postable to
+        `/compare`, which keys results by id to pair the two runs up and would silently drop
+        one of a repeated pair.
+        """
         _reject_duplicates(
             "criterion ids",
             (criterion_result.criterion_id for criterion_result in criterion_results),
@@ -682,19 +757,24 @@ class CaseResult(DocumentedModel):
 
     @model_validator(mode="after")
     def _reject_scores_off_the_scale(self) -> "CaseResult":
-        """A result has no upper bound of its own — this is the object that knows the scale.
-        The path a fresh case takes is guarded by `case_score`; this guards the other one, a
-        finished run read back from JSON and posted to `/compare`."""
+        """Exists because a criterion result has no upper bound of its own.
+
+        This is the object that knows the scale. A fresh case is guarded by `case_score`;
+        this guards the other path, a finished run read back from JSON and posted to
+        `/compare`.
+        """
         scores_must_fit(self.criterion_results, self.scale)
         return self
 
     @model_validator(mode="after")
     def _reject_presence_that_contradicts_the_score(self) -> "CaseResult":
-        """`is_present` is documented as `score >= scale.presence_threshold`, and a documented
-        invariant that is only described can be lied to: a stored run claiming a covered zero
-        would otherwise raise `criteria_fulfillment_rate` at `/compare` with nothing to catch
-        it. Refused rather than recomputed, because silently rewriting a caller's number would
-        hide whichever of the two is actually wrong."""
+        """Exists because a documented invariant that is only described can be lied to.
+
+        `is_present` is documented as `score >= scale.presence_threshold`, and a stored run
+        claiming a covered zero would otherwise raise `criteria_fulfillment_rate` at
+        `/compare` with nothing to catch it. Refused rather than recomputed, because silently
+        rewriting a caller's number would hide whichever of the two is actually wrong.
+        """
         for criterion_result in self.criterion_results:
             covered = criterion_result.score >= self.scale.presence_threshold
             if criterion_result.is_present != covered:
@@ -708,14 +788,30 @@ class CaseResult(DocumentedModel):
 
 
 class Run(DocumentedModel):
-    """The input to `evaluate_run`: several cases evaluated in one go, so a whole test
-    catalog produces one set of run metrics instead of many isolated scores.
+    """The input to `evaluate_run`: several cases evaluated in one go.
+
+    A whole test catalog produces one set of run metrics instead of many isolated scores.
 
     Example:
-        Run(cases=[
-            Case(id=1, question="How do I report sick leave?", answer="...", criteria=[...]),
-            Case(id=2, question="How do I request vacation?", answer="...", criteria=[...]),
-        ])
+        run = Run(
+            cases=[
+                Case(
+                    id=1,
+                    question="How do I report sick leave?",
+                    answer="Email hr@example.com before 10:00.",
+                    criteria=[Criterion(id=1, content="Report by email", weight=3)],
+                    labels=["table"],
+                ),
+                Case(
+                    id=2,
+                    question="How do I request vacation?",
+                    answer="Ask your team lead.",
+                    criteria=[Criterion(id=21, content="Use the HR tool", weight=1)],
+                ),
+            ],
+            label_filter=[["table"]],
+        )
+        [case.id for case in run.selected_cases]   # [1]
     """
 
     cases: list[Case] = Field(min_length=1)
@@ -736,8 +832,11 @@ class Run(DocumentedModel):
     @field_validator("cases")
     @classmethod
     def _reject_duplicate_case_ids(cls, cases: list[Case]) -> list[Case]:
-        """Same reason as for criterion ids: a repeated id makes the run metrics ambiguous,
-        because `cases_with_score_zero` and the weakest-case shortlist name cases by id."""
+        """Exists for the same reason criterion ids may not repeat.
+
+        `cases_with_score_zero` and the weakest-case shortlist name cases by id, so a
+        repeated id makes the run metrics ambiguous.
+        """
         _reject_duplicates("case ids", (case.id for case in cases))
         return cases
 
@@ -761,9 +860,12 @@ class Run(DocumentedModel):
 
     @model_validator(mode="after")
     def _reject_a_filter_that_matches_no_case(self) -> "Run":
-        """Caught while the run is built, because the alternative is being told the label
-        was a typo only after paying for a catalog of judge calls — and because a run of no
-        cases has no metrics to report, so there is nothing to hand back either."""
+        """Exists so a misspelled label costs nothing to find out about.
+
+        Caught while the run is built, because the alternative is being told only after
+        paying for a catalog of judge calls — and because a run of no cases has no metrics
+        to report, so there would be nothing to hand back either.
+        """
         if not self.selected_cases:
             raise ValueError(
                 f"label_filter {self.label_filter} matches no case; labels present in this "
@@ -773,8 +875,10 @@ class Run(DocumentedModel):
 
 
 class RunMetrics(DocumentedModel):
-    """What a whole run is judged by: the distribution of the case scores plus the few
-    numbers that say where to look when it is bad.
+    """What a whole run is judged by.
+
+    The distribution of the case scores, plus the few numbers that say where to look when a
+    run is bad.
 
     Every case counts once, whatever the size of its rubric — a case with 20 criteria must
     not outweigh nineteen cases with one.
@@ -782,6 +886,13 @@ class RunMetrics(DocumentedModel):
     The documented ranges are enforced rather than described, for the same reason they are on
     the result models above: a stored run is postable to `/compare`, where every one of these
     numbers is subtracted from its counterpart.
+
+    Example:
+        metrics = run_metrics([case_result])   # the `case_result` of `CaseResult`
+        metrics.total_cases              # 1
+        metrics.average_score            # 1.0
+        metrics.variance                 # 0.0 — a single case has no spread
+        metrics.cases_with_score_zero    # []  — nothing missed its rubric completely
     """
 
     total_cases: int = Field(ge=1)
@@ -827,14 +938,24 @@ class RunMetrics(DocumentedModel):
     @computed_field
     @property
     def cases_with_score_zero_count(self) -> int:
-        """Length of `cases_with_score_zero`. Derived rather than stored, so the count and
-        the list can never contradict each other."""
+        """How many cases missed their rubric completely.
+
+        Derived rather than stored, so the count and the list it counts can never contradict
+        each other — and serialized all the same, so a reader of the JSON gets both.
+
+        Returns:
+            The length of `cases_with_score_zero`, 0 when every case scored something.
+
+        Example:
+            run_metrics([case_result]).cases_with_score_zero_count   # 0
+        """
         return len(self.cases_with_score_zero)
 
 
 class LabelMetrics(DocumentedModel):
-    """One label's slice of a run: the same `RunMetrics`, computed over only the cases
-    carrying that label.
+    """One label's slice of a run.
+
+    The same `RunMetrics`, computed over only the cases carrying that label.
 
     Composed rather than flattened on purpose. A twin that redeclared every `RunMetrics` field
     would have to be edited in step with it forever, and the half that got forgotten would go
@@ -845,9 +966,10 @@ class LabelMetrics(DocumentedModel):
     cases involving tables do", not "how do cases that are *only* tables do".
 
     Example:
-        bucket.label                   # "agentic_search"
-        bucket.metrics.average_score   # 0.013 — next to a run average of 0.536
-        bucket.metrics.total_cases     # 7
+        bucket = run_result.label_metrics[0]
+        bucket.label                   # "table"
+        bucket.metrics.average_score   # 0.0 — next to a run average of 0.5
+        bucket.metrics.total_cases     # 1
     """
 
     label: str
@@ -860,15 +982,17 @@ class LabelMetrics(DocumentedModel):
 
 
 class RunResult(DocumentedModel):
-    """What `evaluate_run` returns: the aggregate plus every single case result it was
-    computed from, so a suspicious number can always be traced back to its cases.
+    """What `evaluate_run` returns: the aggregate plus every case result behind it.
+
+    A suspicious number can always be traced back to the cases it was computed from.
 
     Example:
-        run_result.metrics.average_score           # 0.5
-        run_result.metrics.cases_with_score_zero   # [2]  — the answers to read first
-        run_result.label_metrics[0].label          # "table"
-        run_result.label_metrics[0].metrics.average_score  # 0.25 — where it really hurts
-        run_result.case_results[0]                 # the CaseResult for case 1, in full
+        run_result = await evaluate_run(judge, run)
+        run_result.metrics.average_score                   # 0.5
+        run_result.metrics.cases_with_score_zero           # [1] — the answer to read first
+        run_result.label_metrics[0].label                  # "table"
+        run_result.label_metrics[0].metrics.average_score  # 0.0 — where it really hurts
+        run_result.case_results[0].score                   # 0.0
     """
 
     metrics: RunMetrics
@@ -898,10 +1022,12 @@ class RunResult(DocumentedModel):
     @field_validator("case_results")
     @classmethod
     def _reject_duplicate_case_ids(cls, case_results: list[CaseResult]) -> list[CaseResult]:
-        """`Run.cases` already rejects repeated ids, so `evaluate_run` can never produce
-        them — but a stored run is postable to `/compare`, which keys cases by id to pair the
-        two runs up. A repeated id would silently drop a case there and report deltas over
-        fewer cases than `metrics` describes, with a 200."""
+        """Exists for the stored runs `evaluate_run` never produced.
+
+        `Run.cases` already rejects repeated ids, but a stored run is postable to `/compare`,
+        which keys cases by id to pair the two runs up. A repeated id would silently drop a
+        case there and report deltas over fewer cases than `metrics` describes, with a 200.
+        """
         _reject_duplicates(
             "case ids", (case_result.case_id for case_result in case_results)
         )
@@ -917,22 +1043,29 @@ class RunResult(DocumentedModel):
 
         Raises:
             ValueError: The cases name more than one scale.
+
+        Example:
+            str(run_result.scale)   # "0..2 (covered from 0.5)"
         """
         return one_scale_of(case_result.scale for case_result in self.case_results)
 
     @model_validator(mode="after")
     def _reject_a_mix_of_scales(self) -> "RunResult":
-        """Reading `scale` is the check, exactly as in `CaseResult` — a run whose cases were
-        graded in different units has no `average_criterion_score` to report."""
+        """Exists because a run graded in two units has no `average_criterion_score`.
+
+        Reading `scale` is the whole check, exactly as in `CaseResult`.
+        """
         _ = self.scale
         return self
 
     @model_validator(mode="after")
     def _reject_metrics_off_the_runs_scale(self) -> "RunResult":
-        """`RunMetrics` cannot check this bound itself — it holds numbers, not results, and
-        only here is the scale they were computed on in reach. Left unchecked, a stored run
-        could claim an average of 4 on a 0..2 scale and every delta computed from it at
-        `/compare` would inherit the lie."""
+        """Exists because `RunMetrics` cannot check this bound itself.
+
+        It holds numbers, not results, and only here is the scale they were computed on in
+        reach. Left unchecked, a stored run could claim an average of 4 on a 0..2 scale and
+        every delta computed from it at `/compare` would inherit the lie.
+        """
         if self.metrics.average_criterion_score > self.scale.maximum:
             raise ValueError(
                 f"average criterion score {self.metrics.average_criterion_score} is off the "
@@ -942,9 +1075,12 @@ class RunResult(DocumentedModel):
 
     @model_validator(mode="after")
     def _reject_a_filter_that_does_not_describe_the_run(self) -> "RunResult":
-        """`Run` cannot make this check — there the field selects, so the run is expected
-        to hold cases it excludes. Here it describes what actually ran, which is a claim, and
-        a stored run is the path where a claim can have been edited since."""
+        """Exists because `Run` cannot make this check.
+
+        There the field selects, so the run is expected to hold cases it excludes. Here it
+        describes what actually ran, which is a claim — and a stored run is the path where a
+        claim can have been edited since.
+        """
         every_case_must_match(
             self.applied_label_filter,
             {case_result.case_id: case_result.labels for case_result in self.case_results},
@@ -953,11 +1089,13 @@ class RunResult(DocumentedModel):
 
     @model_validator(mode="after")
     def _reject_label_metrics_that_do_not_match_the_cases(self) -> "RunResult":
-        """Which labels have a bucket is checkable in a set comparison; whether each bucket's
+        """Exists so `/compare` can pair two runs' buckets by label.
+
+        Which labels have a bucket is checkable in a set comparison; whether each bucket's
         numbers are right is not, short of recomputing the whole run. So the structural lie is
         refused — a bucket for a label no case carries, or a labelled run with no breakdown at
-        all — and `/compare`, which pairs the two runs' buckets by label, can rely on the
-        breakdown covering exactly the labels that are there."""
+        all — and the breakdown covers exactly the labels that are there.
+        """
         described = {bucket.label for bucket in self.label_metrics}
         present = {
             label for case_result in self.case_results for label in case_result.labels
@@ -971,7 +1109,14 @@ class RunResult(DocumentedModel):
 
 
 class ChangeStatus(StrEnum):
-    """Which way one score moved between two runs — the vocabulary of every comparison."""
+    """Which way one score moved between two runs — the vocabulary of every comparison.
+
+    A `StrEnum`, so a stored comparison carries the plain word and a reader of the JSON
+    needs no table to decode it.
+
+    Example:
+        ChangeStatus.IMPROVED == "improved"   # True
+    """
 
     IMPROVED = "improved"
     """The candidate scored higher than the baseline, by more than `SCORE_EQUALITY_TOLERANCE`."""
@@ -984,8 +1129,9 @@ class ChangeStatus(StrEnum):
 
 
 def _change_status(score_delta: float) -> ChangeStatus:
-    """The one place a score delta becomes a status, so a criterion and a case can never
-    classify the same movement differently.
+    """The one place a score delta becomes a status.
+
+    A criterion and a case can never classify the same movement differently this way.
 
     The tolerance is what keeps float noise out of the report: two runs that summed the same
     weights in a different order can land on 0.7500000000000001 and 0.75, and exact equality
@@ -997,9 +1143,15 @@ def _change_status(score_delta: float) -> ChangeStatus:
 
 
 class CriterionComparisonResult(DocumentedModel):
-    """How one criterion of one case fared between two runs — the finest grain of a comparison.
+    """How one criterion of one case fared between two runs — the finest grain there is.
 
     Built by `between()`, never by hand, so `score_delta` and `status` cannot disagree.
+
+    Example:
+        criterion = Criterion(id=1, content="Report by email before 10:00", weight=3)
+        before = CriterionResult.judged(criterion, 0.0, None, DEFAULT_SCALE)
+        after = CriterionResult.judged(criterion, 2.0, None, DEFAULT_SCALE)
+        CriterionComparisonResult.between(before, after).score_delta   # 2.0
     """
 
     criterion_id: int
@@ -1042,7 +1194,10 @@ class CriterionComparisonResult(DocumentedModel):
             whose `status` is derived from exactly that delta.
 
         Example:
-            CriterionComparisonResult.between(before, after).status   # ChangeStatus.IMPROVED
+            criterion = Criterion(id=1, content="Report by email before 10:00", weight=3)
+            before = CriterionResult.judged(criterion, 0.0, None, DEFAULT_SCALE)
+            after = CriterionResult.judged(criterion, 2.0, None, DEFAULT_SCALE)
+            CriterionComparisonResult.between(before, after).status  # ChangeStatus.IMPROVED
         """
         score_delta = candidate.score - baseline.score
         return cls(
@@ -1061,8 +1216,11 @@ class CaseComparisonResult(DocumentedModel):
     Built by `between()`, never by hand.
 
     Example:
-        case_comparison.score_delta               # +0.25 — the candidate answered better
-        case_comparison.criterion_comparison_results[0]  # which criterion moved, and by how much
+        case_comparison = compare_runs(
+            RunComparison(baseline=baseline_run, candidate=candidate_run)
+        ).case_comparison_results[0]
+        case_comparison.score_delta   # 1.0 — the candidate answered better
+        case_comparison.criterion_comparison_results[0].score_delta   # 2.0 — which one moved
     """
 
     case_id: int
@@ -1100,7 +1258,9 @@ class CaseComparisonResult(DocumentedModel):
             the same whichever order the two runs happened to be stored in.
 
         Example:
-            CaseComparisonResult.between(weak, strong).status   # ChangeStatus.IMPROVED
+            CaseComparisonResult.between(
+                baseline_run.case_results[0], candidate_run.case_results[0]
+            ).status   # ChangeStatus.IMPROVED
         """
         score_delta = candidate.score - baseline.score
         return cls(
@@ -1123,17 +1283,20 @@ class CaseComparisonResult(DocumentedModel):
 
 
 def _criterion_results_in_id_order(case_result: CaseResult) -> list[CriterionResult]:
-    """Both runs' criterion results brought into one order, so zipping them pairs the same
-    criterion. Rubric order is not enough: two runs may have been stored with their criteria
-    in different orders, and zipping those would compare unrelated results. Zipped `strict`,
-    so a caller reaching `CaseComparisonResult.between` past `compare_runs` gets a crash rather
-    than a silently truncated comparison."""
+    """Both runs' criterion results in one order, so zipping them pairs the same criterion.
+
+    Rubric order is not enough: two runs may have been stored with their criteria in
+    different orders, and zipping those would compare unrelated results. Zipped `strict`, so
+    a caller reaching `CaseComparisonResult.between` past `compare_runs` gets a crash rather
+    than a silently truncated comparison.
+    """
     return sorted(case_result.criterion_results, key=attrgetter("criterion_id"))
 
 
 class RunMetricsDelta(DocumentedModel):
-    """`RunMetrics` of the candidate minus those of the baseline — one field per metric that
-    can meaningfully be subtracted.
+    """`RunMetrics` of the candidate minus those of the baseline.
+
+    One field per metric that can meaningfully be subtracted.
 
     Every delta points the same way: **positive means the candidate scored higher**. For
     `cases_with_score_zero_count_delta` that reads backwards on purpose — a positive value
@@ -1142,6 +1305,13 @@ class RunMetricsDelta(DocumentedModel):
     `total_cases` has no delta because a comparison of runs with different case sets is
     refused, and the two id lists of `RunMetrics` have none because a set of ids does not
     subtract — `ChangeSummary` reports the movement of cases instead.
+
+    Example:
+        metrics_delta = compare_runs(
+            RunComparison(baseline=baseline_run, candidate=candidate_run)
+        ).metrics_delta
+        metrics_delta.average_score_delta                 # 0.5
+        metrics_delta.cases_with_score_zero_count_delta   # -1 — one total miss fewer
     """
 
     average_score_delta: float
@@ -1178,8 +1348,11 @@ class LabelMetricsDelta(DocumentedModel):
     average went up — but did I fix `agentic_search` or break `table`?"
 
     Example:
-        bucket.label                              # "agentic_search"
-        bucket.metrics_delta.average_score_delta  # +0.21
+        bucket = compare_runs(
+            RunComparison(baseline=baseline_run, candidate=candidate_run)
+        ).label_metrics_deltas[0]
+        bucket.label                              # "table"
+        bucket.metrics_delta.average_score_delta  # 1.0
     """
 
     label: str
@@ -1199,6 +1372,13 @@ class ChangeMagnitude(DocumentedModel):
     negative delta, not its absolute value. Every field is `null` when nothing moved that way:
     a run where nothing got worse has no worsening to report, and a 0.0 there would read as a
     regression of exactly zero to anyone holding the number rather than the id list.
+
+    Example:
+        summary = compare_runs(
+            RunComparison(baseline=baseline_run, candidate=candidate_run)
+        ).summary
+        summary.improvement.largest   # 1.0
+        summary.worsening.largest     # None — nothing got worse
     """
 
     largest: float | None
@@ -1220,8 +1400,12 @@ class ChangeSummary(DocumentedModel):
     says whether every case rose a little or three rose a lot while one collapsed.
 
     Example:
-        summary.improved_case_ids[:3]   # [7, 3, 2] — the three biggest wins, in order
-        summary.worsening.largest       # -0.31     — the regression to read first
+        summary = compare_runs(
+            RunComparison(baseline=baseline_run, candidate=candidate_run)
+        ).summary
+        summary.improved_case_ids   # [1]  — the biggest win first
+        summary.stable_case_ids     # [2]
+        summary.worsening.largest   # None — nothing got worse
     """
 
     improved_case_ids: list[int]
@@ -1247,19 +1431,43 @@ class ChangeSummary(DocumentedModel):
     @computed_field
     @property
     def improved_case_count(self) -> int:
-        """Length of `improved_case_ids`. Derived, so count and list cannot contradict."""
+        """How many cases the candidate scored higher on.
+
+        Derived rather than stored, so the count and the list it counts cannot contradict.
+
+        Returns:
+            The length of `improved_case_ids`, 0 when nothing improved.
+
+        Example:
+            summary.improved_case_count   # 1
+        """
         return len(self.improved_case_ids)
 
     @computed_field
     @property
     def stable_case_count(self) -> int:
-        """Length of `stable_case_ids`."""
+        """How many cases did not move beyond `SCORE_EQUALITY_TOLERANCE`.
+
+        Returns:
+            The length of `stable_case_ids`, 0 when every case moved.
+
+        Example:
+            summary.stable_case_count   # 1
+        """
         return len(self.stable_case_ids)
 
     @computed_field
     @property
     def worsened_case_count(self) -> int:
-        """Length of `worsened_case_ids`."""
+        """How many cases the candidate scored lower on.
+
+        Returns:
+            The length of `worsened_case_ids`, 0 when nothing got worse — which is a real
+            answer and not a missing one.
+
+        Example:
+            summary.worsened_case_count   # 0
+        """
         return len(self.worsened_case_ids)
 
     @computed_field
@@ -1271,26 +1479,50 @@ class ChangeSummary(DocumentedModel):
         up to the run exactly. The three rates are three separate divisions, so they add up
         to 1.0 only to within float rounding — six cases split 1 / 4 / 1 sum to
         0.9999999999999999. Compare the counts when an exact total is what you need.
+
+        Returns:
+            `improved_case_count` over the run's cases; 0.0 when nothing improved, 1.0 when
+            every case did.
+
+        Example:
+            summary.improvement_rate   # 0.5
         """
         return self.improved_case_count / self._total_cases
 
     @computed_field
     @property
     def stability_rate(self) -> float:
-        """Share of the run's cases that did not move, in [0, 1]."""
+        """Share of the run's cases that did not move, in [0, 1].
+
+        Returns:
+            `stable_case_count` over the run's cases; 1.0 for a run in which nothing moved
+            at all.
+
+        Example:
+            summary.stability_rate   # 0.5
+        """
         return self.stable_case_count / self._total_cases
 
     @computed_field
     @property
     def worsening_rate(self) -> float:
-        """Share of the run's cases that got worse, in [0, 1]."""
+        """Share of the run's cases that got worse, in [0, 1].
+
+        Returns:
+            `worsened_case_count` over the run's cases; 0.0 when nothing got worse.
+
+        Example:
+            summary.worsening_rate   # 0.0
+        """
         return self.worsened_case_count / self._total_cases
 
     @property
     def _total_cases(self) -> int:
-        """Every case is in exactly one of the three lists, so they add up to the run — no
-        separate total to store and keep in sync. Never 0: `RunResult` rejects a run with
-        no cases, so the three rates above can always be divided out."""
+        """Every case is in exactly one of the three lists, so they add up to the run.
+
+        No separate total to store and keep in sync, then. Never 0: `RunResult` rejects a run
+        with no cases, so the three rates above can always be divided out.
+        """
         return self.improved_case_count + self.stable_case_count + self.worsened_case_count
 
 
@@ -1303,7 +1535,9 @@ class RunComparison(DocumentedModel):
     `RunResult`, a `RunComparison` produces a `RunComparisonResult`.
 
     Example:
-        RunComparison(baseline=last_weeks_run, candidate=todays_run)
+        comparison = RunComparison(baseline=baseline_run, candidate=candidate_run)
+        comparison.baseline.metrics.average_score    # 0.5
+        comparison.candidate.metrics.average_score   # 1.0
     """
 
     baseline: RunResult
@@ -1323,10 +1557,11 @@ class RunComparisonResult(DocumentedModel):
     always be traced down to the one below it.
 
     Example:
-        result.metrics_delta.average_score_delta   # +0.084
-        result.label_metrics_deltas[0].label       # "agentic_search"
-        result.summary.worsened_case_ids           # [5] — what the win cost
-        result.case_comparison_results[0].criterion_comparison_results[1].score_delta  # -2.0
+        result = compare_runs(RunComparison(baseline=baseline_run, candidate=candidate_run))
+        result.metrics_delta.average_score_delta   # 0.5
+        result.label_metrics_deltas[0].label       # "table"
+        result.summary.worsened_case_ids           # []  — the win cost nothing
+        result.case_comparison_results[0].criterion_comparison_results[0].score_delta  # 2.0
     """
 
     metrics_delta: RunMetricsDelta
