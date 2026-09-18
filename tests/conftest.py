@@ -2,6 +2,9 @@
 domain and the HTTP tests alike — so a domain test and an HTTP test never describe *almost*
 the same input."""
 
+from collections.abc import Iterator, Mapping
+from typing import Any
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -17,7 +20,7 @@ from rubric_eval.models import (
     Scale,
 )
 
-CASE = {
+CASE: dict[str, Any] = {
     "id": 1,
     "question": "How do I report sick leave?",
     "answer": "Email hr@example.com before 10:00.",
@@ -30,7 +33,7 @@ CASE = {
 domain tests, so both describe literally the same case."""
 
 
-RUN = {
+RUN: dict[str, Any] = {
     "cases": [
         CASE,
         {
@@ -63,11 +66,13 @@ class FakeJudge:
     Carries a `scale` like every `Judge` does, so a test can hand the evaluation layer a
     judge that grades 0..10 without an endpoint that grades 0..10 existing anywhere."""
 
-    def __init__(self, by_criterion: dict[int, int | Exception], scale: Scale = DEFAULT_SCALE):
+    def __init__(
+        self, by_criterion: Mapping[int, int | Exception], scale: Scale = DEFAULT_SCALE
+    ):
         self.by_criterion = by_criterion
         self.scale = scale
 
-    async def score(self, question, answer, criterion) -> JudgeReply:
+    async def score(self, question: str, answer: str, criterion: Criterion) -> JudgeReply:
         outcome = self.by_criterion[criterion.id]
         if isinstance(outcome, Exception):
             raise outcome
@@ -75,7 +80,7 @@ class FakeJudge:
 
 
 @pytest.fixture
-def client():
+def client() -> Iterator[TestClient]:
     """HTTP client against the real app; `use_judge()` swaps in a fake for one test."""
     with TestClient(app) as client:
         yield client
@@ -84,7 +89,7 @@ def client():
 
 
 @pytest.fixture
-def unconfigured_client(monkeypatch):
+def unconfigured_client(monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
     """HTTP client against an app whose judge cannot be built: no environment, no override.
     `raise_server_exceptions=False` makes the client behave like a real one and report the
     status code instead of re-raising the server-side error."""
@@ -103,9 +108,9 @@ def use_judge(judge: Judge) -> None:
 
 
 def run_of(
-    *scores_per_case: dict[int, float],
+    *scores_per_case: Mapping[int, float],
     scale: Scale = DEFAULT_SCALE,
-    labels_by_case_id: dict[int, list[str]] | None = None,
+    labels_by_case_id: Mapping[int, list[str]] | None = None,
 ) -> RunResult:
     """A finished `RunResult` built straight from judge scores, no judge and no async.
 
@@ -141,7 +146,7 @@ def run_of(
 
 
 def _criterion_results(
-    scores: dict[int, float], scale: Scale = DEFAULT_SCALE
+    scores: Mapping[int, float], scale: Scale = DEFAULT_SCALE
 ) -> list[CriterionResult]:
     """One result per criterion id, all weighted 1 — weights are what `run_of` keeps boring
     so that a comparison test reads as scores in and deltas out."""

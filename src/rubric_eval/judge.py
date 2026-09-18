@@ -12,7 +12,7 @@ from collections.abc import Mapping
 from typing import Protocol
 
 from openai import APIConnectionError, AsyncOpenAI, InternalServerError, RateLimitError
-from openai.types.chat import ChatCompletion
+from openai.types.chat import ChatCompletion, ChatCompletionMessageParam
 from pydantic import Field
 
 from rubric_eval.models import DEFAULT_SCALE, Criterion, DocumentedModel, Scale
@@ -25,8 +25,10 @@ from rubric_eval.prompt import (
     out_of_range_hint,
 )
 
-ChatMessage = dict[str, str]
-"""One chat message the way the OpenAI SDK wants it: {"role": ..., "content": ...}."""
+ChatMessage = ChatCompletionMessageParam
+"""One chat message the way the OpenAI SDK wants it: {"role": ..., "content": ...}. The SDK's
+own union of message types rather than a plain dict, so a message built here is checked
+against what `chat.completions.create` accepts instead of only looking like it."""
 
 _SCORE_OBJECT = re.compile(r'\{[^{}]*?"score"\s*:\s*(-?\d+(?:\.\d+)?)[^{}]*?\}')
 """Where a grade hides in a reply. The judge reasons first and closes with the JSON object,
@@ -296,8 +298,8 @@ class JudgeConfig(DocumentedModel):
         if unusable:
             raise RuntimeError(f"Unusable environment variables: {', '.join(unusable)}")
 
-        return cls(
-            **{
+        return cls.model_validate(
+            {
                 field: environment[variable]
                 for field, variable in variable_per_field.items()
                 if variable in environment
@@ -609,7 +611,7 @@ class OpenAIJudge:
         """
         if failed_attempt + 1 >= self.config.max_attempts:
             return 0.0
-        return _FIRST_BACKOFF_SECONDS * 2**failed_attempt
+        return _FIRST_BACKOFF_SECONDS * 2.0**failed_attempt
 
     def _opening_messages(
         self, question: str, answer: str, criterion: Criterion

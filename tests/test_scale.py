@@ -18,6 +18,7 @@ from rubric_eval import (
     CaseResult,
     Criterion,
     CriterionResult,
+    Judge,
     JudgeUnavailableError,
     RunComparison,
     RunResult,
@@ -108,7 +109,7 @@ def test_rejects_a_scale_with_nothing_to_reach(maximum):
 
 def test_rejects_a_fractional_maximum_because_the_scale_is_integral():
     with pytest.raises(ValidationError):
-        Scale(maximum=2.5, presence_threshold=0.5)
+        Scale.model_validate({"maximum": 2.5, "presence_threshold": 0.5})
 
 
 def test_rejects_a_threshold_of_zero_that_would_call_a_total_miss_covered():
@@ -323,11 +324,13 @@ async def test_a_judge_that_declares_no_scale_is_a_broken_program_not_an_outage(
     arrives as the `AttributeError` it is, so the HTTP layer answers 500 rather than 503."""
 
     class ScalelessJudge:
-        async def score(self, question, answer, criterion):
+        async def score(self, question: str, answer: str, criterion: Criterion) -> JudgeReply:
             return JudgeReply(score=2, reasoning="")
 
+    # Cast because it is not a `Judge` and that is the whole test: what reaches
+    # `evaluate_case` at runtime is whatever a caller handed it.
     with pytest.raises(AttributeError):
-        await evaluate_case(ScalelessJudge(), Case(**CASE))
+        await evaluate_case(cast(Judge, ScalelessJudge()), Case(**CASE))
 
 
 async def test_a_judge_scoring_above_the_scale_it_declared_is_refused():
@@ -394,8 +397,8 @@ def test_a_run_whose_case_names_no_scale_is_refused_at_load():
     run's unit with it. Refused where the document is read, not where a delta is computed —
     by then the number already looks like a result."""
     with pytest.raises(ValidationError, match="scale"):
-        RunResult(
-            **{
+        RunResult.model_validate(
+            {
                 "metrics": run_of({1: 2}).metrics.model_dump(),
                 "case_results": [
                     {

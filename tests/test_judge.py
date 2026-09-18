@@ -37,12 +37,22 @@ exceptions carry one, and none of the code under test reads it."""
 def rate_limited(message: str = "rate limited") -> RateLimitError:
     """A real `openai.RateLimitError`, because the judge decides what to retry by the SDK's
     own exception types and a stand-in would prove nothing about that."""
-    return RateLimitError(message, response=httpx.Response(429, request=_REQUEST), body=None)
+    return RateLimitError(
+        message,
+        # openai 3.8 vendors its own httpx as `httpx2`, so a real `httpx.Response` can
+        # never satisfy its annotations.
+        response=httpx.Response(429, request=_REQUEST),  # type: ignore[arg-type]
+        body=None,
+    )
 
 
 def server_error(message: str = "bad gateway") -> InternalServerError:
     """The other retryable status family, built the same way."""
-    return InternalServerError(message, response=httpx.Response(502, request=_REQUEST), body=None)
+    return InternalServerError(
+        message,
+        response=httpx.Response(502, request=_REQUEST),  # type: ignore[arg-type]  # see above
+        body=None,
+    )
 
 
 def test_parses_reasoning_and_score():
@@ -129,25 +139,28 @@ def instant_backoff(monkeypatch):
     monkeypatch.setattr("rubric_eval.judge._FIRST_BACKOFF_SECONDS", 0)
 
 
-def _client_answering(completions):
+def _client_answering(completions: object) -> AsyncOpenAI:
     """The stand-in `OpenAIJudge(client=...)` is given: the judge only ever reaches for
     `client.chat.completions.create`, so that is the whole client a test has to supply — no
-    SDK object to build and no socket to open behind it."""
-    return SimpleNamespace(chat=SimpleNamespace(completions=completions))
+    SDK object to build and no socket to open behind it. Cast, because the parameter is
+    annotated with the SDK's own client and a test double is what the parameter is *for*."""
+    return cast(AsyncOpenAI, SimpleNamespace(chat=SimpleNamespace(completions=completions)))
 
 
-def _judge(replies, **overrides):
+def _judge(
+    replies: list[ScriptedAnswer], **overrides: Any
+) -> tuple[OpenAIJudge, FakeCompletions]:
     config = JudgeConfig(model="m", endpoint="http://x/v1", api_key="k", **overrides)
     fake = FakeCompletions(replies)
     return OpenAIJudge(config, client=_client_answering(fake)), fake
 
 
-def _judge_answering(response, **overrides):
+def _judge_answering(response: type, **overrides: Any) -> OpenAIJudge:
     """A judge whose endpoint always hands back one prepared response object — for the
     answers that are not reply text at all: no content, or not even a choice to read it
     from."""
 
-    async def create(**kwargs):
+    async def create(**kwargs: Any) -> type:
         return response
 
     config = JudgeConfig(model="m", endpoint="http://x/v1", api_key="k", **overrides)
@@ -386,7 +399,11 @@ async def test_a_timeout_and_a_broken_gateway_are_retried_too():
     """The three retryable shapes of "the endpoint is having a bad day", by the SDK's own
     types: unreachable, rate limited, 5xx."""
     judge, fake = _judge(
-        [APITimeoutError(request=_REQUEST), server_error(), 'Covered.\n{"score": 2}'],
+        [
+            APITimeoutError(request=_REQUEST),  # type: ignore[arg-type]  # vendored httpx
+            server_error(),
+            'Covered.\n{"score": 2}',
+        ],
         max_attempts=3,
     )
 
@@ -429,8 +446,9 @@ class _ConnectionErrorWithoutMessage(APIConnectionError):
     """An SDK transport failure whose `str()` is empty — the SDK's own always has a message,
     a custom `http_client` raising through it need not."""
 
-    def __init__(self, *, request):
-        super().__init__(message="", request=request)
+    def __init__(self, *, request: httpx.Request):
+        # The vendored-httpx mismatch again, see `rate_limited`.
+        super().__init__(message="", request=request)  # type: ignore[arg-type]
 
 
 async def test_an_unretryable_endpoint_error_is_not_asked_again():
@@ -672,7 +690,7 @@ def test_a_judge_can_be_reused_from_a_second_event_loop():
     """
     judge, fake = _judge(['Covered.\n{"score": 2}'] * 6, max_concurrent=2)
 
-    async def score_three_at_once():
+    async def score_three_at_once() -> list[JudgeReply]:
         return await asyncio.gather(*(judge.score("How?", "Yes.", CRITERION) for _ in range(3)))
 
     judge_replies = asyncio.run(score_three_at_once()) + asyncio.run(score_three_at_once())
@@ -689,7 +707,7 @@ def test_the_throttle_of_a_finished_loop_is_not_kept_forever():
     """
     judge, _ = _judge(['Covered.\n{"score": 2}'] * 9, max_concurrent=2)
 
-    async def score_three_at_once():
+    async def score_three_at_once() -> list[JudgeReply]:
         return await asyncio.gather(*(judge.score("How?", "Yes.", CRITERION) for _ in range(3)))
 
     for _ in range(3):
@@ -708,14 +726,16 @@ async def test_the_limit_holds_across_several_cases_judged_at_once():
     """
     judge, fake = _judge(['Covered.\n{"score": 2}'] * 30, max_concurrent=8)
     five_cases = [
-        Case(
-            id=first,
-            question="How do I report sick leave?",
-            answer="Email hr@example.com before 10:00.",
-            criteria=[
-                {"id": number, "content": f"criterion {number}", "weight": 1}
-                for number in range(first * 6, first * 6 + 6)
-            ],
+        Case.model_validate(
+            {
+                "id": first,
+                "question": "How do I report sick leave?",
+                "answer": "Email hr@example.com before 10:00.",
+                "criteria": [
+                    {"id": number, "content": f"criterion {number}", "weight": 1}
+                    for number in range(first * 6, first * 6 + 6)
+                ],
+            }
         )
         for first in range(5)
     ]
@@ -727,19 +747,21 @@ async def test_the_limit_holds_across_several_cases_judged_at_once():
 
 
 def _run_of(case_count: int, criteria_per_case: int) -> Run:
-    return Run(
-        cases=[
-            {
-                "id": case_number,
-                "question": "How do I report sick leave?",
-                "answer": "Email hr@example.com before 10:00.",
-                "criteria": [
-                    {"id": number, "content": f"criterion {number}", "weight": 1}
-                    for number in range(criteria_per_case)
-                ],
-            }
-            for case_number in range(case_count)
-        ]
+    return Run.model_validate(
+        {
+            "cases": [
+                {
+                    "id": case_number,
+                    "question": "How do I report sick leave?",
+                    "answer": "Email hr@example.com before 10:00.",
+                    "criteria": [
+                        {"id": number, "content": f"criterion {number}", "weight": 1}
+                        for number in range(criteria_per_case)
+                    ],
+                }
+                for case_number in range(case_count)
+            ]
+        }
     )
 
 

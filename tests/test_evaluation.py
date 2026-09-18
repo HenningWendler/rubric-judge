@@ -76,25 +76,31 @@ async def test_duplicate_criterion_ids_are_rejected():
     without relying on list order. Two criteria sharing an id make that impossible — and a
     caller merging by id would drop or double-count a result."""
     with pytest.raises(ValueError):
-        Case(
-            id=1,
-            question="q",
-            answer="a",
-            criteria=[
-                {"id": 7, "content": "first", "weight": 1},
-                {"id": 7, "content": "second", "weight": 1},
-            ],
+        Case.model_validate(
+            {
+                "id": 1,
+                "question": "q",
+                "answer": "a",
+                "criteria": [
+                    {"id": 7, "content": "first", "weight": 1},
+                    {"id": 7, "content": "second", "weight": 1},
+                ],
+            }
         )
 
 
 async def test_a_large_rubric_is_judged_completely_and_in_order():
     """The fan-out has to survive a rubric far bigger than the example case, with every
     result still zippable against the criteria it came from."""
-    many = Case(
-        id=1,
-        question="q",
-        answer="a",
-        criteria=[{"id": i, "content": f"criterion {i}", "weight": 1} for i in range(200)],
+    many = Case.model_validate(
+        {
+            "id": 1,
+            "question": "q",
+            "answer": "a",
+            "criteria": [
+                {"id": i, "content": f"criterion {i}", "weight": 1} for i in range(200)
+            ],
+        }
     )
 
     result = await evaluate_case(FakeJudge({i: 2 for i in range(200)}), many)
@@ -223,8 +229,8 @@ async def test_a_bug_in_one_case_aborts_the_whole_run_as_itself():
 async def test_duplicate_case_ids_are_rejected():
     """Run metrics name cases by id — `cases_with_score_zero` would be ambiguous otherwise."""
     with pytest.raises(ValueError, match="case ids must be unique"):
-        Run(
-            cases=[{**RUN["cases"][0], "id": 5}, {**RUN["cases"][1], "id": 5}]
+        Run.model_validate(
+            {"cases": [{**RUN["cases"][0], "id": 5}, {**RUN["cases"][1], "id": 5}]}
         )
 
 
@@ -248,10 +254,14 @@ async def test_criterion_ids_may_repeat_across_the_cases_of_a_run():
     """Criterion ids are documented as unique *within* a case. Two cases written from the
     same rubric template share them, and their results still belong to their own case."""
     shared_rubric = [{"id": 1, "content": "Submit it in the HR tool", "weight": 1}]
-    run = Run(cases=[
-        {"id": 1, "question": "q", "answer": "In the HR tool.", "criteria": shared_rubric},
-        {"id": 2, "question": "q", "answer": "No idea.", "criteria": shared_rubric},
-    ])
+    run = Run.model_validate(
+        {
+            "cases": [
+                {"id": 1, "question": "q", "answer": "In the HR tool.", "criteria": shared_rubric},
+                {"id": 2, "question": "q", "answer": "No idea.", "criteria": shared_rubric},
+            ]
+        }
+    )
 
     result = await evaluate_run(_JudgeByAnswer(), run)
 

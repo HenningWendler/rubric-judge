@@ -26,7 +26,14 @@ from rubric_eval.metrics import case_score, run_metrics
 from rubric_eval.models import DEFAULT_SCALE, CaseResult, CriterionResult, RunResult
 
 
-def compared(baseline: RunResult, candidate: RunResult):
+def a_real_move(magnitude: float | None) -> float:
+    """A magnitude the test is asserting *did* move. `None` there is the failure the assertion
+    is about, so it is reported here rather than three lines later as a `TypeError`."""
+    assert magnitude is not None
+    return magnitude
+
+
+def compared(baseline: RunResult, candidate: RunResult) -> RunComparisonResult:
     """The result of comparing two runs — the whole file's one line of setup."""
     return compare_runs(RunComparison(baseline=baseline, candidate=candidate))
 
@@ -63,9 +70,15 @@ class TestDirection:
         for field in RunMetricsDelta.model_fields:
             assert getattr(forward.metrics_delta, field) == -getattr(backward.metrics_delta, field)
         assert forward.summary.improved_case_ids == backward.summary.worsened_case_ids
-        assert forward.summary.improvement.largest == -backward.summary.worsening.largest
-        assert forward.summary.improvement.mean == -backward.summary.worsening.mean
-        assert forward.summary.improvement.median == -backward.summary.worsening.median
+        assert forward.summary.improvement.largest == -a_real_move(
+            backward.summary.worsening.largest
+        )
+        assert forward.summary.improvement.mean == -a_real_move(
+            backward.summary.worsening.mean
+        )
+        assert forward.summary.improvement.median == -a_real_move(
+            backward.summary.worsening.median
+        )
 
     def test_every_metric_delta_subtracts_its_own_pair_of_metrics(self):
         """One delta per `RunMetrics` field that subtracts, each reading the *same* metric on

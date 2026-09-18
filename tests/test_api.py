@@ -12,7 +12,7 @@ from openai import AsyncOpenAI
 
 from tests.conftest import CASE, RUN, RUN_SCORES, FakeJudge, run_of, use_judge
 
-from rubric_eval import JudgeUnavailableError
+from rubric_eval import JudgeUnavailableError, RunResult
 from rubric_eval.api import app, get_judge
 from rubric_eval.judge import JudgeConfig, OpenAIJudge
 from rubric_eval.models import DEFAULT_SCALE, Scale
@@ -230,7 +230,11 @@ class StubJudgeEndpoint:
             base_url=config.endpoint,
             api_key=config.api_key,
             max_retries=0,
-            http_client=httpx.AsyncClient(transport=httpx.MockTransport(self._answer)),
+            # openai 3.8 vendors its own httpx as `httpx2`, so a real `httpx.AsyncClient`
+            # can never satisfy its annotations — and only a real one drives the SDK.
+            http_client=httpx.AsyncClient(  # type: ignore[arg-type]
+                transport=httpx.MockTransport(self._answer)
+            ),
         )
 
     async def _answer(self, request: httpx.Request) -> httpx.Response:
@@ -471,7 +475,7 @@ def test_a_nan_weight_is_rejected_instead_of_scoring_null(client):
     assert "finite" in response.text
 
 
-def _runs(baseline, candidate) -> dict:
+def _runs(baseline: RunResult, candidate: RunResult) -> dict[str, Any]:
     """A `/compare` body built from two runs, as JSON the way a caller would send it."""
     return {
         "baseline": baseline.model_dump(mode="json"),

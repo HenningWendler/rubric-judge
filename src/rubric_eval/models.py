@@ -966,7 +966,7 @@ class RunMetrics(DocumentedModel):
             )
         return self
 
-    @computed_field
+    @computed_field  # type: ignore[prop-decorator]  # mypy cannot type-check a decorator on a property
     @property
     def cases_with_score_zero_count(self) -> int:
         """How many cases missed their rubric completely.
@@ -1459,7 +1459,7 @@ class ChangeSummary(DocumentedModel):
     """Size of the moves behind `worsened_case_ids`, all negative — all three fields `null`
     when nothing got worse."""
 
-    @computed_field
+    @computed_field  # type: ignore[prop-decorator]  # mypy cannot type-check a decorator on a property
     @property
     def improved_case_count(self) -> int:
         """How many cases the candidate scored higher on.
@@ -1474,7 +1474,7 @@ class ChangeSummary(DocumentedModel):
         """
         return len(self.improved_case_ids)
 
-    @computed_field
+    @computed_field  # type: ignore[prop-decorator]  # mypy cannot type-check a decorator on a property
     @property
     def stable_case_count(self) -> int:
         """How many cases did not move beyond `SCORE_EQUALITY_TOLERANCE`.
@@ -1487,7 +1487,7 @@ class ChangeSummary(DocumentedModel):
         """
         return len(self.stable_case_ids)
 
-    @computed_field
+    @computed_field  # type: ignore[prop-decorator]  # mypy cannot type-check a decorator on a property
     @property
     def worsened_case_count(self) -> int:
         """How many cases the candidate scored lower on.
@@ -1501,7 +1501,7 @@ class ChangeSummary(DocumentedModel):
         """
         return len(self.worsened_case_ids)
 
-    @computed_field
+    @computed_field  # type: ignore[prop-decorator]  # mypy cannot type-check a decorator on a property
     @property
     def improvement_rate(self) -> float:
         """Share of the run's cases that improved, in [0, 1].
@@ -1520,7 +1520,7 @@ class ChangeSummary(DocumentedModel):
         """
         return self.improved_case_count / self._total_cases
 
-    @computed_field
+    @computed_field  # type: ignore[prop-decorator]  # mypy cannot type-check a decorator on a property
     @property
     def stability_rate(self) -> float:
         """Share of the run's cases that did not move, in [0, 1].
@@ -1534,7 +1534,7 @@ class ChangeSummary(DocumentedModel):
         """
         return self.stable_case_count / self._total_cases
 
-    @computed_field
+    @computed_field  # type: ignore[prop-decorator]  # mypy cannot type-check a decorator on a property
     @property
     def worsening_rate(self) -> float:
         """Share of the run's cases that got worse, in [0, 1].
