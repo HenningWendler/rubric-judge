@@ -1508,7 +1508,7 @@ field tables in [Reference](#reference). One text, never three — they cannot d
 .venv/bin/python -m pytest
 ```
 
-314 tests, no real LLM ever called. Mocked at two levels:
+346 tests, no real LLM ever called. Mocked at two levels:
 
 - **`FakeJudge`** ([conftest.py](tests/conftest.py)) replaces the `Judge` protocol and scores
   from a lookup table — `{1: 2, 2: JudgeUnavailableError("down")}` scores criterion 1 with a
@@ -1532,7 +1532,7 @@ field tables in [Reference](#reference). One text, never three — they cannot d
 | [test_metrics.py](tests/test_metrics.py) | the scoring formula, float extremes, every run metric |
 | [test_evaluation.py](tests/test_evaluation.py) | fan-out, ordering, failure policy, run aggregation |
 | [test_judge.py](tests/test_judge.py) | the parser reply by reply, both retry loops, what is not retried, the concurrency limit |
-| [test_comparison.py](tests/test_comparison.py) | deltas and their direction, the three statuses, ordering, and every refusal |
+| [test_comparison.py](tests/test_comparison.py) | deltas and their direction, the three statuses, ordering, every refusal, and the documents in [examples/](examples) against the numbers quoted from them here |
 | [test_prompt.py](tests/test_prompt.py) | the prompt a scale generates, held against the hand-written original |
 | [test_scale.py](tests/test_scale.py) | what a valid scale is, and what it does to a grade, a run and a comparison |
 | [test_labels.py](tests/test_labels.py) | what a valid label is, which cases a filter and a bucket select, and what a relabelled case does to a comparison |

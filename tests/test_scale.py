@@ -5,6 +5,9 @@ The scale story cuts across every module — model, judge, evaluation, compariso
 told in one file rather than in five fragments nobody reads together.
 """
 
+import json
+from typing import cast
+
 import pytest
 from pydantic import ValidationError
 
@@ -405,6 +408,29 @@ def test_a_run_whose_case_names_no_scale_is_refused_at_load():
                 ],
             }
         )
+
+
+def test_a_case_that_names_a_null_scale_is_refused_like_one_that_names_none():
+    """An explicit `null` is the shape a serializer that drops empty values writes, and the
+    shape a hand-edited document ends up with. It has to be the same refusal as an absent
+    field, or "required and never defaulted" holds for one spelling of missing and not the
+    other."""
+    stored = json.loads(run_of({1: 2}).model_dump_json())
+    stored["case_results"][0]["scale"] = None
+
+    with pytest.raises(ValidationError, match="scale"):
+        RunResult.model_validate(stored)
+
+
+def test_a_run_read_back_from_a_file_is_held_to_the_scale_rule_too():
+    """`model_validate_json` is the documented way to load a stored run off disk, and it is
+    the path a run reaches `/compare` by. Pydantic validates JSON on a separate code path from
+    Python objects, so the rule is worth asserting on the one a reader actually uses."""
+    stored = json.loads(run_of({1: 2}).model_dump_json())
+    del stored["case_results"][0]["scale"]
+
+    with pytest.raises(ValidationError, match="scale"):
+        RunResult.model_validate_json(json.dumps(stored))
 
 
 def test_a_custom_scale_survives_a_json_round_trip():

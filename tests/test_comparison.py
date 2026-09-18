@@ -5,6 +5,7 @@ and deltas out with no judge and no event loop in between.
 """
 
 import json
+from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
@@ -12,8 +13,10 @@ from pydantic import ValidationError
 from tests.conftest import run_of
 from rubric_eval import (
     SCORE_EQUALITY_TOLERANCE,
+    ChangeMagnitude,
     ChangeStatus,
     RunComparison,
+    RunComparisonResult,
     RunMetricsDelta,
     RunsNotComparableError,
     compare_runs,
@@ -414,6 +417,115 @@ class TestRefusal:
         """The check runs first on purpose — a half-built document is worse than none."""
         with pytest.raises(RunsNotComparableError, match="the runs are not comparable"):
             compared(run_of({1: 1}), run_of({2: 1}))
+
+
+class TestStoredComparison:
+    """A comparison read back from JSON has to mean what it meant when it was written."""
+
+    def test_a_null_magnitude_is_still_null_after_the_round_trip_a_stored_run_makes(self):
+        """The nulls are documented as "nothing moved that way", and only reading them back as
+        nulls keeps that true. Read as 0.0 — which is what a default would do — a stored
+        comparison would claim a regression of exactly zero on a side nothing moved to."""
+        written = compared(run_of({1: 0}), run_of({1: 2}))
+
+        read_back = RunComparisonResult.model_validate_json(written.model_dump_json())
+
+        assert read_back.summary.worsening.largest is None
+        assert read_back.summary.worsening.mean is None
+        assert read_back.summary.worsening.median is None
+        assert read_back == written
+
+    def test_a_magnitude_cannot_leave_a_field_out_and_be_read_as_null(self):
+        """Null is an answer here, so it has to be written down. A field that defaulted to
+        `None` when absent would make "no data" indistinguishable from "this document was
+        produced by something that does not report it"."""
+        with pytest.raises(ValidationError, match="median"):
+            ChangeMagnitude.model_validate({"largest": 1.0, "mean": 1.0})
+
+    def test_a_magnitude_that_did_move_survives_the_round_trip_as_a_number(self):
+        """The other half: nulls that are read back as nulls are only worth something if real
+        moves are not turned into nulls on the way."""
+        written = compared(run_of({1: 2}), run_of({1: 0}))
+
+        read_back = RunComparisonResult.model_validate_json(written.model_dump_json())
+
+        assert read_back.summary.worsening.largest == -1.0
+        assert read_back.summary.improvement.largest is None
+
+
+class TestPublishedExamples:
+    """The three documents in `examples/`, which the README quotes numbers out of by hand.
+
+    They are the only place a reader can check the library against something they did not
+    compute themselves, so "real output, not an illustration" has to stay true.
+    """
+
+    EXAMPLES = Path(__file__).resolve().parent.parent / "examples"
+
+    def _stored(self, name: str) -> RunResult:
+        return RunResult.model_validate_json((self.EXAMPLES / name).read_text())
+
+    def test_the_stored_comparison_is_what_the_two_stored_runs_produce(self):
+        """Every digit of `run_comparison_result.json`, recomputed from its own two inputs."""
+        recomputed = compared(
+            self._stored("run_result_baseline.json"),
+            self._stored("run_result_candidate.json"),
+        )
+        stored = RunComparisonResult.model_validate_json(
+            (self.EXAMPLES / "run_comparison_result.json").read_text()
+        )
+
+        assert recomputed == stored
+
+    def test_the_readme_quotes_those_documents_verbatim(self):
+        """The numbers the README prints in its comparison quickstart, down to the trailing
+        digits it deliberately shows — they are what summing weights 3 and 1 really produces,
+        and rounding them in the prose would hide why "stable" is a tolerance and not an
+        `==`."""
+        result = compared(
+            self._stored("run_result_baseline.json"),
+            self._stored("run_result_candidate.json"),
+        )
+
+        assert result.metrics_delta.average_score_delta == 0.1250000000000001
+        assert result.metrics_delta.median_score_delta == -0.12499999999999989
+        assert result.summary.improved_case_ids == [1]
+        assert result.summary.worsened_case_ids == [3]
+        assert result.summary.improvement.largest == 0.8750000000000001
+        assert result.summary.worsening.largest == -0.5
+        assert [
+            (bucket.label, bucket.metrics_delta.average_score_delta)
+            for bucket in result.label_metrics_deltas
+        ] == [("policy", 0.4375), ("tool", -0.25)]
+
+    def test_the_readme_drill_down_lands_on_the_criterion_it_names(self):
+        """The README follows one regression from the run down to the criterion that caused
+        it — the path the whole three-grain design exists for."""
+        result = compared(
+            self._stored("run_result_baseline.json"),
+            self._stored("run_result_candidate.json"),
+        )
+        regressed = result.case_comparison_results[2]
+
+        assert regressed.case_id == 3
+        assert (regressed.baseline_score, regressed.candidate_score) == (1.0, 0.5)
+        assert regressed.criterion_comparison_results[0].score_delta == -1.0
+        assert regressed.criterion_comparison_results[0].status is ChangeStatus.WORSENED
+
+    def test_the_stored_baseline_reports_the_metrics_the_readme_prints_for_it(self):
+        """The README prints that `metrics` object as the response of `POST /evaluate/run`."""
+        assert self._stored("run_result_baseline.json").metrics.model_dump() == {
+            "total_cases": 3,
+            "average_score": 0.6666666666666666,
+            "median_score": 1.0,
+            "variance": 0.3333333333333333,
+            "standard_deviation": 0.5773502691896257,
+            "average_criterion_score": 1.0,
+            "criteria_fulfillment_rate": 0.6666666666666666,
+            "cases_with_score_zero": [1],
+            "cases_with_score_zero_count": 1,
+            "weakest_cases_above_zero": [2, 3],
+        }
 
 
 def _case_status_for_score(candidate_score: float) -> ChangeStatus:
