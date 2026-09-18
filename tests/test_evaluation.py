@@ -159,8 +159,6 @@ async def test_a_grade_off_the_scale_is_refused_rather_than_folded_into_the_scor
 
 # --- run: many cases in one call ----------------------------------------------------------
 
-THE_RUN = Run(**RUN)
-
 
 async def test_a_run_returns_every_case_result_in_request_order():
     result = await evaluate_run(FakeJudge(RUN_SCORES), THE_RUN)
