@@ -673,7 +673,7 @@ twenty criteria would outvote nineteen cases with one.
 | `average_score` | `float` | `0 … 1` | Mean of the case scores — the single number a run is usually reported by |
 | `median_score` | `float` | `0 … 1` | Middle case score. Far above the mean means a few catastrophic cases drag an otherwise solid run down |
 | `variance` | `float` | `0 … 0.5` | Sample variance of the case scores. `0.0` for a single case, which has no spread |
-| `standard_deviation` | `float` | `0 … 0.71` | Square root of it, in score units. Small = uniformly good or bad; large = it depends heavily on the question |
+| `standard_deviation` | `float` | `0 … √0.5` (≈ `0.71`) | Square root of it, in score units. Small = uniformly good or bad; large = it depends heavily on the question |
 | `average_criterion_score` | `float` | `0 … scale.maximum` | How the judge rates an average *statement*, on the run's **raw** scale (`1.4` of `2`, not `0.7`), ignoring weights and case boundaries. A different question from `average_score` |
 | `criteria_fulfillment_rate` | `float` | `0 … 1` | Mean share of criteria counting as `is_present`, averaged **per case first** so a long rubric cannot dominate |
 | `cases_with_score_zero` | `list[int]` | ≤ `total_cases` entries | Ids of answers that missed their rubric completely. Read these first |
@@ -757,7 +757,7 @@ the movement of cases instead.
 | `average_score_delta` | `float` | `-1 … 1` | Change in the mean case score. The headline number |
 | `median_score_delta` | `float` | `-1 … 1` | Change in the median. Read next to the mean: a mean that rose while the median fell means a few cases carried the win |
 | `variance_delta` | `float` | `-0.5 … 0.5` | Change in the sample variance of the case scores |
-| `standard_deviation_delta` | `float` | `-0.71 … 0.71` | Change in their spread. Negative means more uniform — an improvement or a regression depending on which way the mean went |
+| `standard_deviation_delta` | `float` | `-√0.5 … √0.5` | Change in their spread. Negative means more uniform — an improvement or a regression depending on which way the mean went |
 | `average_criterion_score_delta` | `float` | `-maximum … maximum` | Change on the runs' shared raw scale, ignoring weights and case boundaries. Moves independently of `average_score_delta` |
 | `criteria_fulfillment_rate_delta` | `float` | `-1 … 1` | Change in the mean share of criteria counting as covered |
 | `cases_with_score_zero_count_delta` | `int` | `-total_cases … total_cases` | Change in how many answers missed completely. **Negative is the good direction here** |
@@ -1171,7 +1171,7 @@ echoed back:
 | Situation | Library | HTTP |
 |---|---|---|
 | `criteria`, `cases`, `criterion_results` or `case_results` empty; duplicate ids in any of them; `content` blank; `weight` `0`, negative, `Infinity` or `NaN`; missing field | `pydantic.ValidationError` | `422` |
-| A run posted to `/compare` whose numbers leave the ranges the [output tables](#outputs) give — a score above its own `scale.maximum` or off `0 … 1`, a non-positive weight, any `Infinity` or `NaN` | `pydantic.ValidationError` | `422` |
+| A run posted to `/compare` whose numbers leave the ranges the [output tables](#outputs) give — a score above its own `scale.maximum` or off `0 … 1`, a non-positive weight, any `Infinity` or `NaN`, a `variance` or `standard_deviation` no distribution of case scores could produce, or `RunMetrics` id lists naming more cases than `total_cases` | `pydantic.ValidationError` | `422` |
 | A `CaseResult` posted without its `scale` — no default stands in, because one would decide the unit of every score under it | `pydantic.ValidationError` | `422` |
 | A run whose cases name more than one `scale`; a result whose `is_present` contradicts its own score | `pydantic.ValidationError` | `422` |
 | A `Scale` whose `presence_threshold` is above its `maximum`, so no criterion could ever count as covered | `pydantic.ValidationError` | `422` |

@@ -1,8 +1,10 @@
 import itertools
 import math
 import statistics
+from typing import Any
 
 import pytest
+from pydantic import ValidationError
 
 from rubric_eval.metrics import case_score, run_metrics
 from rubric_eval.models import (
@@ -11,6 +13,7 @@ from rubric_eval.models import (
     CaseResult,
     Criterion,
     CriterionResult,
+    RunMetrics,
 )
 
 
@@ -185,7 +188,7 @@ def test_a_run_loaded_back_from_stored_rows_is_aggregated_like_a_fresh_one():
             {"criterion_id": 1, "weight": 1.0, "score": 0.0, "is_present": False}]},
     ]
 
-    metrics = run_metrics([CaseResult(**row) for row in rows])
+    metrics = run_metrics([CaseResult.model_validate(row) for row in rows])
 
     assert metrics.average_score == pytest.approx(0.375)
     assert metrics.cases_with_score_zero == [2]
@@ -250,3 +253,62 @@ def test_the_readme_run_example_reports_exactly_the_documented_numbers():
         "cases_with_score_zero_count": 1,
         "weakest_cases_above_zero": [1],
     }
+
+
+# ------------------------------------------- the ranges the reference table states are enforced
+
+
+def _stored_metrics(**overrides: object) -> dict[str, Any]:
+    """A real run's metrics as JSON, with one field edited — the shape `/compare` takes in."""
+    widest = run_metrics([_case(1, _result(1, 2)), _case(2, _result(1, 0))])
+    return {**widest.model_dump(), **overrides}
+
+
+def test_the_widest_run_there_can_be_lands_exactly_on_the_documented_bounds():
+    """The bounds are only defensible if a legitimate run can reach them. Half the cases at 0
+    and half at 1 is as far apart as case scores in [0, 1] get, and two such cases produce
+    exactly the 0.5 and the sqrt(0.5) the reference table names."""
+    metrics = run_metrics([_case(1, _result(1, 2)), _case(2, _result(1, 0))])
+
+    assert metrics.variance == 0.5
+    assert metrics.standard_deviation == math.sqrt(0.5)
+    assert RunMetrics.model_validate(metrics.model_dump()) == metrics
+
+
+def test_a_stored_run_cannot_claim_a_variance_no_case_scores_could_produce():
+    """`variance` is documented as `0 … 0.5` because the case scores under it are bounded
+    0..1. A stored run is postable to `/compare`, where `variance_delta` subtracts it — so a
+    run claiming 9.0 would hand back a delta of 8.5 with a 200."""
+    with pytest.raises(ValidationError, match="less than or equal to 0.5"):
+        RunMetrics.model_validate(_stored_metrics(variance=9.0))
+
+
+def test_a_stored_run_cannot_claim_a_standard_deviation_off_the_same_bound():
+    """The root of a bounded variance is bounded too, and `standard_deviation_delta` inherits
+    it exactly as `variance_delta` does."""
+    with pytest.raises(ValidationError, match="less than or equal to 0.7071"):
+        RunMetrics.model_validate(_stored_metrics(standard_deviation=9.0))
+
+
+def test_the_weakest_case_shortlist_is_refused_rather_than_truncated_when_it_is_too_long():
+    """Documented as up to `WEAKEST_CASES_REPORTED` entries. Truncating a longer one read
+    back from JSON would quietly drop ids a reader is being pointed at."""
+    with pytest.raises(ValidationError, match="at most 5 items"):
+        RunMetrics.model_validate(_stored_metrics(weakest_cases_above_zero=[1, 2, 3, 4, 5, 6]))
+
+
+def test_a_stored_run_cannot_name_more_cases_than_it_says_it_holds():
+    """The two id lists describe disjoint sets — a case scored 0 or it did not — so together
+    they cannot name more cases than `total_cases`. `cases_with_score_zero_count` is derived
+    from the first of them, and `/compare` subtracts that count."""
+    with pytest.raises(ValidationError, match="2 cases name 5 of them"):
+        RunMetrics.model_validate(_stored_metrics(cases_with_score_zero=[2, 3, 4, 5]))
+
+
+def test_a_run_may_name_every_case_it_holds():
+    """The other side of that check: a run in which every answer missed its rubric completely
+    names all of its cases, and that is a real run and not an edited one."""
+    metrics = run_metrics([_case(number, _result(1, 0)) for number in range(1, 6)])
+
+    assert metrics.cases_with_score_zero == [1, 2, 3, 4, 5]
+    assert RunMetrics.model_validate(metrics.model_dump()) == metrics

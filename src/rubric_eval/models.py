@@ -33,6 +33,14 @@ SCORE_EQUALITY_TOLERANCE = 1e-9
 float noise two runs accumulate summing the same weights in a different order, and far below
 the smallest score difference a rubric can actually produce."""
 
+_WIDEST_SCORE_VARIANCE = 0.5
+"""The largest sample variance a run of case scores can reach, since every case score lies in
+[0, 1]: the widest run there is puts half its cases at 0 and half at 1, and two such cases
+land on exactly this."""
+
+_WIDEST_SCORE_STANDARD_DEVIATION = math.sqrt(_WIDEST_SCORE_VARIANCE)
+"""Its square root, and therefore the same bound expressed in score units."""
+
 
 Identifier = TypeVar("Identifier", int, str)
 """The two kinds of identifier this package matches things back by: the integer ids of cases
@@ -906,12 +914,17 @@ class RunMetrics(DocumentedModel):
     """Middle case score. Next to the mean it shows skew: far above it means a few
     catastrophic cases drag an otherwise solid run down."""
 
-    variance: float = Field(ge=0, allow_inf_nan=False)
-    """Sample variance of the case scores, 0.0 for a single case (which has no spread)."""
+    variance: float = Field(ge=0, le=_WIDEST_SCORE_VARIANCE, allow_inf_nan=False)
+    """Sample variance of the case scores, 0.0 for a single case (which has no spread). Never
+    above 0.5, because the case scores it describes are themselves bounded 0..1 — a stored run
+    claiming more is describing no distribution of case scores at all."""
 
-    standard_deviation: float = Field(ge=0, allow_inf_nan=False)
+    standard_deviation: float = Field(
+        ge=0, le=_WIDEST_SCORE_STANDARD_DEVIATION, allow_inf_nan=False
+    )
     """Square root of `variance`, in the same unit as the scores. Small means the system is
-    uniformly good or bad; large means it depends heavily on the question."""
+    uniformly good or bad; large means it depends heavily on the question. Bounded by the
+    square root of the same 0.5, for the same reason."""
 
     average_criterion_score: float = Field(ge=0, allow_inf_nan=False)
     """Mean judge score over *all* criteria of all cases, on the **raw** scale of the run and
@@ -930,10 +943,28 @@ class RunMetrics(DocumentedModel):
     """Ids of the cases that scored exactly 0 — the answers that missed the rubric
     completely. These are the ones to read first."""
 
-    weakest_cases_above_zero: list[int]
+    weakest_cases_above_zero: list[int] = Field(max_length=WEAKEST_CASES_REPORTED)
     """Ids of the up to `WEAKEST_CASES_REPORTED` lowest-scoring cases that scored above 0,
     weakest first. Listed apart from `cases_with_score_zero` because a total miss and a
-    partial answer usually have different causes."""
+    partial answer usually have different causes. A shortlist and not a ranking, so its length
+    is a promise: a longer one read back from JSON is refused rather than truncated."""
+
+    @model_validator(mode="after")
+    def _reject_naming_more_cases_than_the_run_holds(self) -> "RunMetrics":
+        """Exists because the two id lists are claims, and a stored run can be edited.
+
+        They name disjoint sets of cases — a case scored 0 or it did not — so together they
+        can never name more cases than the run has. Unchecked, a stored run could report six
+        total misses out of three cases, and `/compare` would subtract that count.
+        """
+        named = len(self.cases_with_score_zero) + len(self.weakest_cases_above_zero)
+        if named > self.total_cases:
+            raise ValueError(
+                f"metrics over {self.total_cases} cases name {named} of them: "
+                f"cases_with_score_zero {self.cases_with_score_zero} and "
+                f"weakest_cases_above_zero {self.weakest_cases_above_zero}"
+            )
+        return self
 
     @computed_field
     @property
