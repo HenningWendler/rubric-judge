@@ -69,14 +69,14 @@ async def evaluate_case(judge: Judge, case: Case) -> CaseResult:
         result.score                             # 1.0
         result.criterion_results[0].reasoning    # "The answer instructs the reader to ..."
     """
-    results = await asyncio.gather(
+    criterion_results = await asyncio.gather(
         *(_judge_criterion(judge, case, criterion) for criterion in case.criteria)
     )
     return CaseResult(
         case_id=case.id,
-        score=case_score(results, judge.scale),
+        score=case_score(criterion_results, judge.scale),
         scale=judge.scale,
-        criterion_results=results,
+        criterion_results=criterion_results,
         labels=case.labels,
     )
 
@@ -127,14 +127,14 @@ async def evaluate_run(judge: Judge, run: Run) -> RunResult:
         run_result.label_metrics[0].label          # "table"
         run_result.case_results[0].score           # 1.0  — every result is still there
     """
-    results = await asyncio.gather(
+    case_results = await asyncio.gather(
         *(evaluate_case(judge, case) for case in run.selected_cases)
     )
     return RunResult(
-        metrics=run_metrics(results),
-        label_metrics=label_metrics(results),
+        metrics=run_metrics(case_results),
+        label_metrics=label_metrics(case_results),
         applied_label_filter=run.label_filter,
-        case_results=results,
+        case_results=case_results,
     )
 
 

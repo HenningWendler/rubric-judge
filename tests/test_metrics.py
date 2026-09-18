@@ -79,9 +79,11 @@ def test_huge_weights_do_not_overflow_the_weight_sum():
 
 
 def _case(case_id: int, *verdicts: CriterionResult) -> CaseResult:
-    results = list(verdicts)
+    criterion_results = list(verdicts)
     return CaseResult(
-        case_id=case_id, score=case_score(results, DEFAULT_SCALE), criterion_results=results
+        case_id=case_id,
+        score=case_score(criterion_results, DEFAULT_SCALE),
+        criterion_results=criterion_results,
     )
 
 

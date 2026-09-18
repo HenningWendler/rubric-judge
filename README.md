@@ -579,7 +579,7 @@ different cases. Raises `TypeError` for a flat `["table"]`, which would otherwis
 characters and quietly return the wrong cases.
 
 ```python
-def run_metrics(results: list[CaseResult]) -> RunMetrics
+def run_metrics(case_results: list[CaseResult]) -> RunMetrics
 ```
 The aggregate on its own — use it when you already have case results (loaded from disk,
 say) and only want the numbers. Raises `ValueError` on an empty list, or on cases judged on
@@ -587,14 +587,14 @@ different scales: `average_criterion_score` averages raw grades, and grades in t
 not average.
 
 ```python
-def label_metrics(results: list[CaseResult]) -> list[LabelMetrics]
+def label_metrics(case_results: list[CaseResult]) -> list[LabelMetrics]
 ```
 The per-label breakdown on its own, alphabetical. Public for the same reason `run_metrics`
 is: a run read back from disk months later can still be sliced. `[]` when no case carries a
 label.
 
 ```python
-def case_score(results: list[CriterionResult], scale: Scale) -> float
+def case_score(criterion_results: list[CriterionResult], scale: Scale) -> float
 ```
 The weighted formula alone, `→ [0, 1]`. Dividing by `scale.maximum` is what makes the result
 scale-free. Raises `ValueError` on an empty list, or when a verdict is graded above the scale.

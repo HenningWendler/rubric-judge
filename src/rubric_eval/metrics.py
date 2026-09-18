@@ -23,7 +23,7 @@ from rubric_eval.models import (
 )
 
 
-def case_score(results: list[CriterionResult], scale: Scale) -> float:
+def case_score(criterion_results: list[CriterionResult], scale: Scale) -> float:
     """The weighted share of the reachable points, normalized to [0, 1].
 
         score = sum(wi * si / scale.maximum) / sum(wi)
@@ -34,8 +34,8 @@ def case_score(results: list[CriterionResult], scale: Scale) -> float:
     number is normalized rather than reported raw.
 
     Args:
-        results: The verdicts of one case, all of them. Only `weight` and `score` are read,
-            so results loaded back from a stored run score identically.
+        criterion_results: The verdicts of one case, all of them. Only `weight` and `score`
+            are read, so results loaded back from a stored run score identically.
         scale: The scale they were given on — `CaseResult.scale`, or `judge.scale` while the
             case result is still being built. A verdict does not carry it: one case is judged
             by one judge on one scale, so one copy per case is the honest place for it.
@@ -54,29 +54,32 @@ def case_score(results: list[CriterionResult], scale: Scale) -> float:
     Example:
         Weights 3, 2, 1 scored 2, 1, 0 reach 3.0 + 1.0 + 0.0 of 6 possible points:
 
-        case_score(results, DEFAULT_SCALE)   # 0.667
+        case_score(criterion_results, DEFAULT_SCALE)   # 0.667
     """
-    if not results:
+    if not criterion_results:
         raise ValueError("a case score needs at least one criterion")
-    scores_must_fit(results, scale)
-    weights = _weights_scaled_to_at_most_one(results)
+    scores_must_fit(criterion_results, scale)
+    weights = _weights_scaled_to_at_most_one(criterion_results)
     reached_points = sum(
-        weight * result.score / scale.maximum for weight, result in zip(weights, results)
+        weight * result.score / scale.maximum
+        for weight, result in zip(weights, criterion_results)
     )
     reachable_points = sum(weights)
     return reached_points / reachable_points
 
 
-def _weights_scaled_to_at_most_one(results: list[CriterionResult]) -> list[float]:
+def _weights_scaled_to_at_most_one(
+    criterion_results: list[CriterionResult],
+) -> list[float]:
     """Only weight *ratios* matter, so dividing every weight by the largest one leaves every
     score untouched — but it keeps both sums inside the float range. Summed raw, two weights
     of 1e308 overflow to `inf`, and `inf / inf` would make the whole case score `nan`.
     """
-    largest_weight = max(result.weight for result in results)
-    return [result.weight / largest_weight for result in results]
+    largest_weight = max(result.weight for result in criterion_results)
+    return [result.weight / largest_weight for result in criterion_results]
 
 
-def run_metrics(results: list[CaseResult]) -> RunMetrics:
+def run_metrics(case_results: list[CaseResult]) -> RunMetrics:
     """Aggregate the case results of one run into the numbers that run is judged by.
 
     Reads as its parts: a distribution over the case scores, two views on the criteria
@@ -86,7 +89,7 @@ def run_metrics(results: list[CaseResult]) -> RunMetrics:
     back from a stored run, for instance.
 
     Args:
-        results: One `CaseResult` per case of the run. Order is irrelevant; every case
+        case_results: One `CaseResult` per case of the run. Order is irrelevant; every case
             counts exactly once, whatever the size of its rubric, so that one case with 20
             criteria cannot outvote nineteen cases with one.
 
@@ -107,25 +110,25 @@ def run_metrics(results: list[CaseResult]) -> RunMetrics:
         metrics.average_score            # 0.5
         metrics.average_criterion_score  # 1.4 — on the run's raw scale, not on 0..1
     """
-    if not results:
+    if not case_results:
         raise ValueError("run metrics need at least one case")
-    one_scale_of(result.scale for result in results)
-    scores = [result.score for result in results]
+    one_scale_of(result.scale for result in case_results)
+    scores = [result.score for result in case_results]
     variance = _variance(scores)
     return RunMetrics(
-        total_cases=len(results),
+        total_cases=len(case_results),
         average_score=statistics.mean(scores),
         median_score=statistics.median(scores),
         variance=variance,
         standard_deviation=math.sqrt(variance),
-        average_criterion_score=statistics.mean(_every_criterion_score(results)),
-        criteria_fulfillment_rate=statistics.mean(_fulfillment_rate_per_case(results)),
-        cases_with_score_zero=_case_ids_scoring_zero(results),
-        weakest_cases_above_zero=_weakest_case_ids_above_zero(results),
+        average_criterion_score=statistics.mean(_every_criterion_score(case_results)),
+        criteria_fulfillment_rate=statistics.mean(_fulfillment_rate_per_case(case_results)),
+        cases_with_score_zero=_case_ids_scoring_zero(case_results),
+        weakest_cases_above_zero=_weakest_case_ids_above_zero(case_results),
     )
 
 
-def label_metrics(results: list[CaseResult]) -> list[LabelMetrics]:
+def label_metrics(case_results: list[CaseResult]) -> list[LabelMetrics]:
     """Slice a run once per label: the same metrics over only the cases carrying each one.
 
     The breakdown that says *which kind* of case a bad average is made of — a run averaging
@@ -140,11 +143,11 @@ def label_metrics(results: list[CaseResult]) -> list[LabelMetrics]:
     labelling, once you have added the labels to its results.
 
     Args:
-        results: The case results of one run, in any order. Only `labels` decides which
+        case_results: The case results of one run, in any order. Only `labels` decides which
             bucket a case lands in; everything else is handed to `run_metrics` unchanged.
 
     Returns:
-        One `LabelMetrics` per label occurring anywhere in `results`, in alphabetical label
+        One `LabelMetrics` per label occurring anywhere in them, in alphabetical label
         order so the document does not depend on the run's storage order. Empty when no case
         carries a label — which is the honest answer, not a missing breakdown.
 
@@ -159,24 +162,26 @@ def label_metrics(results: list[CaseResult]) -> list[LabelMetrics]:
         buckets[0].metrics.average_score   # 0.013
     """
     return [
-        LabelMetrics(label=label, metrics=run_metrics(_cases_carrying(label, results)))
-        for label in _labels_present_in(results)
+        LabelMetrics(label=label, metrics=run_metrics(_cases_carrying(label, case_results)))
+        for label in _labels_present_in(case_results)
     ]
 
 
-def _labels_present_in(results: list[CaseResult]) -> list[str]:
+def _labels_present_in(case_results: list[CaseResult]) -> list[str]:
     """Which buckets there are to build, alphabetically — a set so a label shared by forty
     cases opens one bucket, sorted so the breakdown reads the same whatever order the run was
     stored in."""
-    return sorted({label for result in results for label in result.labels})
+    return sorted({label for result in case_results for label in result.labels})
 
 
-def _cases_carrying(label: str, results: list[CaseResult]) -> list[CaseResult]:
+def _cases_carrying(label: str, case_results: list[CaseResult]) -> list[CaseResult]:
     """One bucket's cases. "Carries this label", never "is exactly this label": the question a
     bucket answers is how the cases *involving* tables do, and a case tagged both `table` and
     `images` is one of them. Through the same predicate `filter_cases_by_labels` uses, so
     a bucket and the filter of the same name can never select different cases."""
-    return [result for result in results if carries_every_label(result.labels, [label])]
+    return [
+        result for result in case_results if carries_every_label(result.labels, [label])
+    ]
 
 
 def _variance(scores: list[float]) -> float:
@@ -188,12 +193,16 @@ def _variance(scores: list[float]) -> float:
     return statistics.variance(scores) if len(scores) > 1 else 0.0
 
 
-def _every_criterion_score(results: list[CaseResult]) -> list[float]:
+def _every_criterion_score(case_results: list[CaseResult]) -> list[float]:
     """All criteria of the run in one flat list — case boundaries and weights ignored."""
-    return [criterion.score for result in results for criterion in result.criterion_results]
+    return [
+        criterion.score
+        for result in case_results
+        for criterion in result.criterion_results
+    ]
 
 
-def _fulfillment_rate_per_case(results: list[CaseResult]) -> list[float]:
+def _fulfillment_rate_per_case(case_results: list[CaseResult]) -> list[float]:
     """One rate per case, never one rate over all criteria: averaging the cases afterwards is
     what keeps a case with a 20-criteria rubric from outweighing nineteen short ones.
 
@@ -202,18 +211,18 @@ def _fulfillment_rate_per_case(results: list[CaseResult]) -> list[float]:
     return [
         sum(criterion.is_present for criterion in result.criterion_results)
         / len(result.criterion_results)
-        for result in results
+        for result in case_results
     ]
 
 
-def _case_ids_scoring_zero(results: list[CaseResult]) -> list[int]:
-    return [result.case_id for result in results if result.score == 0.0]
+def _case_ids_scoring_zero(case_results: list[CaseResult]) -> list[int]:
+    return [result.case_id for result in case_results if result.score == 0.0]
 
 
-def _weakest_case_ids_above_zero(results: list[CaseResult]) -> list[int]:
+def _weakest_case_ids_above_zero(case_results: list[CaseResult]) -> list[int]:
     """The weakest cases that still scored something, weakest first. Cases at exactly 0 are
     reported separately, so this list does not fill up with them and hide the near misses."""
     above_zero = sorted(
-        (result for result in results if result.score > 0), key=attrgetter("score")
+        (result for result in case_results if result.score > 0), key=attrgetter("score")
     )
     return [result.case_id for result in above_zero[:WEAKEST_CASES_REPORTED]]
