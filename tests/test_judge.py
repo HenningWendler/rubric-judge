@@ -172,31 +172,30 @@ def test_rejects_a_fractional_score_off_the_integral_scale():
         parse_judge_reply('Reasoning.\n{"score": 1.5}', DEFAULT_SCALE)
 
 
-def test_names_every_missing_environment_variable_at_once(monkeypatch):
+REQUIRED_ENVIRONMENT = {
+    "RUBRIC_EVAL_JUDGE_ENDPOINT": "http://x/v1",
+    "RUBRIC_EVAL_JUDGE_API_KEY": "k",
+    "RUBRIC_EVAL_JUDGE_MODEL": "m",
+}
+"""The three variables a config cannot be built without. Every policy test starts from these
+and breaks or adds exactly the one variable it is about — `from_mapping` takes the whole
+environment as an argument, so none of them touches the process's own."""
+
+
+def test_names_every_missing_environment_variable_at_once():
     """One start per missing variable is misery, so the complaint lists all of them.
     The order they are listed in is incidental and deliberately not asserted."""
-    required = (
-        "RUBRIC_EVAL_JUDGE_ENDPOINT",
-        "RUBRIC_EVAL_JUDGE_API_KEY",
-        "RUBRIC_EVAL_JUDGE_MODEL",
-    )
-    for variable in required:
-        monkeypatch.delenv(variable, raising=False)
-
     with pytest.raises(RuntimeError) as complaint:
-        JudgeConfig.from_env()
+        JudgeConfig.from_mapping({})
 
-    unnamed = [variable for variable in required if variable not in str(complaint.value)]
+    unnamed = [name for name in REQUIRED_ENVIRONMENT if name not in str(complaint.value)]
     assert unnamed == []
 
 
-def test_unset_optional_variables_keep_the_field_defaults(monkeypatch):
-    monkeypatch.setenv("RUBRIC_EVAL_JUDGE_ENDPOINT", "http://x/v1")
-    monkeypatch.setenv("RUBRIC_EVAL_JUDGE_API_KEY", "k")
-    monkeypatch.setenv("RUBRIC_EVAL_JUDGE_MODEL", "m")
-    monkeypatch.delenv("RUBRIC_EVAL_JUDGE_TEMPERATURE", raising=False)
-    monkeypatch.setenv("RUBRIC_EVAL_JUDGE_MAX_ATTEMPTS", "5")
-    config = JudgeConfig.from_env()
+def test_unset_optional_variables_keep_the_field_defaults():
+    config = JudgeConfig.from_mapping(
+        {**REQUIRED_ENVIRONMENT, "RUBRIC_EVAL_JUDGE_MAX_ATTEMPTS": "5"}
+    )
     assert config.temperature == 0.0
     assert config.max_attempts == 5
 
@@ -456,25 +455,18 @@ def test_a_negative_temperature_is_rejected():
         JudgeConfig(model="m", endpoint="http://x/v1", api_key="k", temperature=-1.0)
 
 
-def test_an_empty_required_environment_variable_is_refused(monkeypatch):
+def test_an_empty_required_environment_variable_is_refused():
     """`export RUBRIC_EVAL_JUDGE_API_KEY=` is a typo, not a configuration — an empty key would
     otherwise reach the endpoint and fail there with an unrelated 401."""
-    monkeypatch.setenv("RUBRIC_EVAL_JUDGE_ENDPOINT", "http://x/v1")
-    monkeypatch.setenv("RUBRIC_EVAL_JUDGE_API_KEY", "")
-    monkeypatch.setenv("RUBRIC_EVAL_JUDGE_MODEL", "m")
-
     with pytest.raises(RuntimeError, match="RUBRIC_EVAL_JUDGE_API_KEY"):
-        JudgeConfig.from_env()
+        JudgeConfig.from_mapping({**REQUIRED_ENVIRONMENT, "RUBRIC_EVAL_JUDGE_API_KEY": ""})
 
 
-def test_a_non_numeric_environment_value_names_the_offending_setting(monkeypatch):
-    monkeypatch.setenv("RUBRIC_EVAL_JUDGE_ENDPOINT", "http://x/v1")
-    monkeypatch.setenv("RUBRIC_EVAL_JUDGE_API_KEY", "k")
-    monkeypatch.setenv("RUBRIC_EVAL_JUDGE_MODEL", "m")
-    monkeypatch.setenv("RUBRIC_EVAL_JUDGE_TEMPERATURE", "warm")
-
+def test_a_non_numeric_environment_value_names_the_offending_setting():
     with pytest.raises(ValueError, match="temperature"):
-        JudgeConfig.from_env()
+        JudgeConfig.from_mapping(
+            {**REQUIRED_ENVIRONMENT, "RUBRIC_EVAL_JUDGE_TEMPERATURE": "warm"}
+        )
 
 
 # --- throttling -----------------------------------------------------------------------------
@@ -532,10 +524,12 @@ def test_a_concurrency_limit_below_one_is_rejected():
 
 
 def test_the_concurrency_limit_is_read_from_the_environment(monkeypatch):
-    monkeypatch.setenv("RUBRIC_EVAL_JUDGE_ENDPOINT", "http://x/v1")
-    monkeypatch.setenv("RUBRIC_EVAL_JUDGE_API_KEY", "k")
-    monkeypatch.setenv("RUBRIC_EVAL_JUDGE_MODEL", "m")
-    monkeypatch.setenv("RUBRIC_EVAL_JUDGE_MAX_CONCURRENT", "16")
+    """The one test that goes through `from_env` and the real process environment: what the
+    rules are is `from_mapping`'s business and is tested on plain dicts, but that the wrapper
+    actually hands it `os.environ` is only visible here."""
+    exported = {**REQUIRED_ENVIRONMENT, "RUBRIC_EVAL_JUDGE_MAX_CONCURRENT": "16"}
+    for variable, value in exported.items():
+        monkeypatch.setenv(variable, value)
 
     assert JudgeConfig.from_env().max_concurrent == 16
 
@@ -691,21 +685,19 @@ async def test_a_custom_prompt_replaces_the_system_message():
     assert "Send an email" in user["content"]
 
 
-def test_an_empty_optional_environment_variable_is_refused_like_an_empty_required_one(
-    monkeypatch,
-):
+def test_an_empty_optional_environment_variable_is_refused_like_an_empty_required_one():
     """`MAX_CONCURRENT=` is a half-finished export, exactly as `API_KEY=` is. One condition
     gets one policy: falling back to the field default here would swallow the same typo the
     required variables are refused for, and the process would start on settings nobody
     chose. Both offending variables are named, not only the first."""
-    monkeypatch.setenv("RUBRIC_EVAL_JUDGE_ENDPOINT", "http://x/v1")
-    monkeypatch.setenv("RUBRIC_EVAL_JUDGE_API_KEY", "k")
-    monkeypatch.setenv("RUBRIC_EVAL_JUDGE_MODEL", "m")
-    monkeypatch.setenv("RUBRIC_EVAL_JUDGE_MAX_CONCURRENT", "")
-    monkeypatch.setenv("RUBRIC_EVAL_JUDGE_TEMPERATURE", "")
-
     with pytest.raises(RuntimeError) as complaint:
-        JudgeConfig.from_env()
+        JudgeConfig.from_mapping(
+            {
+                **REQUIRED_ENVIRONMENT,
+                "RUBRIC_EVAL_JUDGE_MAX_CONCURRENT": "",
+                "RUBRIC_EVAL_JUDGE_TEMPERATURE": "",
+            }
+        )
 
     assert "RUBRIC_EVAL_JUDGE_MAX_CONCURRENT" in str(complaint.value)
     assert "RUBRIC_EVAL_JUDGE_TEMPERATURE" in str(complaint.value)

@@ -8,6 +8,7 @@ import asyncio
 import json
 import os
 import re
+from collections.abc import Mapping
 from typing import Protocol
 
 from openai import APIConnectionError, AsyncOpenAI, InternalServerError, RateLimitError
@@ -185,16 +186,42 @@ class JudgeConfig(DocumentedModel):
 
     @classmethod
     def from_env(cls) -> "JudgeConfig":
-        """Build the config from `RUBRIC_EVAL_JUDGE_*` environment variables.
+        """Build the config from the process's `RUBRIC_EVAL_JUDGE_*` environment variables.
+
+        The one place in the library that reads `os.environ`; everything it then decides is
+        `from_mapping`, which is where the rules and the wording of the complaints live.
+
+        Returns:
+            A validated `JudgeConfig`, exactly as `from_mapping(os.environ)` builds it.
+
+        Raises:
+            RuntimeError: A required variable is missing, or any variable is set to the empty
+                string — see `from_mapping`.
+            ValidationError: A numeric variable does not parse or is out of range.
+
+        Example:
+            JudgeConfig.from_env().model   # "gpt-4o-mini", with RUBRIC_EVAL_JUDGE_MODEL set
+        """
+        return cls.from_mapping(os.environ)
+
+    @classmethod
+    def from_mapping(cls, environment: Mapping[str, str]) -> "JudgeConfig":
+        """Build the config from a mapping of `RUBRIC_EVAL_JUDGE_*` variables to their values.
 
         Reads `ENDPOINT`, `API_KEY`, `MODEL` (all required) plus `TEMPERATURE`,
         `MAX_TOKENS`, `MAX_ATTEMPTS` and `MAX_CONCURRENT`, each prefixed
-        `RUBRIC_EVAL_JUDGE_`. An optional variable that is not set at all is not passed on,
-        so the field defaults above stay the single source of truth for it.
+        `RUBRIC_EVAL_JUDGE_`. An optional variable that is absent is not passed on, so the
+        field defaults above stay the single source of truth for it.
 
-        Exporting a variable *empty* is a half-finished configuration and is refused for
-        every variable alike, required or optional — one condition cannot mean "your key is
-        missing" on one line and "take the default" on the next.
+        A variable set to the *empty* string is a half-finished configuration and is refused
+        for every variable alike, required or optional — one condition cannot mean "your key
+        is missing" on one line and "take the default" on the next.
+
+        Args:
+            environment: Variable name to value, `os.environ` in production and a plain dict
+                anywhere else. Names outside the `RUBRIC_EVAL_JUDGE_*` set above are ignored,
+                so the whole process environment can be handed in. Values are the strings
+                they are exported as; an empty one is refused rather than read as "unset".
 
         Returns:
             A validated `JudgeConfig`. Numeric variables are parsed and range-checked by
@@ -206,6 +233,15 @@ class JudgeConfig(DocumentedModel):
                 each one is — fixing configuration one error per restart is misery.
             ValidationError: A numeric variable does not parse or is out of range. The
                 message names the offending setting.
+
+        Example:
+            JudgeConfig.from_mapping(
+                {
+                    "RUBRIC_EVAL_JUDGE_ENDPOINT": "http://localhost:11434/v1",
+                    "RUBRIC_EVAL_JUDGE_API_KEY": "ollama",
+                    "RUBRIC_EVAL_JUDGE_MODEL": "qwen3:8b",
+                }
+            ).max_attempts   # 3, the field default
         """
         variable_per_field = {
             "endpoint": "RUBRIC_EVAL_JUDGE_ENDPOINT",
@@ -220,20 +256,20 @@ class JudgeConfig(DocumentedModel):
         unusable = [
             f"{variable} is missing"
             for field, variable in variable_per_field.items()
-            if field in required_fields and variable not in os.environ
+            if field in required_fields and variable not in environment
         ] + [
             f"{variable} is empty"
             for variable in variable_per_field.values()
-            if os.environ.get(variable) == ""
+            if environment.get(variable) == ""
         ]
         if unusable:
             raise RuntimeError(f"Unusable environment variables: {', '.join(unusable)}")
 
         return cls(
             **{
-                field: os.environ[variable]
+                field: environment[variable]
                 for field, variable in variable_per_field.items()
-                if variable in os.environ
+                if variable in environment
             }
         )
 

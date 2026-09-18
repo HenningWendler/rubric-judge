@@ -646,9 +646,13 @@ class JudgeConfig:
 
     @classmethod
     def from_env(cls) -> JudgeConfig
+    @classmethod
+    def from_mapping(cls, environment: Mapping[str, str]) -> JudgeConfig
 ```
-`from_env()` reads the variables from [Configure](#configure). Build it by hand in tests or
-when your settings come from elsewhere:
+`from_env()` reads the variables from [Configure](#configure) out of `os.environ`;
+`from_mapping()` applies the same rules to any mapping you hand it — settings loaded from a
+file, or a plain dict in a test. Both raise `RuntimeError` naming **every** missing or empty
+variable at once. Build it by hand in tests or when your settings come from elsewhere:
 
 ```python
 JudgeConfig(model="qwen3:8b", endpoint="http://localhost:11434/v1", api_key="ollama")
