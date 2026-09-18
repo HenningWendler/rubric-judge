@@ -85,12 +85,11 @@ class JudgeReply(DocumentedModel):
     """
 
     score: int
-    """The grade the model named, on the integral scale the judge works on — already checked
-    to be one of `Scale.grades`, so it is an `int` and not a float that happens to be whole.
-    `CriterionResult.score` is a float because it may later be averaged over repeated runs;
-    the widening between the two is spelled out at the one place it happens rather than left
-    to Pydantic, so that a float arriving here would be a loud error and not a silent
-    grade."""
+    """The grade the model named, checked to be one of `Scale.grades` before this object
+    exists — hence a whole number, and typed as one. `CriterionResult.score` is a float
+    instead, because it may one day be an average over repeated runs of the same criterion;
+    `evaluation._judge_criterion` is the single place that widens the one into the other, and
+    it does so in writing rather than leaving it to Pydantic's coercion."""
 
     reasoning: str
     """The judge's argument: everything it wrote before the closing JSON object."""
@@ -305,8 +304,9 @@ class OpenAIJudge:
             first and closes with a single `{"score": <grade>}` object, and the prose scale it
             describes is `scale`.
         scale: The grading scale this judge answers on. When it describes its levels, the
-            prompt is written from it by `prompt.judge_prompt` and `prompt` can be left out;
-            when it does not, there is nothing to instruct the model with — see Raises.
+            prompt is written from it by `prompt.judge_prompt` and `system_prompt` can be
+            left out; when it does not, there is nothing to instruct the model with — see
+            Raises.
 
     Raises:
         ValueError: `scale` describes no levels and no `system_prompt` was given. Refused at
