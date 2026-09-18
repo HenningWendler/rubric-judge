@@ -1,5 +1,7 @@
-"""Scoring: one case folded into one number, a whole run folded into its metrics, and that
-run sliced once per label.
+"""Scoring: case scores, the run metrics over them, and the same metrics per label.
+
+One case folded into one number, a whole run folded into its metrics, and that run sliced
+once per label.
 
 Every number here is folded from criterion results the judge really gave: a run that lost
 one to an outage is invalidated before it gets this far, so no average is quietly depressed
@@ -55,7 +57,12 @@ def case_score(criterion_results: list[CriterionResult], scale: Scale) -> float:
     Example:
         Weights 3, 2, 1 scored 2, 1, 0 reach 3.0 + 1.0 + 0.0 of 6 possible points:
 
-        case_score(criterion_results, DEFAULT_SCALE)   # 0.667
+        criterion_results = [
+            CriterionResult.judged(Criterion(id=1, content="a", weight=3), 2.0, None, DEFAULT_SCALE),
+            CriterionResult.judged(Criterion(id=2, content="b", weight=2), 1.0, None, DEFAULT_SCALE),
+            CriterionResult.judged(Criterion(id=3, content="c", weight=1), 0.0, None, DEFAULT_SCALE),
+        ]
+        case_score(criterion_results, DEFAULT_SCALE)   # 0.6666666666666666
     """
     if not criterion_results:
         raise ValueError("a case score needs at least one criterion")
@@ -72,9 +79,18 @@ def case_score(criterion_results: list[CriterionResult], scale: Scale) -> float:
 def _weights_scaled_to_at_most_one(
     criterion_results: list[CriterionResult],
 ) -> list[float]:
-    """Only weight *ratios* matter, so dividing every weight by the largest one leaves every
-    score untouched — but it keeps both sums inside the float range. Summed raw, two weights
-    of 1e308 overflow to `inf`, and `inf / inf` would make the whole case score `nan`.
+    """Bring a case's weights into a range whose sums cannot overflow.
+
+    Args:
+        criterion_results: The results of one case, at least one, each carrying a positive
+            finite weight — `CriterionResult` enforces both, so nothing here re-checks them.
+
+    Returns:
+        One weight per result, in the given order, each divided by the largest of them: the
+        largest comes back as exactly 1.0 and every other lies in (0, 1]. Only weight
+        *ratios* decide a case score, so this leaves every score untouched — but summed raw,
+        two weights of 1e308 overflow to `inf` and `inf / inf` would make the case score
+        `nan`.
     """
     largest_weight = max(
         criterion_result.weight for criterion_result in criterion_results
@@ -111,9 +127,10 @@ def run_metrics(case_results: list[CaseResult]) -> RunMetrics:
             and must not hand back a number nobody can interpret.
 
     Example:
-        metrics = run_metrics([CaseResult(**row) for row in json.load(file)])
+        metrics = run_metrics(run_result.case_results)
         metrics.average_score            # 0.5
-        metrics.average_criterion_score  # 1.4 — on the run's raw scale, not on 0..1
+        metrics.average_criterion_score  # 1.0 — on the run's raw 0..2 scale, not on 0..1
+        metrics.cases_with_score_zero    # [1]
     """
     if not case_results:
         raise ValueError("run metrics need at least one case")
@@ -162,9 +179,10 @@ def label_metrics(case_results: list[CaseResult]) -> list[LabelMetrics]:
             refusal of `run_metrics` is unreachable from here.
 
     Example:
-        buckets = label_metrics(run.case_results)
-        buckets[0].label                   # "agentic_search"
-        buckets[0].metrics.average_score   # 0.013
+        buckets = label_metrics(run_result.case_results)
+        buckets[0].label                   # "table"
+        buckets[0].metrics.average_score   # 0.0
+        buckets[0].metrics.total_cases     # 1 — one case carries that label
     """
     return [
         LabelMetrics(label=label, metrics=run_metrics(_cases_carrying(label, case_results)))
@@ -173,17 +191,22 @@ def label_metrics(case_results: list[CaseResult]) -> list[LabelMetrics]:
 
 
 def _labels_to_bucket_by(case_results: list[CaseResult]) -> list[str]:
-    """Which buckets there are to build, alphabetically — counted so a label shared by forty
-    cases still opens one bucket, sorted so the breakdown reads the same whatever order the
-    run was stored in."""
+    """Which buckets there are to build, in alphabetical order.
+
+    Counted so a label shared by forty cases still opens exactly one bucket, sorted so the
+    breakdown reads the same whatever order the run was stored in.
+    """
     return sorted(case_count_per_label(case_result.labels for case_result in case_results))
 
 
 def _cases_carrying(label: str, case_results: list[CaseResult]) -> list[CaseResult]:
-    """One bucket's cases. "Carries this label", never "is exactly this label": the question a
-    bucket answers is how the cases *involving* tables do, and a case tagged both `table` and
-    `images` is one of them. Through the same predicate `filter_cases_by_labels` uses, so
-    a bucket and the filter of the same name can never select different cases."""
+    """One bucket's cases — "carries this label", never "is exactly this label".
+
+    The question a bucket answers is how the cases *involving* tables do, and a case tagged
+    both `table` and `images` is one of them. Through the same predicate
+    `filter_cases_by_labels` uses, so a bucket and the filter of the same name can never
+    select different cases.
+    """
     return [
         case_result
         for case_result in case_results
@@ -210,10 +233,11 @@ def _every_criterion_score(case_results: list[CaseResult]) -> list[float]:
 
 
 def _fulfillment_rate_per_case(case_results: list[CaseResult]) -> list[float]:
-    """One rate per case, never one rate over all criteria: averaging the cases afterwards is
-    what keeps a case with a 20-criteria rubric from outweighing nineteen short ones.
+    """One rate per case, never one rate over all criteria.
 
-    No division by zero to guard here — `CaseResult.criterion_results` rejects an empty list.
+    Averaging the cases afterwards is what keeps a case with a 20-criteria rubric from
+    outweighing nineteen short ones. No division by zero to guard here —
+    `CaseResult.criterion_results` rejects an empty list.
     """
     return [
         sum(
@@ -232,8 +256,11 @@ def _case_ids_scoring_zero(case_results: list[CaseResult]) -> list[int]:
 
 
 def _weakest_case_ids_above_zero(case_results: list[CaseResult]) -> list[int]:
-    """The weakest cases that still scored something, weakest first. Cases at exactly 0 are
-    reported separately, so this list does not fill up with them and hide the near misses."""
+    """The weakest cases that still scored something, weakest first.
+
+    Cases at exactly 0 are reported separately, so this list does not fill up with them and
+    hide the near misses.
+    """
     above_zero = sorted(
         (case_result for case_result in case_results if case_result.score > 0),
         key=attrgetter("score"),
