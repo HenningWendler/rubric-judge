@@ -44,6 +44,13 @@ class RunsNotComparableError(ValueError):
     named one, so the HTTP layer can tell a refused comparison apart from a `ValidationError`
     or a `StatisticsError`. Both of those are `ValueError` subclasses too, and reporting one
     of them as "your runs are not comparable" would dress a bug up as the caller's mistake.
+
+    Example:
+        try:
+            compare_runs(RunComparison(baseline=two_case_run, candidate=three_case_run))
+        except RunsNotComparableError as refusal:
+            str(refusal)
+        # "the runs are not comparable: cases only in the candidate: [3]"
     """
 
 
@@ -87,11 +94,11 @@ def compare_runs(run_comparison: RunComparison) -> RunComparisonResult:
             first, so one fix can address all of them.
 
     Example:
-        result = compare_runs(RunComparison(baseline=last_weeks_run, candidate=todays_run))
-        result.metrics_delta.average_score_delta   # +0.084
-        result.label_metrics_deltas[0].label       # "agentic_search"
-        result.summary.worsened_case_ids           # [5] — what the win cost
-        result.summary.improvement.largest         # +0.31
+        result = compare_runs(RunComparison(baseline=baseline_run, candidate=candidate_run))
+        result.metrics_delta.average_score_delta   # 0.5
+        result.label_metrics_deltas[0].label       # "table"
+        result.summary.worsened_case_ids           # []  — the win cost nothing
+        result.summary.improvement.largest         # 1.0
     """
     baseline, candidate = run_comparison.baseline, run_comparison.candidate
     _reject_incomparable_runs(baseline, candidate)
@@ -105,8 +112,11 @@ def compare_runs(run_comparison: RunComparison) -> RunComparisonResult:
 
 
 def _compare_cases(baseline: RunResult, candidate: RunResult) -> list[CaseComparisonResult]:
-    """One comparison per case, ordered by id — neither run's storage order is canonical,
-    so sorting by id gives a document that does not depend on either."""
+    """One comparison per case, ordered by id.
+
+    Neither run's storage order is canonical, so sorting by id gives a document that does
+    not depend on either.
+    """
     baseline_by_id = _case_results_by_id(baseline)
     candidate_by_id = _case_results_by_id(candidate)
     return [
@@ -116,8 +126,11 @@ def _compare_cases(baseline: RunResult, candidate: RunResult) -> list[CaseCompar
 
 
 def _case_results_by_id(run: RunResult) -> dict[int, CaseResult]:
-    """Cases are matched by id, never by position: two runs of the same catalog may well be
-    stored in different orders, and zipping those would compare unrelated answers."""
+    """Cases are matched by id, never by position.
+
+    Two runs of the same catalog may well be stored in different orders, and zipping those
+    would compare unrelated answers.
+    """
     return {case_result.case_id: case_result for case_result in run.case_results}
 
 
@@ -204,14 +217,19 @@ def _label_metrics_deltas(
 
 
 def _buckets_by_label(run: RunResult) -> list[LabelMetrics]:
-    """Sorted here as well as at the source, so the zip above pairs by label rather than by
-    trusting the storage order of a run that was read back from JSON."""
+    """Sorted here as well as at the source, so the zip above pairs by label.
+
+    Trusting the storage order of a run that was read back from JSON would pair two
+    different labels' buckets and subtract them.
+    """
     return sorted(run.label_metrics, key=attrgetter("label"))
 
 
 def _summarize(case_comparison_results: list[CaseComparisonResult]) -> ChangeSummary:
-    """The case movements folded into the distribution they form: who moved which way, in
-    order of how much, and how large those moves were on each side."""
+    """The case movements folded into the distribution they form.
+
+    Who moved which way, in order of how much, and how large those moves were on each side.
+    """
     improved = _ranked_by_movement(case_comparison_results, ChangeStatus.IMPROVED)
     worsened = _ranked_by_movement(case_comparison_results, ChangeStatus.WORSENED)
     stable = _with_status(case_comparison_results, ChangeStatus.STABLE)
@@ -238,9 +256,12 @@ def _with_status(
 def _ranked_by_movement(
     case_comparison_results: list[CaseComparisonResult], status: ChangeStatus
 ) -> list[CaseComparisonResult]:
-    """One side of the comparison, biggest move first — for improvements the largest positive
-    delta, for regressions the most negative one. Ordering the complete list this way is what
-    makes a separate "top five" field unnecessary: the top five are its first five."""
+    """One side of the comparison, biggest move first.
+
+    For improvements that is the largest positive delta, for regressions the most negative
+    one. Ordering the complete list this way is what makes a separate "top five" field
+    unnecessary: the top five are its first five.
+    """
     moved = _with_status(case_comparison_results, status)
     return sorted(
         moved, key=attrgetter("score_delta"), reverse=status is ChangeStatus.IMPROVED
@@ -248,8 +269,9 @@ def _ranked_by_movement(
 
 
 def _magnitude_of(moved_case_comparisons: list[CaseComparisonResult]) -> ChangeMagnitude:
-    """How large the moves on one side were, or three `None`s when nothing moved that way:
-    a side with no moves has no largest, mean or median, and a 0.0 in their place is a move
+    """How large the moves on one side were, or three `None`s when nothing moved that way.
+
+    A side with no moves has no largest, mean or median, and a 0.0 in their place is a move
     of exactly zero to every reader who does not also check the id list.
 
     Reads `largest` off the front of the list because both sides arrive ordered biggest-move
@@ -268,8 +290,10 @@ def _magnitude_of(moved_case_comparisons: list[CaseComparisonResult]) -> ChangeM
 
 
 def _reject_incomparable_runs(baseline: RunResult, candidate: RunResult) -> None:
-    """Refuse before computing anything, naming every difference at once — fixing them one
-    error message at a time would mean one full re-run per difference."""
+    """Refuse before computing anything, naming every difference at once.
+
+    Fixing them one error message at a time would mean one full re-run per difference.
+    """
     if differences := _differences_between(baseline, candidate):
         raise RunsNotComparableError(
             "the runs are not comparable: " + "; ".join(differences)
@@ -277,9 +301,11 @@ def _reject_incomparable_runs(baseline: RunResult, candidate: RunResult) -> None
 
 
 def _differences_between(baseline: RunResult, candidate: RunResult) -> list[str]:
-    """Everything that stops these two runs from being compared, in reading order: first the
-    scale, which invalidates everything under it, then the cases that are missing on one side,
-    then the rubric and label changes inside the shared ones."""
+    """Everything that stops these two runs from being compared, in reading order.
+
+    First the scale, which invalidates everything under it, then the cases that are missing
+    on one side, then the rubric and label changes inside the shared ones.
+    """
     baseline_by_id = _case_results_by_id(baseline)
     candidate_by_id = _case_results_by_id(candidate)
     differences = _scale_differences(baseline, candidate)
@@ -295,10 +321,11 @@ def _differences_between(baseline: RunResult, candidate: RunResult) -> list[str]
 
 
 def _label_differences(case_id: int, baseline: CaseResult, candidate: CaseResult) -> list[str]:
-    """A case re-labelled between the two runs puts different cases in the two per-label
-    buckets of the same name, so every delta in `label_metrics_deltas` would silently compare
-    two different populations. Compared as sets: labels are read as a set everywhere, so a
-    reordered list is the same labelling and must not be reported as a change.
+    """A case re-labelled between two runs makes their per-label buckets hold different cases.
+
+    Every delta in `label_metrics_deltas` would then silently compare two populations.
+    Compared as sets: labels are read as a set everywhere, so a reordered list is the same
+    labelling and must not be reported as a change.
     """
     if set(baseline.labels) == set(candidate.labels):
         return []
@@ -308,9 +335,11 @@ def _label_differences(case_id: int, baseline: CaseResult, candidate: CaseResult
 
 
 def _scale_differences(baseline: RunResult, candidate: RunResult) -> list[str]:
-    """Reported first, because it is the difference that makes every other number meaningless:
-    a 2 out of 2 and a 2 out of 10 are not the same grade, so subtracting them would turn a
-    change of judge into a collapse of the system under test."""
+    """Reported first, because it is the difference that makes every other number meaningless.
+
+    A 2 out of 2 and a 2 out of 10 are not the same grade, so subtracting them would turn a
+    change of judge into a collapse of the system under test.
+    """
     if baseline.scale == candidate.scale:
         return []
     return [
@@ -320,9 +349,11 @@ def _scale_differences(baseline: RunResult, candidate: RunResult) -> list[str]:
 
 
 def _only_on_one_side(subject: str, baseline_ids: set[int], candidate_ids: set[int]) -> list[str]:
-    """Ids one run carries and the other does not — the same sentence for missing cases and
-    for missing criteria, so the two cannot drift into two phrasings. Both directions are
-    reported, because a catalog that grew and one that shrank need different fixes."""
+    """Ids one run carries and the other does not, in one sentence for cases and criteria.
+
+    Written out twice, the two would eventually drift into two phrasings. Both directions
+    are reported, because a catalog that grew and one that shrank need different fixes.
+    """
     return [
         f"{subject} only in the {run}: {sorted(only_here)}"
         for run, only_here in (
@@ -334,9 +365,10 @@ def _only_on_one_side(subject: str, baseline_ids: set[int], candidate_ids: set[i
 
 
 def _rubric_differences(case_id: int, baseline: CaseResult, candidate: CaseResult) -> list[str]:
-    """The two rubric rules for one shared case: the same criteria, and the same weights on
-    them. A changed criterion set makes the two case scores answer different questions; a
-    changed weight makes them non-commensurable.
+    """The two rubric rules for one shared case: the same criteria, on the same weights.
+
+    A changed criterion set makes the two case scores answer different questions; a changed
+    weight makes them non-commensurable.
     """
     baseline_weights = _weights_by_criterion_id(baseline)
     candidate_weights = _weights_by_criterion_id(candidate)
@@ -348,9 +380,10 @@ def _rubric_differences(case_id: int, baseline: CaseResult, candidate: CaseResul
 def _weight_differences(
     case_id: int, baseline_weights: dict[int, float], candidate_weights: dict[int, float]
 ) -> list[str]:
-    """Weights are copied verbatim from the rubric and never computed, so two runs of the
-    same catalog carry bit-identical ones — which is why this compares exactly rather than
-    with a tolerance. A weight that merely *nearly* matches means the rubric was edited, and
+    """Compared exactly rather than with a tolerance, because a weight is never computed.
+
+    Weights are copied verbatim from the rubric, so two runs of the same catalog carry
+    bit-identical ones. One that merely *nearly* matches means the rubric was edited — and
     the weights are the denominator every case score is normalized by.
     """
     return [
@@ -362,8 +395,11 @@ def _weight_differences(
 
 
 def _weights_by_criterion_id(case_result: CaseResult) -> dict[int, float]:
-    """Keyed by id because the two runs are checked criterion by criterion, not position by
-    position — the criteria of a stored result come in whatever order it was saved in."""
+    """Keyed by id because the two runs are checked criterion by criterion.
+
+    Not position by position: the criteria of a stored result come in whatever order it was
+    saved in.
+    """
     return {
         criterion_result.criterion_id: criterion_result.weight
         for criterion_result in case_result.criterion_results
