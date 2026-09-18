@@ -60,14 +60,22 @@ async def evaluate_case(judge: Judge, case: Case) -> CaseResult:
             client aborts the work instead of billing a full evaluation for it.
 
     Example:
-        result = await evaluate_case(judge, Case(
+        Any `Judge` will do; a live one is an `OpenAIJudge`.
+
+        class AlwaysFullMarks:
+            scale = DEFAULT_SCALE
+
+            async def score(self, question, answer, criterion) -> JudgeReply:
+                return JudgeReply(score=2, reasoning="the answer says exactly that")
+
+        case_result = await evaluate_case(AlwaysFullMarks(), Case(
             id=1,
             question="How do I report sick leave?",
             answer="Email hr@example.com before 10:00.",
             criteria=[Criterion(id=1, content="Report by email before 10:00", weight=3)],
         ))
-        result.score                             # 1.0
-        result.criterion_results[0].reasoning    # "The answer instructs the reader to ..."
+        case_result.score                             # 1.0
+        case_result.criterion_results[0].reasoning    # "the answer says exactly that"
     """
     criterion_results = await asyncio.gather(
         *(_judge_criterion(judge, case, criterion) for criterion in case.criteria)
@@ -122,11 +130,37 @@ async def evaluate_run(judge: Judge, run: Run) -> RunResult:
             single case aborts the run rather than being averaged into it.
 
     Example:
-        run_result = await evaluate_run(judge, Run(cases=[case_a, case_b]))
+        A judge grading from a table, so the run is reproducible without an endpoint.
+
+        class ScoresFromATable:
+            scale = DEFAULT_SCALE
+            grade_per_criterion_id = {1: 0, 21: 2}
+
+            async def score(self, question, answer, criterion) -> JudgeReply:
+                return JudgeReply(
+                    score=self.grade_per_criterion_id[criterion.id], reasoning="see above"
+                )
+
+        run = Run(cases=[
+            Case(
+                id=1,
+                question="How do I report sick leave?",
+                answer="Ask around.",
+                criteria=[Criterion(id=1, content="Report by email", weight=3)],
+                labels=["table"],
+            ),
+            Case(
+                id=2,
+                question="How do I request vacation?",
+                answer="Submit it in the HR tool.",
+                criteria=[Criterion(id=21, content="Use the HR tool", weight=1)],
+            ),
+        ])
+        run_result = await evaluate_run(ScoresFromATable(), run)
         run_result.metrics.average_score           # 0.5
-        run_result.metrics.cases_with_score_zero   # [2]  — the answers to read first
+        run_result.metrics.cases_with_score_zero   # [1]  — the answer to read first
         run_result.label_metrics[0].label          # "table"
-        run_result.case_results[0].score           # 1.0  — every result is still there
+        run_result.case_results[1].score           # 1.0  — every result is still there
     """
     case_results = await asyncio.gather(
         *(evaluate_case(judge, case) for case in run.selected_cases)
@@ -171,7 +205,16 @@ def filter_cases_by_labels(cases: list[Case], label_filter: list[list[str]]) -> 
             label, or the same group twice.
 
     Example:
-        filter_cases_by_labels(catalog, [["table", "split_infos"], ["agentic"]])
+        catalog = [
+            Case(id=1, question="q", answer="a", labels=["table", "split_infos"],
+                 criteria=[Criterion(id=1, content="Report by email", weight=1)]),
+            Case(id=2, question="q", answer="a", labels=["agentic"],
+                 criteria=[Criterion(id=2, content="Use the HR tool", weight=1)]),
+            Case(id=3, question="q", answer="a", labels=["table"],
+                 criteria=[Criterion(id=3, content="Name the deadline", weight=1)]),
+        ]
+        selected = filter_cases_by_labels(catalog, [["table", "split_infos"], ["agentic"]])
+        [case.id for case in selected]   # [1, 2]
     """
     if any(isinstance(group, str) for group in label_filter):
         raise TypeError(
@@ -190,8 +233,22 @@ async def _judge_criterion(judge: Judge, case: Case, criterion: Criterion) -> Cr
     rather than left to Pydantic: a `CriterionResult.score` may later be an average over
     repeated runs, and that is the only reason the two types disagree about the type.
 
-    Nothing is caught here: the judge decides what its failures mean by which exception it
-    raises, and both answers — the run is invalid, or the program is broken — travel up.
+    Args:
+        judge: The judge to ask. Its `scale` is what `is_present` is cut at, so a judge
+            grading 0..10 produces results a 0..10 `CaseResult` can carry.
+        case: The case the criterion belongs to; only `question` and `answer` are sent on.
+        criterion: The single requirement to judge — only its `content` reaches the model.
+
+    Returns:
+        The result for that one criterion, carrying the judge's raw grade widened to a float
+        and the argument it gave for it.
+
+    Raises:
+        JudgeUnavailableError: The judge could not answer, so the case has no result. Nothing
+            is caught here: the judge decides what its failures mean by which exception it
+            raises, and both answers — the run is invalid, or the program is broken — travel
+            up to the caller.
+        Exception: Anything else the judge raises, unchanged and for the same reason.
     """
     judge_reply = await judge.score(case.question, case.answer, criterion)
     return CriterionResult.judged(
