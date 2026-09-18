@@ -1,0 +1,148 @@
+{
+  "metrics": {
+    "total_cases": 3,
+    "average_score": 0.6666666666666666,
+    "median_score": 1.0,
+    "variance": 0.3333333333333333,
+    "standard_deviation": 0.5773502691896257,
+    "average_criterion_score": 1.0,
+    "criteria_fulfillment_rate": 0.6666666666666666,
+    "cases_with_score_zero": [
+      1
+    ],
+    "weakest_cases_above_zero": [
+      2,
+      3
+    ],
+    "cases_with_score_zero_count": 1
+  },
+  "label_metrics": [
+    {
+      "label": "policy",
+      "metrics": {
+        "total_cases": 2,
+        "average_score": 0.5,
+        "median_score": 0.5,
+        "variance": 0.5,
+        "standard_deviation": 0.7071067811865476,
+        "average_criterion_score": 0.6666666666666666,
+        "criteria_fulfillment_rate": 0.5,
+        "cases_with_score_zero": [
+          1
+        ],
+        "weakest_cases_above_zero": [
+          2
+        ],
+        "cases_with_score_zero_count": 1
+      }
+    },
+    {
+      "label": "tool",
+      "metrics": {
+        "total_cases": 2,
+        "average_score": 1.0,
+        "median_score": 1.0,
+        "variance": 0.0,
+        "standard_deviation": 0.0,
+        "average_criterion_score": 2.0,
+        "criteria_fulfillment_rate": 1.0,
+        "cases_with_score_zero": [],
+        "weakest_cases_above_zero": [
+          2,
+          3
+        ],
+        "cases_with_score_zero_count": 0
+      }
+    }
+  ],
+  "applied_label_filter": [],
+  "case_results": [
+    {
+      "case_id": 1,
+      "score": 0.0,
+      "scale": {
+        "maximum": 2,
+        "presence_threshold": 0.5,
+        "level_descriptions": {
+          "2": "Fully covered. Every essential part of the criterion is clearly recognizable in the answer, even if the wording, terminology or structure differs.",
+          "1": "Partially covered. Some essential information is missing, but the basic idea is still derivable from the answer.",
+          "0": "Not covered. The criterion is absent, or the answer has no recognizable connection to it."
+        }
+      },
+      "criterion_results": [
+        {
+          "criterion_id": 1,
+          "weight": 3.0,
+          "score": 0.0,
+          "is_present": false,
+          "spread": 0.0,
+          "reasoning": "The answer names no recipient and no deadline."
+        },
+        {
+          "criterion_id": 2,
+          "weight": 1.0,
+          "score": 0.0,
+          "is_present": false,
+          "spread": 0.0,
+          "reasoning": "Neither the expected last day nor any duration is mentioned."
+        }
+      ],
+      "labels": [
+        "policy"
+      ]
+    },
+    {
+      "case_id": 2,
+      "score": 1.0,
+      "scale": {
+        "maximum": 2,
+        "presence_threshold": 0.5,
+        "level_descriptions": {
+          "2": "Fully covered. Every essential part of the criterion is clearly recognizable in the answer, even if the wording, terminology or structure differs.",
+          "1": "Partially covered. Some essential information is missing, but the basic idea is still derivable from the answer.",
+          "0": "Not covered. The criterion is absent, or the answer has no recognizable connection to it."
+        }
+      },
+      "criterion_results": [
+        {
+          "criterion_id": 21,
+          "weight": 1.0,
+          "score": 2.0,
+          "is_present": true,
+          "spread": 0.0,
+          "reasoning": "The answer names the HR tool as the place to submit the request."
+        }
+      ],
+      "labels": [
+        "policy",
+        "tool"
+      ]
+    },
+    {
+      "case_id": 3,
+      "score": 1.0,
+      "scale": {
+        "maximum": 2,
+        "presence_threshold": 0.5,
+        "level_descriptions": {
+          "2": "Fully covered. Every essential part of the criterion is clearly recognizable in the answer, even if the wording, terminology or structure differs.",
+          "1": "Partially covered. Some essential information is missing, but the basic idea is still derivable from the answer.",
+          "0": "Not covered. The criterion is absent, or the answer has no recognizable connection to it."
+        }
+      },
+      "criterion_results": [
+        {
+          "criterion_id": 31,
+          "weight": 1.0,
+          "score": 2.0,
+          "is_present": true,
+          "spread": 0.0,
+          "reasoning": "The answer names the line manager as the approver."
+        }
+      ],
+      "labels": [
+        "tool"
+      ]
+    }
+  ]
+}
