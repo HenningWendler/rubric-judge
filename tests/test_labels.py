@@ -151,7 +151,7 @@ def test_a_label_filter_is_read_the_same_way_however_its_labels_are_spaced():
     ] == [1, 2]
 
 
-def test_a_preview_refuses_the_selections_a_run_refuses():
+def test_a_preview_refuses_the_filters_a_run_refuses():
     """The other half of reading it the same way: a label filter a `Run` would never accept has
     no cases it "would pick", so answering one would be inventing a result."""
     with pytest.raises(ValidationError, match="label groups must be unique"):
@@ -167,7 +167,7 @@ def test_an_empty_group_asks_for_nothing_and_so_selects_everything():
     assert Run(cases=CATALOG, label_filter=[[]]).selected_cases == CATALOG
 
 
-def test_an_empty_group_beside_a_real_one_widens_the_selection_to_everything():
+def test_an_empty_group_beside_a_real_one_widens_the_filter_to_everything():
     """The OR is what makes it widen rather than narrow: `table OR nothing-required` is every
     case, not the table cases. Worth pinning, because an empty group is what an accidentally
     empty list of labels looks like, and it selects the whole catalog in silence."""
@@ -243,7 +243,7 @@ def test_the_breakdown_can_be_computed_on_stored_results():
 # --- the label filter a run runs -------------------------------------------------------------
 
 
-def test_a_run_runs_only_the_cases_its_selection_covers():
+def test_a_run_runs_only_the_cases_its_filter_covers():
     """Hand it the catalog and the label filter: `cases` is what you have, `selected_cases` is
     what runs."""
     run = Run(cases=CATALOG, label_filter=[["table", "split_infos"], ["agentic"]])
@@ -252,18 +252,18 @@ def test_a_run_runs_only_the_cases_its_selection_covers():
     assert [case.id for case in run.selected_cases] == [1, 3]
 
 
-def test_a_run_without_a_selection_runs_everything():
+def test_a_run_without_a_filter_runs_everything():
     assert Run(cases=CATALOG).selected_cases == CATALOG
 
 
-def test_a_run_whose_selection_matches_nothing_is_refused_before_any_judge_call():
+def test_a_run_whose_filter_matches_nothing_is_refused_before_any_judge_call():
     """A run of no cases has no metrics to report, and being told the label was a typo after
     paying for a catalog of judge calls is the outcome this exists to prevent."""
     with pytest.raises(ValidationError, match="matches no case"):
         Run(cases=CATALOG, label_filter=[["tabel"]])
 
 
-def test_a_selection_that_matches_nothing_names_the_labels_that_do_exist():
+def test_a_filter_that_matches_nothing_names_the_labels_that_do_exist():
     """That is nearly always a typo, and the right spelling is unguessable from "nothing
     matched" alone."""
     carried = r"agentic \(1\), images \(1\), split_infos \(1\), table \(2\)"
@@ -271,7 +271,7 @@ def test_a_selection_that_matches_nothing_names_the_labels_that_do_exist():
         Run(cases=CATALOG, label_filter=[["tabel"]])
 
 
-def test_a_stored_run_refuses_a_selection_its_results_do_not_match():
+def test_a_stored_run_refuses_a_filter_its_results_do_not_match():
     """On a *result* the field is a claim, not an instruction, so here it can lie — and a
     stored run is the path where it can have been edited since. A run cannot call itself the
     `table` subset while holding the whole catalog."""
@@ -281,7 +281,7 @@ def test_a_stored_run_refuses_a_selection_its_results_do_not_match():
         RunResult(**{**stored, "applied_label_filter": [["table"]]})
 
 
-def test_a_run_may_hold_cases_its_selection_excludes():
+def test_a_run_may_hold_cases_its_filter_excludes():
     """The asymmetry with the result above, stated outright: an instruction cannot lie, and
     passing a catalog plus a label filter is the entire point."""
     assert Run(cases=CATALOG, label_filter=[["agentic"]]).cases == CATALOG

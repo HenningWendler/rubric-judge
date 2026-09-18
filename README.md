@@ -136,8 +136,8 @@ run_result.metrics.cases_with_score_zero  # [2]   — read these answers first
 run_result.case_results[0].score          # 1.0   — the individual results are still there
 ```
 
-`run_result.case_results[0]` is exactly the `CaseResult` `evaluate_case()` would have returned for
-that case on its own — the run is a fan-out over it plus the aggregate, nothing more.
+`run_result.case_results[0]` is exactly the `CaseResult` `evaluate_case()` would have
+returned for that case on its own — the run is a fan-out over it plus the aggregate.
 
 Every result is a Pydantic model, so `result.model_dump()` and `result.model_dump_json()`
 give you plain data to write to disk.
@@ -205,8 +205,8 @@ call — and the error names the labels your catalog does carry, with counts, be
 nearly always a typo. Negation is not expressible: "table but not images" needs something
 this deliberately does not have yet.
 
-`filter_cases_by_labels(catalog, label filter)` applies the same rule without running anything,
-for when you want to see what a label filter would pick first.
+`filter_cases_by_labels(catalog, label_filter)` applies the same rule without running
+anything, for when you want to see what a label filter would pick first.
 
 ### Comparing two runs
 
@@ -621,10 +621,11 @@ class OpenAIJudge:
     async def score(self, question: str, answer: str, criterion: Criterion) -> JudgeReply
 ```
 The bundled judge. `system_prompt` replaces the system prompt and `scale` is what it grades
-on — a described scale writes its own prompt, so passing both is only for your own instructions
-on your own scale, see [Another scale](#another-scale). `score()` judges a single criterion
-with no fan-out and no failure handling — handy for a quick experiment. Raises `ValueError`
-for a `scale` with no `level_descriptions` and no `prompt` to go with it.
+on — a described scale writes its own prompt, so passing both is only for your own
+instructions on your own scale, see [Another scale](#another-scale). `score()` judges a
+single criterion with no fan-out and no failure handling — handy for a quick experiment.
+Raises `ValueError` for a `scale` with no `level_descriptions` and no `system_prompt` to go
+with it.
 
 ```python
 class JudgeConfig:
@@ -716,8 +717,8 @@ is why `links` reports one case and `table` reports two, over a run of two.
 
 To run only part of the catalog, add a `label_filter` to the body — there is no query
 parameter, so the library and the API take the label filter in exactly one place and in
-exactly one form. It is an **OR of ANDs**: a case runs when it carries every label of at least one
-group.
+exactly one form. It is an **OR of ANDs**: a case runs when it carries every label of at
+least one group.
 
 ```json
 { "cases": [ … ],
@@ -1019,14 +1020,15 @@ from pathlib import Path
 judge = OpenAIJudge(JudgeConfig.from_env(), system_prompt=Path("my_prompt.txt").read_text())
 ```
 
-`system_prompt=` replaces the **system prompt** only. Whatever you write has to keep two promises,
-or the parser will reject every reply: the model must argue first and end with a single
-`{"score": <grade>}` object, and the prose scale it describes must be the judge's `scale` —
-`0–2` unless you pass one.
+`system_prompt=` replaces the **system prompt** only. Whatever you write has to keep two
+promises, or the parser will reject every reply: the model must argue first and end with a
+single `{"score": <grade>}` object, and the prose scale it describes must be the judge's
+`scale` — `0–2` unless you pass one.
 
 You usually do not need this. A scale that describes its levels writes the prompt itself —
-see [Another scale](#another-scale). Reach for `system_prompt=` when you want different *instructions*
-(another language, a stricter examiner, your own worked examples), not merely another scale.
+see [Another scale](#another-scale). Reach for `system_prompt=` when you want different
+*instructions* (another language, a stricter examiner, your own worked examples), not merely
+another scale.
 
 The user prompt and the retry complaints live in [prompt.py](src/rubric_eval/prompt.py).
 Every sentence the model ever reads is in that one file, as plain Python strings — a

@@ -712,7 +712,7 @@ class Run(DocumentedModel):
         ]
 
     @model_validator(mode="after")
-    def _reject_a_selection_that_matches_no_case(self) -> "Run":
+    def _reject_a_filter_that_matches_no_case(self) -> "Run":
         """Caught while the run is built, because the alternative is being told the label
         was a typo only after paying for a catalog of judge calls — and because a run of no
         cases has no metrics to report, so there is nothing to hand back either."""

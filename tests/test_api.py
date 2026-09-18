@@ -646,7 +646,7 @@ def test_the_metrics_describe_the_selected_cases_only(client):
     assert [bucket["label"] for bucket in body["label_metrics"]] == ["links"]
 
 
-def test_a_selection_matching_nothing_names_the_labels_that_do_exist(client):
+def test_a_filter_matching_nothing_names_the_labels_that_do_exist(client):
     """Nearly always a typo, and the right spelling is unguessable from "nothing matched"."""
     use_judge(FakeJudge(RUN_SCORES))
     typo = {**LABELLED_RUN, "label_filter": [["tabel"]]}
@@ -660,7 +660,7 @@ def test_a_selection_matching_nothing_names_the_labels_that_do_exist(client):
     )
 
 
-def test_a_blank_label_in_a_selection_is_rejected(client):
+def test_a_blank_label_in_a_filter_is_rejected(client):
     use_judge(FakeJudge(RUN_SCORES))
     blank = {**LABELLED_RUN, "label_filter": [[""]]}
 
