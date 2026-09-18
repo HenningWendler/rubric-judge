@@ -53,4 +53,8 @@ arg-type-hints-in-docstring = false
 check-return-types = false
 check-yield-types = false
 check-class-attributes = false
+# Constructor arguments are documented on __init__ rather than on the class, because ruff's
+# google convention requires __init__ to carry a docstring (D107) and pydoclint refuses to
+# have the same arguments described in both places.
+allow-init-docstring = true
 skip-checking-raises = true

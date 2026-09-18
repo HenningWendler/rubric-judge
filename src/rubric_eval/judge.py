@@ -28,16 +28,17 @@ from rubric_eval.prompt import (
 ChatMessage = dict[str, str]
 """One chat message the way the OpenAI SDK wants it: {"role": ..., "content": ...}."""
 
-#: The judge reasons first and closes with the JSON object, so the *last* match wins.
 _SCORE_OBJECT = re.compile(r'\{[^{}]*?"score"\s*:\s*(-?\d+(?:\.\d+)?)[^{}]*?\}')
+"""Where a grade hides in a reply. The judge reasons first and closes with the JSON object,
+so the *last* match in a reply is the decision and everything before it is the argument."""
 
-#: Endpoint failures worth waiting out: unreachable, rate limited, or broken on the far side.
-#: A rejected key, an unknown model or a malformed request are absent on purpose — asking
-#: again changes nothing about any of them, it only delays the report.
 _RETRYABLE_TRANSPORT_FAILURES = (APIConnectionError, RateLimitError, InternalServerError)
+"""Endpoint failures worth waiting out: unreachable, rate limited, or broken on the far side.
+A rejected key, an unknown model or a malformed request are absent on purpose — asking again
+changes nothing about any of them, it only delays the report."""
 
-#: How long to wait after the first transport failure; doubled after each further one.
 _FIRST_BACKOFF_SECONDS = 0.5
+"""How long to wait after the first transport failure; doubled after each further one."""
 
 
 class JudgeUnavailableError(Exception):
@@ -73,7 +74,7 @@ class UnusableReplyError(ValueError):
         try:
             parse_judge_reply("I think it is fine.", DEFAULT_SCALE)
         except UnusableReplyError as complaint:
-            str(complaint)   # "Your reply contained no JSON object …"
+            str(complaint).startswith("Your reply contained no JSON object")   # True
     """
 
 
@@ -83,6 +84,13 @@ class JudgeReply(DocumentedModel):
     Named apart from `CriterionResult` because the two are different stages of the same
     criterion: this is what the model said, before any weight, presence or scale is attached
     to it. Only `evaluation._judge_criterion` turns one into the other.
+
+    Example:
+        judge_reply = parse_judge_reply(
+            'The answer names the address. {"score": 2}', DEFAULT_SCALE
+        )
+        judge_reply.score       # 2
+        judge_reply.reasoning   # "The answer names the address."
     """
 
     score: int
@@ -107,6 +115,16 @@ class Judge(Protocol):
     once and deliberately does not limit that, because only the implementation knows what
     its backend tolerates. `OpenAIJudge` allows `JudgeConfig.max_concurrent` calls in
     flight; an own implementation that talks to a rate-limited service needs its own bound.
+
+    Example:
+        class AlwaysFullMarks:
+            scale = DEFAULT_SCALE
+
+            async def score(self, question, answer, criterion) -> JudgeReply:
+                return JudgeReply(score=2, reasoning="every criterion is covered")
+
+        case_result = await evaluate_case(AlwaysFullMarks(), case)
+        case_result.score   # 1.0
     """
 
     scale: Scale
@@ -139,6 +157,14 @@ class Judge(Protocol):
                 than completed around the gap.
             Exception: Anything else an implementation raises is read as a bug in the
                 program and reaches the caller unchanged.
+
+        Example:
+            judge_reply = await AlwaysFullMarks().score(   # the class docstring's judge
+                "How do I report sick leave?",
+                "Email hr@example.com before 10:00.",
+                Criterion(id=1, content="Report by email before 10:00", weight=3),
+            )
+            judge_reply.score   # 2
         """
         ...
 
@@ -150,8 +176,13 @@ class JudgeConfig(DocumentedModel):
     from somewhere else.
 
     Example:
-        JudgeConfig.from_env()
-        JudgeConfig(model="gpt-4o-mini", endpoint="https://api.openai.com/v1", api_key="sk-...")
+        config = JudgeConfig(
+            model="gpt-4o-mini",
+            endpoint="https://api.openai.com/v1",
+            api_key="sk-test",
+        )
+        config.max_attempts    # 3
+        config.max_concurrent  # 8
     """
 
     model: str
@@ -275,7 +306,7 @@ class JudgeConfig(DocumentedModel):
 
 
 def parse_judge_reply(reply: str, scale: Scale) -> JudgeReply:
-    """Pull the score and the argument out of one raw judge reply.
+    r"""Pull the score and the argument out of one raw judge reply.
 
     The judge reasons first and closes with a JSON object, so the *last* `{"score": ...}`
     in the reply wins and everything before it is the reasoning.
@@ -310,6 +341,22 @@ def parse_judge_reply(reply: str, scale: Scale) -> JudgeReply:
 
 
 def _last_score_object(reply: str, scale: Scale) -> re.Match[str]:
+    """Find the judge's decision, or complain to it in the words it will be shown.
+
+    Args:
+        reply: The model's message content, unmodified.
+        scale: The scale the judge answers on, quoted in the complaint so a judge on a
+            ten-point scale is never told to answer with 0, 1 or 2.
+
+    Returns:
+        The match for the *last* score object in the reply — the judge argues first, so
+        everything before that match is its reasoning.
+
+    Raises:
+        UnusableReplyError: Nothing in the reply looks like a score object. The message is
+            the correction the retry loop sends to the model verbatim, not a report for a
+            human reading a log.
+    """
     matches = list(_SCORE_OBJECT.finditer(reply))
     if not matches:
         raise UnusableReplyError(no_json_hint(scale))
@@ -317,8 +364,23 @@ def _last_score_object(reply: str, scale: Scale) -> re.Match[str]:
 
 
 def _score_in(score_object: re.Match[str], scale: Scale) -> float:
-    """Complain concretely if the object does not parse as valid JSON — the retry loop feeds
-    that complaint back to the judge instead of guessing at a broken reply."""
+    """Read the grade out of a matched score object, concretely enough to correct the judge.
+
+    Args:
+        score_object: A match from `_SCORE_OBJECT`; its whole text is parsed as JSON.
+        scale: The scale the judge answers on, quoted in the complaint.
+
+    Returns:
+        The grade as a float, whatever the scale — whether it is *on* the scale is
+        `_is_on`'s question, and separating the two is what lets an off-scale grade be
+        quoted back to the judge.
+
+    Raises:
+        UnusableReplyError: The object is not valid JSON, carries no `score` key, or carries
+            one that is not a number. All three are collapsed into one complaint because the
+            judge can act on all three the same way: write the line again, correctly. The
+            underlying error is quoted inside it, so the model is told what is broken.
+    """
     try:
         return float(json.loads(score_object.group(0))["score"])
     except (ValueError, KeyError, TypeError) as error:  # JSONDecodeError is a ValueError
@@ -326,10 +388,12 @@ def _score_in(score_object: re.Match[str], scale: Scale) -> float:
 
 
 def _is_on(scale: Scale, score: float) -> bool:
-    """A reply is on the scale when it named one of the scale's own grades — read from
-    `Scale.grades`, so the parser cannot disagree with the prompt about whether the top grade
-    counts. Every scale is integral: 1.5 is a judge ignoring the instruction, not a finer
-    grade, because more levels means a finer grid to pick from, never a continuous one."""
+    """Asks `Scale.grades` rather than the bounds.
+
+    That way the parser cannot disagree with the prompt about whether the top grade counts.
+    Every scale is integral: 1.5 is a judge ignoring the instruction, not a finer grade,
+    because more levels means a finer grid to pick from, never a continuous one.
+    """
     return score.is_integer() and int(score) in scale.grades
 
 
@@ -339,46 +403,16 @@ def _reasoning_before(reply: str, score_object: re.Match[str]) -> str:
 
 
 class OpenAIJudge:
-    """A `Judge` backed by any OpenAI-compatible endpoint — OpenAI, vLLM, Azure, Ollama,
-    Groq, OpenRouter — with self-healing retries and a concurrency limit.
+    """A `Judge` backed by any OpenAI-compatible endpoint, with retries and a call limit.
+
+    OpenAI, vLLM, Azure, Ollama, Groq, OpenRouter — whatever answers at `JudgeConfig.
+    endpoint`. An unusable reply is corrected rather than merely repeated, and the endpoint's
+    rate limit is respected by holding `JudgeConfig.max_concurrent` calls in flight at most.
 
     Build it **once** and share it. The `max_concurrent` budget belongs to the instance, so
     one judge per case or per request would hand each of them its own full set of slots —
     exactly the throttle it was configured to have. `api.get_judge` caches one for the whole
     process for that reason.
-
-    Args:
-        config: Endpoint, credentials, model and the retry/throttle limits.
-        system_prompt: Replaces the generated system prompt — the only one of the three
-            prompts a judge sends that is yours to write; `criterion_prompt` is the user
-            prompt and the retry complaints are derived from `scale` in `prompt.py`. Whatever
-            you pass has to keep two promises or every reply fails to parse: the model argues
-            first and closes with a single `{"score": <grade>}` object, and the prose scale it
-            describes is `scale`.
-        scale: The grading scale this judge answers on. When it describes its levels, the
-            prompt is written from it by `prompt.judge_prompt` and `system_prompt` can be
-            left out; when it does not, there is nothing to instruct the model with — see
-            Raises.
-        client: An already-built SDK client to talk through — one with a shared connection
-            pool, an `AzureOpenAI`, or a test double. Left out, one is built from `config`
-            with the SDK's own retrying switched off, so `config.max_attempts` is the only
-            retry budget there is. A client you pass keeps whatever `max_retries` it was
-            built with, and that cannot be enforced from here: the two budgets then multiply,
-            and the SDK's default of 2 turns 3 configured attempts into 9 calls. Build yours
-            with `max_retries=0` unless you mean exactly that.
-
-    Raises:
-        ValueError: `scale` describes no levels and no `system_prompt` was given. Refused at
-            construction rather than at the first reply: a model told 0-2 while its answers
-            are checked against 0..10 fails every criterion of every case, one paid call at
-            a time, and the run still comes back looking like a bad system.
-
-    Example:
-        judge = OpenAIJudge(JudgeConfig.from_env())
-        judge_reply = await judge.score("How do I report sick leave?", answer, criterion)
-
-        ten_point = Scale(maximum=10, presence_threshold=5, level_descriptions={...})
-        finer = OpenAIJudge(config, scale=ten_point)      # prompt written from the scale
     """
 
     def __init__(
@@ -388,12 +422,54 @@ class OpenAIJudge:
         scale: Scale = DEFAULT_SCALE,
         client: AsyncOpenAI | None = None,
     ):
+        """Wire a judge to an endpoint, a scale and the prompt that agrees with both.
+
+        Args:
+            config: Endpoint, credentials, model and the retry/throttle limits.
+            system_prompt: Replaces the generated system prompt — the only one of the three
+                prompts a judge sends that is yours to write; `criterion_prompt` is the user
+                prompt and the retry complaints are derived from `scale` in `prompt.py`.
+                Whatever you pass has to keep two promises or every reply fails to parse: the
+                model argues first and closes with a single `{"score": <grade>}` object, and
+                the prose scale it describes is `scale`. `None` generates one from `scale`.
+            scale: The grading scale this judge answers on. When it describes its levels, the
+                prompt is written from it by `prompt.judge_prompt` and `system_prompt` can be
+                left out; when it does not, there is nothing to instruct the model with — see
+                Raises.
+            client: An already-built SDK client to talk through — one with a shared connection
+                pool, an `AzureOpenAI`, or a test double. `None` builds one from `config`
+                with the SDK's own retrying switched off, so `config.max_attempts` is the only
+                retry budget there is. A client you pass keeps whatever `max_retries` it was
+                built with, and that cannot be enforced from here: the two budgets then
+                multiply, and the SDK's default of 2 turns 3 configured attempts into 9 calls.
+                Build yours with `max_retries=0` unless you mean exactly that.
+
+        Raises:
+            ValueError: `scale` describes no levels and no `system_prompt` was given. Refused
+                at construction rather than at the first reply: a model told 0-2 while its
+                answers are checked against 0..10 fails every criterion of every case, one
+                paid call at a time, and the run still comes back looking like a bad system.
+
+        Example:
+            config = JudgeConfig(
+                model="gpt-4o-mini",
+                endpoint="https://api.openai.com/v1",
+                api_key="sk-test",
+            )
+            pass_fail = Scale(
+                maximum=1,
+                presence_threshold=1,
+                level_descriptions={1: "Covered.", 0: "Not covered."},
+            )
+            judge = OpenAIJudge(config, scale=pass_fail)   # prompt written from the scale
+            "1 = Covered." in judge.system_prompt          # True
+        """
         self.config = config
         self.scale = scale
         self.system_prompt = system_prompt or _system_prompt_for(scale)
         self.client = client or _client_for(config)
+        # One throttle per event loop, see `free_call_slots`.
         self._slots_per_loop: dict[asyncio.AbstractEventLoop, asyncio.Semaphore] = {}
-        #: One throttle per event loop, see `free_call_slots`.
 
     @property
     def free_call_slots(self) -> asyncio.Semaphore:
@@ -404,6 +480,21 @@ class OpenAIJudge:
         loop afterwards. A judge outlives loops — `api.get_judge` caches one for the whole
         process — so a single semaphore would serve the first loop and then raise "bound to
         a different event loop" in the next one, and only for rubrics big enough to queue.
+
+        Returns:
+            The `asyncio.Semaphore` guarding this judge's calls on the running loop, with
+            `JudgeConfig.max_concurrent` permits. The same object for every call on that
+            loop, which is what makes it a shared budget rather than a per-call one.
+
+        Raises:
+            RuntimeError: Read outside a running event loop. A throttle without a loop to
+                throttle is nothing a caller could use.
+
+        Example:
+            async def one_throttle_per_loop(judge: OpenAIJudge) -> bool:
+                return judge.free_call_slots is judge.free_call_slots
+
+            asyncio.run(one_throttle_per_loop(OpenAIJudge(config)))   # True
         """
         loop = asyncio.get_running_loop()
         if loop not in self._slots_per_loop:
@@ -447,13 +538,36 @@ class OpenAIJudge:
                 unknown model, a malformed request — raised on the first attempt, unchanged.
 
         Example:
-            judge = OpenAIJudge(JudgeConfig.from_env())
+            Against a stub endpoint, so the example costs nothing; a live one is reached by
+            leaving `client` out and configuring it with `JudgeConfig.from_env()`.
+
+            completion = SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(content='It says so. {"score": 2}'),
+                        finish_reason="stop",
+                    )
+                ]
+            )
+
+            async def always_the_same(**request):
+                return completion
+
+            judge = OpenAIJudge(
+                JudgeConfig(model="stub", endpoint="http://localhost/v1", api_key="stub"),
+                client=SimpleNamespace(
+                    chat=SimpleNamespace(
+                        completions=SimpleNamespace(create=always_the_same)
+                    )
+                ),
+            )
             judge_reply = await judge.score(
                 "How do I report sick leave?",
                 "Email hr@example.com before 10:00.",
                 Criterion(id=1, content="Report by email before 10:00", weight=3),
             )
-            judge_reply.score   # 2
+            judge_reply.score       # 2
+            judge_reply.reasoning   # "It says so."
         """
         conversation = self._opening_messages(question, answer, criterion)
         last_failure: Exception | None = None
@@ -475,11 +589,20 @@ class OpenAIJudge:
         ) from last_failure
 
     def _backoff_seconds(self, failed_attempt: int) -> float:
-        """How long to wait after the transport failure numbered `failed_attempt` (counting
-        from 0): twice as long after each one, so an endpoint that is rate limiting or
-        restarting gets time instead of being hammered by the retry it just refused. Zero
-        after the last attempt — the run is invalid either way, and waiting only delays the
-        bad news."""
+        """How long to wait before asking a failing endpoint again.
+
+        Backing off gives an endpoint that is rate limiting or restarting time, instead of
+        hammering it with the retry it just refused.
+
+        Args:
+            failed_attempt: Which attempt just failed, counting from 0 — the loop variable
+                of `score`, not a count of failures.
+
+        Returns:
+            Seconds to sleep: `_FIRST_BACKOFF_SECONDS` doubled once per failure so far, and
+            exactly 0.0 once the attempt budget is spent — the run is invalid either way,
+            and waiting then only delays the bad news.
+        """
         if failed_attempt + 1 >= self.config.max_attempts:
             return 0.0
         return _FIRST_BACKOFF_SECONDS * 2**failed_attempt
@@ -487,6 +610,11 @@ class OpenAIJudge:
     def _opening_messages(
         self, question: str, answer: str, criterion: Criterion
     ) -> list[ChatMessage]:
+        """The conversation every attempt starts from.
+
+        A correction is appended to it rather than the whole prompt being rebuilt around a
+        broken reply, which is what makes the second attempt a follow-up question.
+        """
         return [
             {"role": "system", "content": self.system_prompt},
             {"role": "user", "content": criterion_prompt(question, answer, criterion.content)},
