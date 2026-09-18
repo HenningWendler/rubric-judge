@@ -250,6 +250,10 @@ def _fulfillment_rate_per_case(case_results: list[CaseResult]) -> list[float]:
 
 
 def _case_ids_scoring_zero(case_results: list[CaseResult]) -> list[int]:
+    """The total misses, named apart from the near misses.
+
+    The two usually have different causes, and these are the answers worth reading first.
+    """
     return [
         case_result.case_id for case_result in case_results if case_result.score == 0.0
     ]

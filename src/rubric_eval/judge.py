@@ -413,6 +413,10 @@ class OpenAIJudge:
     one judge per case or per request would hand each of them its own full set of slots —
     exactly the throttle it was configured to have. `api.get_judge` caches one for the whole
     process for that reason.
+
+    Example:
+        judge = OpenAIJudge(JudgeConfig.from_env())   # once per process, then shared
+        str(judge.scale)                              # "0..2 (covered from 0.5)"
     """
 
     def __init__(
