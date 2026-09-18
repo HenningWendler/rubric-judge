@@ -448,8 +448,7 @@ Three responsibilities come with it:
 
 ### Inputs
 
-Four input types. All are Pydantic models — construct them in Python, or post the same
-shape as JSON.
+All are Pydantic models — construct them in Python, or post the same shape as JSON.
 
 #### `Criterion` — one requirement a good answer has to satisfy
 
@@ -475,7 +474,7 @@ Criterion(id=2, content="Email HR before 10:00 and inform your team", weight=3) 
 | `question` | `str` | yes | Context for the judge only — it is **never scored**. May be empty |
 | `answer` | `str` | yes | The answer under test, judged exactly as it comes in. May be empty: a system that returned nothing is a valid case that scores `0` |
 | `criteria` | `list[Criterion]` | yes | At least one. Criterion ids must be unique |
-| `labels` | `list[str]` | no, default `[]` | What kind of case this is — `["table", "images"]`. Your own vocabulary, never checked against a list. Each stripped and non-empty; no duplicates within one case. **Never shown to the judge** |
+| `labels` | `Labels` | no, default `[]` | What kind of case this is — `["table", "images"]`. Your own vocabulary, never checked against a list. Rules under [`Labels`](#label-labels-and-labelfilter--the-label-types) below. **Never shown to the judge** |
 
 `id` is mandatory even for a single evaluation. That is what makes one result type serve
 both paths — see [the vocabulary](#the-vocabulary).
@@ -485,16 +484,35 @@ both paths — see [the vocabulary](#the-vocabulary).
 | Field | Type | Required | Rules |
 |---|---|---|---|
 | `cases` | `list[Case]` | yes | At least one. Case ids must be unique |
-| `label_filter` | `list[list[str]]` | no, default `[]` | Which of those cases to run, as an **OR of ANDs**: a case runs when it carries every label of at least one group. `[]` runs all of them. A label filter matching *no* case is rejected, naming the labels the run does carry |
+| `label_filter` | `LabelFilter` | no, default `[]` | Which of those cases to run, as an **OR of ANDs**: a case runs when it carries every label of at least one group. `[]` runs all of them. A label filter matching *no* case is rejected, naming the labels the run does carry, with counts. Further rules under [`LabelFilter`](#label-labels-and-labelfilter--the-label-types) |
 
 `cases` is what you have; `label_filter` decides what runs. Post a whole catalog with
 `[["table", "split_infos"], ["agentic"]]` and the run covers the cases carrying both `table`
-and `split_infos`, plus the cases carrying `agentic`.
-
-Negation cannot be written.
+and `split_infos`, plus the cases carrying `agentic`. Negation cannot be written.
 
 On a `Run` this field is an **instruction**; the `RunResult` carries the same groups back as
 `applied_label_filter`, a **record** of what ran, and there it is validated — see below.
+
+#### `Label`, `Labels` and `LabelFilter` — the label types
+
+Constrained aliases rather than models, so a label obeys one rule wherever it appears — on a
+`Case`, on a `CaseResult`, in a `Run.label_filter` or in a call to
+`filter_cases_by_labels()`. Only `LabelFilter` is importable from `rubric_eval`.
+
+| Type | Shape | Rules |
+|---|---|---|
+| `Label` | `str` | Surrounding whitespace stripped, then at least 1 character. A blank tag is rejected, never silently dropped |
+| `Labels` | `list[Label]` | Every entry a `Label`; the same label twice in one list is rejected. Order is irrelevant everywhere — labels are read as a set |
+| `LabelFilter` | `list[Labels]` | Every group a `Labels`; the same **group** twice is rejected, in any order, so `[["a","b"], ["b","a"]]` is refused. `[]` selects everything |
+
+```python
+Case(id=1, question="q", answer="a", labels=["table", "table"],
+     criteria=[Criterion(id=1, content="c", weight=1)])
+# ValidationError: labels must be unique, repeated: ['table']
+
+Run(cases=catalog, label_filter=[["table"], ["table"]])
+# ValidationError: label groups must be unique, repeated: [['table']]
+```
 
 #### `RunComparison` — two finished runs to hold against each other
 
@@ -502,6 +520,26 @@ On a `Run` this field is an **instruction**; the `RunResult` carries the same gr
 |---|---|---|---|
 | `baseline` | `RunResult` | yes | The run compared *against* — the state of things before your change |
 | `candidate` | `RunResult` | yes | The run *under test*. Must have been judged on the same `scale` and must cover the same case ids, the same criterion ids per case, the same weights and the same labels per case as `baseline` |
+
+#### `JudgeConfig` — how to reach the judge model and how hard to try
+
+Built from the environment by [`JudgeConfig.from_env()`](#functions) in production, by hand in
+tests or when your settings come from somewhere else. The variable behind each field is in
+[Configure](#configure).
+
+| Field | Type | Required | Rules |
+|---|---|---|---|
+| `model` | `str` | yes | Model name as the endpoint knows it: `"gpt-4o-mini"`, `"qwen3:8b"` |
+| `endpoint` | `str` | yes | OpenAI-compatible base URL including the version path |
+| `api_key` | `str` | yes | Key for that endpoint |
+| `temperature` | `float` | no, default `0.0` | `>= 0` |
+| `max_tokens` | `int` | no, default `768` | `> 0`. Must fit the reasoning and the closing JSON object |
+| `max_attempts` | `int` | no, default `3` | `>= 1`, the first try included. The **only** retry budget: the SDK's own is switched off |
+| `max_concurrent` | `int` | no, default `8` | `>= 1`. Judge calls in flight at once, per judge *instance* |
+
+```python
+JudgeConfig(model="qwen3:8b", endpoint="http://localhost:11434/v1", api_key="ollama")
+```
 
 ### Outputs
 
@@ -515,11 +553,21 @@ included; two runs are comparable only if their scales are equal.
 |---|---|---|---|
 | `maximum` | `int` | `> 0` | Best score one criterion can reach. The scale is **integral**: `maximum = 2` offers exactly the grades `0`, `1`, `2` |
 | `presence_threshold` | `float` | `> 0`, `<= maximum` | From which score `is_present` counts the criterion as covered. Above `0` because a `0` is by definition not covered |
-| `level_descriptions` | `dict[int, str]` | empty, or one entry per grade | What each grade means, keyed by the grade. Either complete or absent — a prompt explaining four of ten levels is worse than one explaining none. A described scale **writes its own judge prompt**; an undescribed one is arithmetic only |
+| `level_descriptions` | `dict[int, str]` | empty, or one entry per grade | What each grade means, keyed by the grade. Either complete or absent. A described scale **writes its own judge prompt**; an undescribed one is arithmetic only |
 
 `DEFAULT_SCALE` is the `0–2` scale the bundled prompt describes, descriptions included, and
 the one `OpenAIJudge` grades on unless you give it another. It is never a stand-in for a
 scale a stored result failed to name — see `CaseResult.scale` below.
+
+#### `JudgeReply` — what the model said, before anything is attached to it
+
+What a `Judge` returns and the only type a custom judge has to produce. It is not part of a
+`CaseResult`: `evaluate_case()` turns each one into a `CriterionResult` on the judge's scale.
+
+| Field | Type | Range | Meaning |
+|---|---|---|---|
+| `score` | `int` | `0 … scale.maximum` | The grade the model named. A whole number — the scale is integral. Only the `int` type is checked here; the bound is checked against the judge's scale when the `CriterionResult` is built |
+| `reasoning` | `str` | — | The judge's argument: everything it wrote before the closing JSON object. Never `None` |
 
 #### `CriterionResult` — what one criterion was given
 
@@ -532,36 +580,36 @@ scale a stored result failed to name — see `CaseResult.scale` below.
 | `spread` | `float` | `>= 0` | Standard deviation across repeated runs of this criterion. Always `0.0` today: each criterion is judged exactly once |
 | `reasoning` | `str \| None` | — | The judge's own argument for the score |
 
+There is exactly one constructor, `CriterionResult.judged()` — see
+[Functions](#functions). There is none for a criterion the judge never answered for: such a
+run is invalidated instead of being completed around the gap.
+
 #### `CaseResult` — one whole answer
 
 | Field | Type | Range | Meaning |
 |---|---|---|---|
 | `case_id` | `int` | — | The `Case.id` this result belongs to |
 | `score` | `float` | `0.0 … 1.0` | The weighted case score, see [How scoring works](#how-scoring-works). `1.0` means every criterion fully covered |
-| `scale` | `Scale` | — | What the grades below mean. Stored **once per case**, not per criterion result: one case is judged by one judge on one scale, and `POST /evaluate` returns this document on its own, so this is the lowest level that always exists. **Required** — posting a result without it is a `422`, never a silent `0–2` |
-| `criterion_results` | `list[CriterionResult]` | ≥ 1 entry | One result per criterion, **in rubric order**, so it can be zipped with `Case.criteria`. Never empty — a rubric has at least one criterion, so a case result has at least one criterion result. Criterion ids must be unique: they are what pairs the two sides when two runs are compared |
-| `labels` | `list[str]` | — | The `Case.labels` this result came from, copied over so a stored run can still be sliced without the catalog at hand. `[]` for an untagged case, and for a result written before labels existed |
-
-`RunResult.scale` reads the one scale its cases were judged on — a Python accessor, not a
-JSON field, since the cases already carry it. A run whose cases name more than one scale is
-rejected, and so is a comparison of two runs whose scales differ.
+| `scale` | `Scale` | — | What the grades below mean. Stored **once per case**, not per criterion result: one case is judged by one judge on one scale, and `POST /evaluate` returns this document on its own. **Required** — posting a result without it is a `422`, never a silent `0–2` |
+| `criterion_results` | `list[CriterionResult]` | ≥ 1 entry | One result per criterion, **in rubric order**, so it can be zipped with `Case.criteria`. Never empty — a rubric has at least one criterion. Criterion ids must be unique: they are what pairs the two sides when two runs are compared |
+| `labels` | `Labels` | — | The `Case.labels` this result came from, copied over so a stored run can still be sliced without the catalog at hand. `[]` for an untagged case, and for a result written before labels existed |
 
 #### `RunMetrics` — the aggregate over a run
 
 Every case counts **once**, whatever the size of its rubric — otherwise one case with
 twenty criteria would outvote nineteen cases with one.
 
-| Field | Type | Range | What it answers |
+| Field | Type | Range | Meaning |
 |---|---|---|---|
 | `total_cases` | `int` | `>= 1` | How many cases went into these numbers |
 | `average_score` | `float` | `0 … 1` | Mean of the case scores — the single number a run is usually reported by |
 | `median_score` | `float` | `0 … 1` | Middle case score. Far above the mean means a few catastrophic cases drag an otherwise solid run down |
-| `variance` | `float` | `>= 0` | Sample variance of the case scores. `0.0` for a single case, which has no spread |
-| `standard_deviation` | `float` | `>= 0` | Square root of it, in score units. Small = uniformly good or bad; large = it depends heavily on the question |
+| `variance` | `float` | `0 … 0.5` | Sample variance of the case scores. `0.0` for a single case, which has no spread |
+| `standard_deviation` | `float` | `0 … 0.71` | Square root of it, in score units. Small = uniformly good or bad; large = it depends heavily on the question |
 | `average_criterion_score` | `float` | `0 … scale.maximum` | How the judge rates an average *statement*, on the run's **raw** scale (`1.4` of `2`, not `0.7`), ignoring weights and case boundaries. A different question from `average_score` |
 | `criteria_fulfillment_rate` | `float` | `0 … 1` | Mean share of criteria counting as `is_present`, averaged **per case first** so a long rubric cannot dominate |
-| `cases_with_score_zero` | `list[int]` | — | Ids of answers that missed their rubric completely. Read these first |
-| `cases_with_score_zero_count` | `int` | `>= 0` | Length of that list. Derived, so the two can never disagree |
+| `cases_with_score_zero` | `list[int]` | ≤ `total_cases` entries | Ids of answers that missed their rubric completely. Read these first |
+| `cases_with_score_zero_count` | `int` | `0 … total_cases` | Length of that list. Derived, so the two can never disagree |
 | `weakest_cases_above_zero` | `list[int]` | ≤ 5 entries | The weakest cases that still scored *something*, weakest first. Kept apart from the zeros because a total miss and a partial answer usually have different causes |
 
 #### `LabelMetrics` — one label's slice of a run
@@ -578,12 +626,16 @@ the run-wide `metrics` and in no bucket at all.
 
 #### `RunResult` — one whole run
 
-| Field | Type | Meaning |
-|---|---|---|
-| `metrics` | `RunMetrics` | The aggregate over every case of the run |
-| `label_metrics` | `list[LabelMetrics]` | The same aggregate once per label, **in alphabetical label order**. One entry per label occurring anywhere in `case_results` and no others — `[]` for a run of untagged cases |
-| `applied_label_filter` | `list[list[str]]` | The label filter that picked these cases, copied from `Run.label_filter` so a stored run still says which subset it is. `[]` for an unfiltered run. Named apart from the input field because it is a *record*, so it is checked: every case result must match it |
-| `case_results` | `list[CaseResult]` | ≥ 1 entry. One per **selected** case, in request order — fewer than `Run.cases` when a `label_filter` narrowed the run — so any suspicious number can be traced back. Never empty: `run_metrics` refuses a run of no cases, so such a run was never producible. Case ids must be unique: cases are paired by id when two runs are compared |
+| Field | Type | Range | Meaning |
+|---|---|---|---|
+| `metrics` | `RunMetrics` | — | The aggregate over every case of the run |
+| `label_metrics` | `list[LabelMetrics]` | 0 … one per label carried | The same aggregate once per label, **in alphabetical label order**. One entry per label occurring anywhere in `case_results` and no others — `[]` for a run of untagged cases |
+| `applied_label_filter` | `LabelFilter` | `[]` … one group per selection | The label filter that picked these cases, copied from `Run.label_filter` so a stored run still says which subset it is. `[]` for an unfiltered run. Named apart from the input field because it is a *record*, so it is checked: every case result must match it |
+| `case_results` | `list[CaseResult]` | ≥ 1 entry | One per **selected** case, in request order — fewer than `Run.cases` when a `label_filter` narrowed the run. Never empty: `run_metrics` refuses a run of no cases, so such a run was never producible. Case ids must be unique: cases are paired by id when two runs are compared |
+
+`RunResult.scale` reads the one scale its cases were judged on — a Python accessor, not a
+JSON field, since the cases already carry it. A run whose cases name more than one scale is
+rejected, and so is a comparison of two runs whose scales differ.
 
 #### `ChangeStatus` — which way a score moved
 
@@ -609,7 +661,7 @@ improved.
 | `baseline_score` | `float` | `0.0 … scale.maximum` | What the baseline run's judge gave it, on the runs' shared raw scale |
 | `candidate_score` | `float` | `0.0 … scale.maximum` | What the candidate run's judge gave it, same scale |
 | `score_delta` | `float` | `-maximum … maximum` | `candidate_score - baseline_score`. Both runs were judged on one scale — a comparison of two is refused |
-| `status` | `ChangeStatus` | — | That delta as a status |
+| `status` | `ChangeStatus` | one of three | That delta as a status |
 
 #### `CaseComparisonResult` — one case across two runs
 
@@ -619,7 +671,7 @@ improved.
 | `baseline_score` | `float` | `0.0 … 1.0` | Its weighted score in the baseline run |
 | `candidate_score` | `float` | `0.0 … 1.0` | Its weighted score in the candidate run |
 | `score_delta` | `float` | `-1.0 … 1.0` | `candidate_score - baseline_score` |
-| `status` | `ChangeStatus` | — | That delta as a status |
+| `status` | `ChangeStatus` | one of three | That delta as a status |
 | `criterion_comparison_results` | `list[CriterionComparisonResult]` | ≥ 1 entry | One per criterion, **ordered by `criterion_id`** — so the list reads the same whichever order either run happened to be stored in |
 
 A case can be `"stable"` while its criteria moved hard in opposite directions. That is
@@ -632,38 +684,37 @@ subtracted. `total_cases` has none — a comparison of different case sets is re
 the two id lists have none, because a set of ids does not subtract; `ChangeSummary` reports
 the movement of cases instead.
 
-| Field | Type | Meaning |
-|---|---|---|
-| `average_score_delta` | `float` | Change in the mean case score. The headline number |
-| `median_score_delta` | `float` | Change in the median. Read next to the mean: a mean that rose while the median fell means a few cases carried the win |
-| `variance_delta` | `float` | Change in the sample variance of the case scores |
-| `standard_deviation_delta` | `float` | Change in their spread. Negative means more uniform — an improvement or a regression depending on which way the mean went |
-| `average_criterion_score_delta` | `float` | Change on the runs' shared raw scale, ignoring weights and case boundaries. Moves independently of `average_score_delta` |
-| `criteria_fulfillment_rate_delta` | `float` | Change in the mean share of criteria counting as covered |
-| `cases_with_score_zero_count_delta` | `int` | Change in how many answers missed completely. **Negative is the good direction here** |
+| Field | Type | Range | Meaning |
+|---|---|---|---|
+| `average_score_delta` | `float` | `-1 … 1` | Change in the mean case score. The headline number |
+| `median_score_delta` | `float` | `-1 … 1` | Change in the median. Read next to the mean: a mean that rose while the median fell means a few cases carried the win |
+| `variance_delta` | `float` | `-0.5 … 0.5` | Change in the sample variance of the case scores |
+| `standard_deviation_delta` | `float` | `-0.71 … 0.71` | Change in their spread. Negative means more uniform — an improvement or a regression depending on which way the mean went |
+| `average_criterion_score_delta` | `float` | `-maximum … maximum` | Change on the runs' shared raw scale, ignoring weights and case boundaries. Moves independently of `average_score_delta` |
+| `criteria_fulfillment_rate_delta` | `float` | `-1 … 1` | Change in the mean share of criteria counting as covered |
+| `cases_with_score_zero_count_delta` | `int` | `-total_cases … total_cases` | Change in how many answers missed completely. **Negative is the good direction here** |
 
 #### `LabelMetricsDelta` — one label's slice of a comparison
 
-| Field | Type | Meaning |
-|---|---|---|
-| `label` | `str` | The label this slice is about. Always present on both runs — a case whose labels changed between them makes the comparison incomparable |
-| `metrics_delta` | `RunMetricsDelta` | The table above, over only the cases carrying `label`. Signs point the same way they do for the whole run |
+| Field | Type | Range | Meaning |
+|---|---|---|---|
+| `label` | `str` | — | The label this slice is about. Always present on both runs — a case whose labels changed between them makes the comparison incomparable |
+| `metrics_delta` | `RunMetricsDelta` | — | The table above, over only the cases carrying `label`. Signs point the same way they do for the whole run |
 
-The mirror of `LabelMetrics`, and what answers *"my average went up — but did I fix
-`agentic_search` or break `table`?"*
+What answers *"my average went up — but did I fix `agentic_search` or break `table`?"*
 
 #### `ChangeMagnitude` — how large the moves on one side were
 
-| Field | Type | Meaning |
-|---|---|---|
-| `largest` | `float \| null` | The single biggest move on this side |
-| `mean` | `float \| null` | Mean of the moves — what a typical one was worth |
-| `median` | `float \| null` | Median of them. Far below the mean on the improvement side means one case carries the win |
+| Field | Type | Range | Meaning |
+|---|---|---|---|
+| `largest` | `float \| null` | `-1.0 … 1.0`, or `null` | The single biggest move on this side |
+| `mean` | `float \| null` | `-1.0 … 1.0`, or `null` | Mean of the moves — what a typical one was worth |
+| `median` | `float \| null` | `-1.0 … 1.0`, or `null` | Median of them. Far below the mean on the improvement side means one case carries the win |
 
 All three carry the **sign of their side**, so a worsening's `largest` is the most negative
 delta, not its absolute value. All three are `null` when nothing moved that way — a run where
 nothing got worse has no worsening to report, and a `0.0` there would read as a regression of
-exactly zero to anyone holding the number rather than the id list next to it.
+exactly zero.
 
 #### `ChangeSummary` — where the run moved, case by case
 
@@ -672,26 +723,26 @@ says whether every case rose a little or one rose a lot while another collapsed.
 
 | Field | Type | Range | Meaning |
 |---|---|---|---|
-| `improved_case_ids` | `list[int]` | — | Cases the candidate scored higher on, **biggest improvement first**. Complete, not capped — the top three are its first three |
-| `stable_case_ids` | `list[int]` | — | Cases whose score did not move beyond the tolerance, in id order |
-| `worsened_case_ids` | `list[int]` | — | Cases the candidate scored lower on, **biggest regression first**. Read these when an average went up and you want to know what it cost |
+| `improved_case_ids` | `list[int]` | ≤ `total_cases` entries | Cases the candidate scored higher on, **biggest improvement first**. Complete, not capped — the top three are its first three |
+| `stable_case_ids` | `list[int]` | ≤ `total_cases` entries | Cases whose score did not move beyond the tolerance, in id order |
+| `worsened_case_ids` | `list[int]` | ≤ `total_cases` entries | Cases the candidate scored lower on, **biggest regression first**. Read these when an average went up and you want to know what it cost |
 | `improvement` | `ChangeMagnitude` | — | Size of the moves behind `improved_case_ids`, all positive. All three fields `null` when nothing improved |
 | `worsening` | `ChangeMagnitude` | — | Size of the moves behind `worsened_case_ids`, all negative. All three fields `null` when nothing got worse |
-| `improved_case_count` | `int` | `>= 0` | Length of `improved_case_ids`. Derived, so list and count cannot disagree |
-| `stable_case_count` | `int` | `>= 0` | Length of `stable_case_ids` |
-| `worsened_case_count` | `int` | `>= 0` | Length of `worsened_case_ids` |
+| `improved_case_count` | `int` | `0 … total_cases` | Length of `improved_case_ids`. Derived, so list and count cannot disagree |
+| `stable_case_count` | `int` | `0 … total_cases` | Length of `stable_case_ids` |
+| `worsened_case_count` | `int` | `0 … total_cases` | Length of `worsened_case_ids` |
 | `improvement_rate` | `float` | `0 … 1` | Share of cases that improved |
 | `stability_rate` | `float` | `0 … 1` | Share that did not move |
 | `worsening_rate` | `float` | `0 … 1` | Share that got worse. Every case lands in exactly one list, so the three **counts** always add up to the run; the three rates are three separate divisions and sum to `1.0` only to within float rounding |
 
 #### `RunComparisonResult` — one whole comparison
 
-| Field | Type | Meaning |
-|---|---|---|
-| `metrics_delta` | `RunMetricsDelta` | Whether the run got better |
-| `summary` | `ChangeSummary` | How that is distributed over the cases |
-| `label_metrics_deltas` | `list[LabelMetricsDelta]` | Which *kind* of case moved, **in alphabetical label order**. `[]` when neither run carries labels |
-| `case_comparison_results` | `list[CaseComparisonResult]` | Which criterion is responsible. **Ordered by `case_id`** — both runs cover the same cases, so neither one's storage order is canonical |
+| Field | Type | Range | Meaning |
+|---|---|---|---|
+| `metrics_delta` | `RunMetricsDelta` | — | Whether the run got better |
+| `summary` | `ChangeSummary` | — | How that is distributed over the cases |
+| `label_metrics_deltas` | `list[LabelMetricsDelta]` | 0 … one per label carried | Which *kind* of case moved, **in alphabetical label order**. `[]` when neither run carries labels |
+| `case_comparison_results` | `list[CaseComparisonResult]` | ≥ 1 entry | Which criterion is responsible. **Ordered by `case_id`** — both runs cover the same cases, so neither one's storage order is canonical |
 
 ### Functions
 
@@ -718,9 +769,8 @@ The cases a label filter covers — any group, every label of it. The same rule
 and "the `table` bucket of the full run" are the same cases. You rarely need it to *run* a
 subset; reach for it to see what a label filter would pick first. No match is an empty list,
 never an exception — `Run` is what refuses to run one. The label filter itself is held to the
-same rules as `Run.label_filter`, so a preview and the run it previews can never pick
-different cases. Raises `TypeError` for a flat `["table"]`, which would otherwise compare
-characters and quietly return the wrong cases.
+same rules as `Run.label_filter`. Raises `TypeError` for a flat `["table"]`, which would
+otherwise compare characters and quietly return the wrong cases.
 
 ```python
 def run_metrics(case_results: list[CaseResult]) -> RunMetrics
@@ -735,7 +785,7 @@ def label_metrics(case_results: list[CaseResult]) -> list[LabelMetrics]
 ```
 The per-label breakdown on its own, alphabetical. Public for the same reason `run_metrics`
 is: a run read back from disk months later can still be sliced. `[]` when no case carries a
-label.
+label. Raises `ValueError` on cases judged on different scales.
 
 ```python
 def case_score(criterion_results: list[CriterionResult], scale: Scale) -> float
@@ -759,10 +809,55 @@ one delta per label. Pure computation: no judge, no network, no cost. Raises
 do not describe the same catalog.
 
 ```python
+@classmethod
+def CriterionResult.judged(criterion: Criterion, score: float,
+                           reasoning: str | None, scale: Scale) -> CriterionResult
+```
+The only constructor for a criterion result: it copies `id` and `weight` off the criterion
+and derives `is_present` from `scale`, so the two can never contradict the grade. `scale` is
+the judge's own, never a guess. Raises `pydantic.ValidationError` for a negative or
+non-finite `score`; whether the score fits the scale is checked by the `CaseResult` it goes
+into, which is the object that knows.
+
+```python
+@property
+def Run.selected_cases -> list[Case]
+```
+The cases this run actually judges: the entries of `cases` matching `label_filter`, in their
+original order, all of them when it is empty. Never empty — a label filter matching nothing
+is refused when the `Run` is built.
+
+```python
+@property
+def RunResult.scale -> Scale
+```
+The one `Scale` every case of the run was judged on. Raises `ValueError` if the cases name
+more than one — which `RunResult` already refuses at validation, so a run you are holding
+always answers.
+
+```python
+class Judge(Protocol):
+    scale: Scale
+    async def score(self, question: str, answer: str,
+                    criterion: Criterion) -> JudgeReply
+```
+The extension point. Implement those two members and `evaluate_case()` and `evaluate_run()`
+take your object unchanged — no base class, no registration. `score()` judges exactly one
+criterion and must either return a valid `JudgeReply` or raise: `JudgeUnavailableError` for
+anything the endpoint did, anything else for a bug. Throttling belongs here too, because only
+the implementation knows what its backend tolerates. See
+[Your own judge](#your-own-judge).
+
+```python
 class OpenAIJudge:
     def __init__(self, config: JudgeConfig, system_prompt: str | None = None,
                  scale: Scale = DEFAULT_SCALE, client: AsyncOpenAI | None = None)
     async def score(self, question: str, answer: str, criterion: Criterion) -> JudgeReply
+
+    scale: Scale            # what it grades on
+    system_prompt: str      # the system message it sends, generated unless you passed one
+    config: JudgeConfig
+    client: AsyncOpenAI
 ```
 The bundled judge. `system_prompt` replaces the system prompt and `scale` is what it grades
 on — a described scale writes its own prompt, so passing both is only for your own
@@ -771,29 +866,37 @@ already-built `openai.AsyncOpenAI` to talk through — a shared connection pool,
 client, a test double; left out, one is built from `config` with `max_retries=0` so
 `max_attempts` stays the only retry budget. A client you pass keeps its own `max_retries`,
 and the two budgets multiply: build yours with `max_retries=0` unless you mean that.
-`score()` judges a single criterion with no fan-out and no failure handling — handy for a
-quick experiment. Raises `ValueError` for a `scale` with no `level_descriptions` and no
-`system_prompt` to go with it.
+`score()` judges a single criterion with no fan-out and no failure handling above its own
+retries — handy for a quick experiment. Raises `ValueError` for a `scale` with no
+`level_descriptions` and no `system_prompt` to go with it.
 
 ```python
-class JudgeConfig:
-    model: str; endpoint: str; api_key: str          # required
-    temperature: float = 0.0; max_tokens: int = 768  # optional
-    max_attempts: int = 3; max_concurrent: int = 8
-
-    @classmethod
-    def from_env(cls) -> JudgeConfig
-    @classmethod
-    def from_mapping(cls, environment: Mapping[str, str]) -> JudgeConfig
+@classmethod
+def JudgeConfig.from_env() -> JudgeConfig
+@classmethod
+def JudgeConfig.from_mapping(environment: Mapping[str, str]) -> JudgeConfig
 ```
 `from_env()` reads the variables from [Configure](#configure) out of `os.environ`;
 `from_mapping()` applies the same rules to any mapping you hand it — settings loaded from a
 file, or a plain dict in a test. Both raise `RuntimeError` naming **every** missing or empty
-variable at once. Build it by hand in tests or when your settings come from elsewhere:
+variable at once, and `pydantic.ValidationError` when a numeric variable does not parse.
+Fields and defaults are in [`JudgeConfig`](#judgeconfig--how-to-reach-the-judge-model-and-how-hard-to-try).
 
 ```python
-JudgeConfig(model="qwen3:8b", endpoint="http://localhost:11434/v1", api_key="ollama")
+@lru_cache
+def get_judge() -> Judge
 ```
+The FastAPI dependency every endpoint takes its judge from, and the one place the HTTP
+service builds an `OpenAIJudge(JudgeConfig.from_env())`. Cached for the whole process, so one
+`max_concurrent` budget is shared by every request rather than handed out per request. Two
+things to know when you plug in a judge of your own:
+
+```python
+app.dependency_overrides[get_judge] = lambda: my_own_judge   # grade differently
+get_judge.cache_clear()   # after changing RUBRIC_EVAL_JUDGE_* inside this process
+```
+
+Raises `RuntimeError` when the judge cannot be configured, which surfaces as a `500`.
 
 Constants, if you need to compute against them: `DEFAULT_SCALE` (`maximum=2`,
 `presence_threshold=0.5`, **plus** the three level descriptions the bundled prompt is written
@@ -962,7 +1065,14 @@ judge at all and answers correctly with no API key configured.
 
 ### Errors
 
-Everything is validated **before** the first LLM call, so a malformed request costs nothing.
+Request bodies are validated **before** the first LLM call, so a malformed request costs
+nothing. The `422` body carries only `loc`, `msg` and `type`; the rejected value is never
+echoed back:
+
+```json
+{ "detail": [ { "loc": ["body", "criteria", 0, "weight"],
+                "msg": "Input should be greater than 0", "type": "greater_than" } ] }
+```
 
 | Situation | Library | HTTP |
 |---|---|---|
@@ -970,28 +1080,27 @@ Everything is validated **before** the first LLM call, so a malformed request co
 | A run posted to `/compare` whose numbers leave the ranges the [output tables](#outputs) give — a score above its own `scale.maximum` or off `0 … 1`, a non-positive weight, any `Infinity` or `NaN` | `pydantic.ValidationError` | `422` |
 | A `CaseResult` posted without its `scale` — no default stands in, because one would decide the unit of every score under it | `pydantic.ValidationError` | `422` |
 | A run whose cases name more than one `scale`; a result whose `is_present` contradicts its own score | `pydantic.ValidationError` | `422` |
+| A `Scale` whose `presence_threshold` is above its `maximum`, so no criterion could ever count as covered | `pydantic.ValidationError` | `422` |
+| A `Scale` describing only some of its grades, or a grade it does not have | `pydantic.ValidationError` | `422` |
 | A blank label, or the same label twice — on one case, or in one group of a label filter | `pydantic.ValidationError` | `422` |
 | The same group twice in a label filter, in any order — in a `label_filter` or in `filter_cases_by_labels()` | `pydantic.ValidationError` | `422` |
 | A `Run` whose `label_filter` matches no case at all | `pydantic.ValidationError` naming the labels the run does carry, with counts | `422` |
 | A stored `RunResult` whose `applied_label_filter` does not describe the cases it holds | `pydantic.ValidationError` naming the offending case ids | `422` |
-| A flat `["table"]` where a label filter is expected — to `filter_cases_by_labels()`, or in a request body | `TypeError` naming both readings you may have meant | `422` (schema) |
 | A stored run whose `label_metrics` does not describe exactly the labels its cases carry | `pydantic.ValidationError` | `422` |
-| A `Scale` describing only some of its grades, or a grade it does not have | `pydantic.ValidationError` | `422` |
+| A flat `["table"]` where a label filter is expected — to `filter_cases_by_labels()`, or in a request body | `TypeError` showing the label filter to write instead | `422` (schema) |
 | Two runs not comparable: a different grading scale, different case ids, different criteria within a case, different weights, or a case whose **labels** changed between the runs | `RunsNotComparableError` (a `ValueError`) naming **every** difference at once | `422` |
+| `run_metrics([])`, or `case_score([], scale)` — an empty list has no distribution and no score, and `0.0` would be indistinguishable from a completely missed answer | `ValueError` | — (unreachable: the models refuse an empty run or rubric first) |
+| `run_metrics()` or `label_metrics()` over cases judged on **different scales** — raw grades in two units do not average | `ValueError` naming every scale found | — (unreachable: `RunResult` refuses such a run first) |
+| `judge_prompt(scale)` for a scale with no `level_descriptions`, or `OpenAIJudge(config, scale=…)` with such a scale and no `system_prompt` | `ValueError` naming the scale | — (construction time, not per request) |
 | A judge returning a score above the `scale` it declares | `ValueError` out of `evaluate_case()` naming the criterion — a bug in the judge, not an outage | `500` |
 | Judge not configured: a required `RUBRIC_EVAL_JUDGE_*` variable missing, or any of them — required or optional — exported empty | `RuntimeError` naming every offending variable and which of the two it is | `500` |
+| A numeric `RUBRIC_EVAL_JUDGE_*` variable that does not parse or is out of range | `pydantic.ValidationError` naming the setting | `500` |
 | Judge endpoint unreachable, timed out, rate limited or answering `5xx` | retried up to `MAX_ATTEMPTS` times with a doubling wait, then `JudgeUnavailableError` — **the whole run is dropped** | `503` |
-| Judge reply unparseable after `MAX_ATTEMPTS`, or carrying no content at all | `JudgeUnavailableError` naming the last complaint, or the endpoint's `finish_reason` | `503` |
+| Judge reply unparseable after `MAX_ATTEMPTS` — no JSON, broken JSON, or a grade off the scale | `UnusableReplyError` (a `ValueError`) per attempt, then `JudgeUnavailableError` naming the last complaint | `503` |
+| Judge reply carrying no content at all, or a response with no choice — truncation, a content filter, a tool-call path | `JudgeUnavailableError` naming the endpoint's `finish_reason`, **not retried** | `503` |
 | Judge endpoint rejecting the key, the model or the request | the `openai` SDK's own exception, unretried — repeating it would not help | `500` |
 | A bug in the program | propagates as itself | `500` |
 | Request cancelled (client disconnect, shutdown) | `asyncio.CancelledError` propagates | — |
-
-The `422` body carries only `loc`, `msg` and `type`; the rejected value is never echoed back:
-
-```json
-{ "detail": [ { "loc": ["body", "criteria", 0, "weight"],
-                "msg": "Input should be greater than 0", "type": "greater_than" } ] }
-```
 
 ---
 
