@@ -46,6 +46,10 @@ def get_judge() -> Judge:
             variable. Surfaces as a 500, which is correct — an unconfigured service is a
             server fault, not a bad request, and must never fall back to a fake score. A
             judge that is configured but unreachable is a 503 instead, raised per request.
+
+    Example:
+        app.dependency_overrides[get_judge] = lambda: my_own_judge   # grade differently
+        get_judge.cache_clear()   # after changing RUBRIC_EVAL_JUDGE_* in this process
     """
     return OpenAIJudge(JudgeConfig.from_env())
 
@@ -59,6 +63,21 @@ async def report_invalid_request(_: Request, error: RequestValidationError) -> J
     rendering the 422 for a rejected `"weight": Infinity` would itself fail and turn a clean
     client error into a 500. Keeping only location, message and type also stops the API from
     mirroring arbitrary request content back to the caller.
+
+    The refused request itself is not read — nothing the caller sent goes back out.
+
+    Args:
+        error: The validation failure FastAPI raised. Only where, what and which kind is
+            taken from each of its entries; the offending value is dropped.
+
+    Returns:
+        A 422 whose `detail` holds one `{"loc", "msg", "type"}` object per rejected field, in
+        the order FastAPI reports them. Never empty — FastAPI raises this for at least one
+        failure.
+
+    Example:
+        httpx.post("http://localhost:8000/evaluate", json={"id": 1}).json()["detail"][0]
+        # {"loc": ["body", "question"], "msg": "Field required", "type": "missing"}
     """
     reportable = [
         {"loc": item["loc"], "msg": item["msg"], "type": item["type"]} for item in error.errors()
@@ -73,6 +92,21 @@ async def report_unavailable_judge(_: Request, error: JudgeUnavailableError) -> 
     A criterion nobody graded has no score, and the 0 that would stand in for it turns the
     whole run into a plausible number no reader can tell from a real result. So the run is
     dropped rather than patched, and the caller is told to try again when the judge is back.
+
+    The unanswerable request itself is not read; nothing here is stored, so there is nothing
+    to hand back but the cause.
+
+    Args:
+        error: What the judge gave up with, after every attempt its configuration allowed.
+
+    Returns:
+        A 503 whose `detail` is that failure's own message, which names the last cause. No
+        partial result travels with it: there is nothing to hand back that a caller could
+        mistake for a finished evaluation.
+
+    Example:
+        httpx.post("http://localhost:8000/evaluate", json=case).json()["detail"]
+        # "Judge gave no usable answer in 3 attempts: the endpoint is down"
     """
     return JSONResponse(status_code=503, content={"detail": str(error)})
 
@@ -84,6 +118,13 @@ async def health() -> dict[str, str]:
     Answers `{"status": "ok"}` even when the judge is unconfigured or its endpoint is down,
     so neither takes the container down — `POST /evaluate` is what fails then, loudly, with
     a 500 or a 503. Liveness must not depend on a third-party endpoint.
+
+    Returns:
+        `{"status": "ok"}`, always and with a 200. There is no other body and no other
+        status: an answer at all is the whole signal.
+
+    Example:
+        httpx.get("http://localhost:8000/health").json()   # {"status": "ok"}
     """
     return {"status": "ok"}
 
@@ -122,6 +163,27 @@ async def evaluate_case(case: Case, judge: Annotated[Judge, Depends(get_judge)])
     not tell from a real one. Retry the request once the judge is reachable again.
 
     **500** if the judge is unconfigured or the program is broken.
+
+    Args:
+        case: The case to score: `id`, `question`, `answer`, at least one `criteria` entry
+            with a unique `id` and a positive finite `weight`, and optional `labels`. A blank
+            criterion, a repeated criterion id and a weight of 0 are each a 422.
+        judge: The process-wide judge, injected rather than sent — no request can choose the
+            model it is graded by.
+
+    Returns:
+        The `CaseResult` for that case: `case_id`, the weighted `score` in 0..1, the `scale`
+        the grades are on, one `criterion_results` entry per criterion, and the `labels` you
+        sent. A score of 0.0 means the answer missed every criterion, not that nothing was
+        judged — a case nobody could grade is a 503 instead.
+
+    Example:
+        httpx.post("http://localhost:8000/evaluate", json={
+            "id": 1,
+            "question": "How do I report sick leave?",
+            "answer": "Email hr@example.com before 10:00.",
+            "criteria": [{"id": 1, "content": "Report by email before 10:00", "weight": 3}],
+        }).json()["score"]   # 1.0
     """
     return await evaluation.evaluate_case(judge, case)
 
@@ -165,6 +227,32 @@ async def evaluate_run(run: Run, judge: Annotated[Judge, Depends(get_judge)]) ->
 
     Concurrency is bounded by the judge, not by the run: every case of this request shares
     one budget, and so does every other request in flight.
+
+    Args:
+        run: The catalog to score: `cases`, at least one and with unique ids, each exactly
+            the body `POST /evaluate` takes, plus an optional `label_filter`. An empty
+            `cases`, a repeated case id and a `label_filter` matching nothing are each a 422.
+        judge: The process-wide judge, injected rather than sent — every case of every
+            request is graded by the same one.
+
+    Returns:
+        The `RunResult`: `metrics` over the selected cases, `label_metrics` once per label
+        those cases carry (empty when none do), `applied_label_filter` recording what picked
+        them, and one `case_results` entry per selected case in request order. Every selected
+        case is in it, or the request answered 503 instead.
+
+    Example:
+        httpx.post("http://localhost:8000/evaluate/run", json={
+            "cases": [
+                {
+                    "id": 1,
+                    "question": "How do I report sick leave?",
+                    "answer": "Email hr@example.com before 10:00.",
+                    "criteria": [{"id": 1, "content": "Report by email", "weight": 3}],
+                    "labels": ["table"],
+                }
+            ]
+        }).json()["metrics"]["average_score"]   # 1.0
     """
     return await evaluation.evaluate_run(judge, run)
 
@@ -205,6 +293,28 @@ async def compare_runs(run_comparison: RunComparison) -> RunComparisonResult:
 
     No judge is involved: this endpoint is pure computation and answers correctly even when
     the service has no API key configured.
+
+    Args:
+        run_comparison: The two runs to hold against each other — `baseline` and `candidate`,
+            each exactly the `RunResult` document `POST /evaluate/run` returned. Two runs
+            that do not describe the same catalog, on the same scale, with the same weights
+            and labels, are a 422.
+
+    Returns:
+        The `RunComparisonResult`: `metrics_delta`, `summary`, `label_metrics_deltas` (empty
+        when neither run carries labels) and `case_comparison_results` ordered by `case_id`.
+        Every delta is `candidate - baseline`, and a delta of 0.0 means the two runs really
+        landed on the same number.
+
+    Raises:
+        HTTPException: 422, when the two runs are not comparable. Its `detail` names every
+            difference found at once, so one fix can address all of them.
+
+    Example:
+        httpx.post(
+            "http://localhost:8000/compare",
+            json={"baseline": baseline_run, "candidate": candidate_run},
+        ).json()["metrics_delta"]["average_score_delta"]   # 0.5
     """
     try:
         return comparison.compare_runs(run_comparison)
