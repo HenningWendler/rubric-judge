@@ -1,4 +1,5 @@
 import asyncio
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -111,25 +112,30 @@ def instant_backoff(monkeypatch):
     monkeypatch.setattr("rubric_eval.judge._FIRST_BACKOFF_SECONDS", 0)
 
 
+def _client_answering(completions):
+    """The stand-in `OpenAIJudge(client=...)` is given: the judge only ever reaches for
+    `client.chat.completions.create`, so that is the whole client a test has to supply — no
+    SDK object to build and no socket to open behind it."""
+    return SimpleNamespace(chat=SimpleNamespace(completions=completions))
+
+
 def _judge(replies, **overrides):
     config = JudgeConfig(model="m", endpoint="http://x/v1", api_key="k", **overrides)
-    judge = OpenAIJudge(config)
     fake = FakeCompletions(replies)
-    judge.client.chat.completions = fake
-    return judge, fake
+    return OpenAIJudge(config, client=_client_answering(fake)), fake
 
 
 def _judge_answering(response, **overrides):
     """A judge whose endpoint always hands back one prepared response object — for the
     answers that are not reply text at all: no content, or not even a choice to read it
     from."""
-    judge, _ = _judge([], **overrides)
 
     async def create(**kwargs):
         return response
 
-    judge.client.chat.completions = type("C", (), {"create": staticmethod(create)})
-    return judge
+    config = JudgeConfig(model="m", endpoint="http://x/v1", api_key="k", **overrides)
+    answering = type("C", (), {"create": staticmethod(create)})
+    return OpenAIJudge(config, client=_client_answering(answering))
 
 
 CRITERION = Criterion(id=1, content="Send an email", weight=1)
@@ -410,16 +416,18 @@ async def test_an_unretryable_endpoint_error_is_not_asked_again():
 
 async def test_the_judge_is_asked_with_the_configured_sampling_settings():
     """Reproducibility is a promise of the config, so it has to reach the wire."""
-    judge = OpenAIJudge(
-        JudgeConfig(model="m", endpoint="http://x/v1", api_key="k", temperature=0.0, max_tokens=64)
-    )
     sent = {}
 
     async def create(**kwargs):
         sent.update(kwargs)
         return _completion('Reasoning.\n{"score": 2}')
 
-    judge.client.chat.completions = type("C", (), {"create": staticmethod(create)})
+    judge = OpenAIJudge(
+        JudgeConfig(
+            model="m", endpoint="http://x/v1", api_key="k", temperature=0.0, max_tokens=64
+        ),
+        client=_client_answering(type("C", (), {"create": staticmethod(create)})),
+    )
     await judge.score("How?", "Send an email.", CRITERION)
 
     assert sent["temperature"] == 0.0
@@ -673,12 +681,12 @@ async def test_a_custom_prompt_replaces_the_system_message():
     """`OpenAIJudge(config, system_prompt=...)` is the documented way to bring your own wording.
     replaces the system message only — the per-criterion user message stays the bundled one."""
     config = JudgeConfig(model="m", endpoint="http://x/v1", api_key="k")
-    judge = OpenAIJudge(config, system_prompt="Judge in Klingon.")
-    judge.client.chat.completions = FakeCompletions(['Covered.\n{"score": 2}'])
+    fake = FakeCompletions(['Covered.\n{"score": 2}'])
+    judge = OpenAIJudge(config, system_prompt="Judge in Klingon.", client=_client_answering(fake))
 
     await judge.score("How?", "Send an email.", CRITERION)
 
-    system, user = judge.client.chat.completions.calls[0]
+    system, user = fake.calls[0]
     assert system == {"role": "system", "content": "Judge in Klingon."}
     assert "Send an email" in user["content"]
 
@@ -813,9 +821,10 @@ def test_a_custom_prompt_on_the_default_scale_stays_allowed():
 
 async def test_the_judge_scores_and_self_heals_on_its_own_scale():
     config = JudgeConfig(model="m", endpoint="http://x/v1", api_key="k")
-    judge = OpenAIJudge(config, system_prompt="Grade 0 to 10.", scale=TEN_POINT)
     fake = FakeCompletions(['Reasoning.\n{"score": 12}', 'Corrected.\n{"score": 8}'])
-    judge.client.chat.completions = fake
+    judge = OpenAIJudge(
+        config, system_prompt="Grade 0 to 10.", scale=TEN_POINT, client=_client_answering(fake)
+    )
 
     judge_reply = await judge.score("How?", "Send an email.", CRITERION)
 

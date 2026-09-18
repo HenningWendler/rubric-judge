@@ -1,17 +1,20 @@
 """The HTTP layer only: request validation, the judge wiring, and that the result is passed
 through unchanged. What the numbers mean is tested in `test_evaluation.py`."""
 
+import asyncio
 import json
-import threading
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from typing import Any
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
+from openai import AsyncOpenAI
 
 from tests.conftest import CASE, RUN, RUN_SCORES, FakeJudge, run_of, use_judge
 
 from rubric_eval import JudgeUnavailableError
 from rubric_eval.api import app, get_judge
+from rubric_eval.judge import JudgeConfig, OpenAIJudge
 from rubric_eval.models import DEFAULT_SCALE, Scale
 
 
@@ -182,80 +185,99 @@ def test_one_invalid_case_rejects_the_whole_run_before_any_call(client):
 
 # --- end to end: the real SDK against a stub OpenAI-compatible endpoint ---------------------
 #
-# Every other judge test replaces `judge.client.chat.completions`, so nothing checks the one
-# thing the whole tool rests on: that an unmodified `OpenAIJudge` talks to an OpenAI-compatible
-# endpoint correctly. These go through the full chain — HTTP request, `JudgeConfig.from_env`,
-# the openai SDK, a real socket, the parser, the weighted fold, HTTP response.
+# Every other judge test hands `OpenAIJudge` a stand-in for the SDK client, so nothing checks
+# the one thing the whole tool rests on: that an unmodified `OpenAIJudge` talks to an
+# OpenAI-compatible endpoint correctly. These go through the full chain — HTTP request, the
+# SDK writing the call and reading the reply, the parser, the weighted fold, HTTP response —
+# with an in-memory transport under the SDK where a socket used to be.
+
+JUDGE_ENVIRONMENT = {
+    "RUBRIC_EVAL_JUDGE_ENDPOINT": "http://stub/v1",
+    "RUBRIC_EVAL_JUDGE_API_KEY": "stub-key",
+    "RUBRIC_EVAL_JUDGE_MODEL": "stub-model",
+}
+"""Enough to let `get_judge` build a judge from the environment. It is never called, so the
+endpoint does not have to exist — only the wiring is under test."""
 
 EMAIL_CRITERION = CASE["criteria"][0]["content"]
 LAST_DAY_CRITERION = CASE["criteria"][1]["content"]
 
 
-class StubJudgeEndpoint(BaseHTTPRequestHandler):
+class StubJudgeEndpoint:
     """A minimal OpenAI-compatible endpoint: answers each chat completion from a script and
     records the request bodies it received."""
 
-    replies: dict[str, list[str]] = {}
-    """Criterion text -> its replies, in order. Keyed by criterion, not a single queue: the
-    criteria are judged concurrently, so a queue would hand out replies in a racy order."""
+    def __init__(self) -> None:
+        self.replies: dict[str, list[str]] = {}
+        """Criterion text -> its replies, in order. Keyed by criterion, not a single queue:
+        the criteria are judged concurrently, so a queue would hand out replies in a racy
+        order."""
 
-    received: list[dict] = []
+        self.received: list[dict[str, Any]] = []
 
-    def do_POST(self) -> None:
-        length = int(self.headers["content-length"])
-        request = json.loads(self.rfile.read(length))
-        type(self).received.append(request)
-        self._respond(self._next_reply_for(request))
+    def judge(self, **config_overrides: Any) -> OpenAIJudge:
+        """An otherwise unmodified `OpenAIJudge` whose SDK client answers from this stub —
+        the real client, the real wire format, no socket and no environment."""
+        config = JudgeConfig(
+            model="stub-model", endpoint="http://stub/v1", api_key="stub-key", **config_overrides
+        )
+        return OpenAIJudge(config, client=self._sdk_client(config))
 
-    def _next_reply_for(self, request: dict) -> str:
-        asked = request["messages"][1]["content"]
-        for criterion, replies in type(self).replies.items():
-            if criterion in asked:
+    def _sdk_client(self, config: JudgeConfig) -> AsyncOpenAI:
+        """`max_retries=0` because the judge would otherwise do so itself, and the whole point
+        of these tests is that `max_attempts` stays the only retry budget."""
+        return AsyncOpenAI(
+            base_url=config.endpoint,
+            api_key=config.api_key,
+            max_retries=0,
+            http_client=httpx.AsyncClient(transport=httpx.MockTransport(self._answer)),
+        )
+
+    async def _answer(self, request: httpx.Request) -> httpx.Response:
+        """Answers one call, yielding to the event loop first.
+
+        Async, and suspending at least once, because the judge's throttle is only exercised
+        by calls that really overlap: a handler that returned without ever yielding would let
+        each criterion finish before the next one starts, no call would ever queue for a slot,
+        and a broken semaphore would sail through these tests.
+        """
+        await asyncio.sleep(0)
+        asked = json.loads(request.content)
+        self.received.append(asked)
+        return httpx.Response(200, json=_completion_carrying(self._next_reply_for(asked)))
+
+    def _next_reply_for(self, asked: dict[str, Any]) -> str:
+        criterion_prompt = asked["messages"][1]["content"]
+        for criterion, replies in self.replies.items():
+            if criterion in criterion_prompt:
                 return replies.pop(0)
-        raise AssertionError(f"the stub was not scripted for: {asked}")
+        raise AssertionError(f"the stub was not scripted for: {criterion_prompt}")
 
-    def _respond(self, reply: str) -> None:
-        payload = json.dumps(
+
+def _completion_carrying(reply: str) -> dict[str, Any]:
+    """One chat completion in the wire format, so the SDK really parses what it is handed."""
+    return {
+        "id": "chatcmpl-stub",
+        "object": "chat.completion",
+        "created": 0,
+        "model": "stub-model",
+        "choices": [
             {
-                "id": "chatcmpl-stub",
-                "object": "chat.completion",
-                "created": 0,
-                "model": "stub-model",
-                "choices": [
-                    {
-                        "index": 0,
-                        "message": {"role": "assistant", "content": reply},
-                        "finish_reason": "stop",
-                    }
-                ],
+                "index": 0,
+                "message": {"role": "assistant", "content": reply},
+                "finish_reason": "stop",
             }
-        ).encode()
-        self.send_response(200)
-        self.send_header("content-type", "application/json")
-        self.send_header("content-length", str(len(payload)))
-        self.end_headers()
-        self.wfile.write(payload)
-
-    def log_message(self, *args) -> None:
-        """Silence the default stderr access log."""
+        ],
+    }
 
 
 @pytest.fixture
-def stub_endpoint(monkeypatch):
-    """Serves the stub on a free port and points the judge environment at it."""
-    server = ThreadingHTTPServer(("127.0.0.1", 0), StubJudgeEndpoint)
-    threading.Thread(target=server.serve_forever, daemon=True).start()
-    StubJudgeEndpoint.replies, StubJudgeEndpoint.received = {}, []
-
-    monkeypatch.setenv("RUBRIC_EVAL_JUDGE_ENDPOINT", f"http://127.0.0.1:{server.server_port}/v1")
-    monkeypatch.setenv("RUBRIC_EVAL_JUDGE_API_KEY", "stub-key")
-    monkeypatch.setenv("RUBRIC_EVAL_JUDGE_MODEL", "stub-model")
-    get_judge.cache_clear()
-
-    yield StubJudgeEndpoint
-
-    server.shutdown()
-    get_judge.cache_clear()
+def stub_endpoint():
+    """A scripted endpoint, already installed as the judge the app serves its requests with."""
+    endpoint = StubJudgeEndpoint()
+    use_judge(endpoint.judge())
+    yield endpoint
+    app.dependency_overrides.clear()
 
 
 def test_evaluate_end_to_end_against_an_openai_compatible_endpoint(client, stub_endpoint):
@@ -329,19 +351,23 @@ def test_an_outage_in_one_case_answers_503_for_the_whole_run(client):
     assert response.json()["detail"] == "endpoint down"
 
 
-def test_one_judge_serves_the_whole_process_so_its_limit_is_shared(stub_endpoint):
+def test_one_judge_serves_the_whole_process_so_its_limit_is_shared(monkeypatch):
     """`OpenAIJudge` carries the concurrency limit, so it only bounds anything if every
-    request shares one instance — that is what caching `get_judge` is for."""
+    request shares one instance — that is what caching `get_judge` is for. The one test that
+    builds the app's judge from the process environment rather than injecting one."""
+    for variable, value in JUDGE_ENVIRONMENT.items():
+        monkeypatch.setenv(variable, value)
+    get_judge.cache_clear()
+
     assert get_judge() is get_judge()
 
+    get_judge.cache_clear()
 
-def test_a_rubric_larger_than_the_concurrency_limit_is_scored_completely(
-    client, stub_endpoint, monkeypatch
-):
+
+def test_a_rubric_larger_than_the_concurrency_limit_is_scored_completely(client, stub_endpoint):
     """Twenty criteria through two slots: queueing must lose no grade, mix up no reply and
     deadlock nowhere. The limit only bounds the connections, never the result."""
-    monkeypatch.setenv("RUBRIC_EVAL_JUDGE_MAX_CONCURRENT", "2")
-    get_judge.cache_clear()
+    use_judge(stub_endpoint.judge(max_concurrent=2))
     criteria = [
         {"id": number, "content": f"criterion {number:02d}", "weight": 1}
         for number in range(1, 21)
@@ -360,7 +386,7 @@ def test_a_rubric_larger_than_the_concurrency_limit_is_scored_completely(
 
 
 def test_two_requests_in_two_event_loops_score_a_large_rubric_identically(stub_endpoint):
-    """The regression that started this: one cached judge, two `TestClient` blocks — two
+    """The regression that started this: one shared judge, two `TestClient` blocks — two
     event loops — and a rubric larger than the concurrency limit.
 
     With one semaphore for the judge's lifetime, the second round bound none of its queued
@@ -370,7 +396,8 @@ def test_two_requests_in_two_event_loops_score_a_large_rubric_identically(stub_e
     possible outcome for an evaluator, so this asserts both rounds are identical.
 
     Deliberately not using the `client` fixture: the two clients have to be built here, in
-    one test, sharing one cached judge — that is the whole scenario.
+    one test, sharing the one judge the `stub_endpoint` fixture installed — that is the whole
+    scenario.
     """
     criteria = [
         {"id": number, "content": f"criterion {number:02d}", "weight": 1}

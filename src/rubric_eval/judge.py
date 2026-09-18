@@ -323,6 +323,13 @@ class OpenAIJudge:
             prompt is written from it by `prompt.judge_prompt` and `system_prompt` can be
             left out; when it does not, there is nothing to instruct the model with — see
             Raises.
+        client: An already-built SDK client to talk through — one with a shared connection
+            pool, an `AzureOpenAI`, or a test double. Left out, one is built from `config`
+            with the SDK's own retrying switched off, so `config.max_attempts` is the only
+            retry budget there is. A client you pass keeps whatever `max_retries` it was
+            built with, and that cannot be enforced from here: the two budgets then multiply,
+            and the SDK's default of 2 turns 3 configured attempts into 9 calls. Build yours
+            with `max_retries=0` unless you mean exactly that.
 
     Raises:
         ValueError: `scale` describes no levels and no `system_prompt` was given. Refused at
@@ -343,15 +350,12 @@ class OpenAIJudge:
         config: JudgeConfig,
         system_prompt: str | None = None,
         scale: Scale = DEFAULT_SCALE,
+        client: AsyncOpenAI | None = None,
     ):
         self.config = config
         self.scale = scale
         self.system_prompt = system_prompt or _system_prompt_for(scale)
-        self.client = AsyncOpenAI(
-            base_url=config.endpoint, api_key=config.api_key, max_retries=0
-        )
-        #: The SDK's own retrying is off so `config.max_attempts` is the whole budget: two
-        #: retry loops in series would multiply into nine calls where three were configured.
+        self.client = client or _client_for(config)
         self._slots_per_loop: dict[asyncio.AbstractEventLoop, asyncio.Semaphore] = {}
         #: One throttle per event loop, see `free_call_slots`.
 
@@ -495,6 +499,16 @@ def _reply_text(response: ChatCompletion) -> str:
             f"{choice.finish_reason!r}"
         )
     return choice.message.content
+
+
+def _client_for(config: JudgeConfig) -> AsyncOpenAI:
+    """The SDK client a judge talks through when it was given none of its own.
+
+    `max_retries=0` is the point of building it here: the SDK retries twice by default, and
+    in series with `score`'s own loop the two budgets multiply into nine calls where three
+    were configured. `config.max_attempts` is meant to be the only retry budget there is.
+    """
+    return AsyncOpenAI(base_url=config.endpoint, api_key=config.api_key, max_retries=0)
 
 
 def _system_prompt_for(scale: Scale) -> str:

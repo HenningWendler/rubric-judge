@@ -624,15 +624,19 @@ do not describe the same catalog.
 ```python
 class OpenAIJudge:
     def __init__(self, config: JudgeConfig, system_prompt: str | None = None,
-                 scale: Scale = DEFAULT_SCALE)
+                 scale: Scale = DEFAULT_SCALE, client: AsyncOpenAI | None = None)
     async def score(self, question: str, answer: str, criterion: Criterion) -> JudgeReply
 ```
 The bundled judge. `system_prompt` replaces the system prompt and `scale` is what it grades
 on — a described scale writes its own prompt, so passing both is only for your own
-instructions on your own scale, see [Another scale](#another-scale). `score()` judges a
-single criterion with no fan-out and no failure handling — handy for a quick experiment.
-Raises `ValueError` for a `scale` with no `level_descriptions` and no `system_prompt` to go
-with it.
+instructions on your own scale, see [Another scale](#another-scale). `client` is an
+already-built `openai.AsyncOpenAI` to talk through — a shared connection pool, an Azure
+client, a test double; left out, one is built from `config` with `max_retries=0` so
+`max_attempts` stays the only retry budget. A client you pass keeps its own `max_retries`,
+and the two budgets multiply: build yours with `max_retries=0` unless you mean that.
+`score()` judges a single criterion with no fan-out and no failure handling — handy for a
+quick experiment. Raises `ValueError` for a `scale` with no `level_descriptions` and no
+`system_prompt` to go with it.
 
 ```python
 class JudgeConfig:
@@ -1298,18 +1302,19 @@ field tables in [Reference](#reference). One text, never three — they cannot d
 .venv/bin/python -m pytest
 ```
 
-311 tests, no real LLM ever called. Mocked at two levels:
+313 tests, no real LLM ever called. Mocked at two levels:
 
 - **`FakeJudge`** ([conftest.py](tests/conftest.py)) replaces the `Judge` protocol and scores
   from a lookup table — `{1: 2, 2: JudgeUnavailableError("down")}` scores criterion 1 with a
   `2` and lets the judge fail on criterion 2. `CASE` and `RUN` live in the same file, so the domain
   tests and the HTTP tests describe literally the same input. `RUN` is deliberately uneven
   (`0.75`, `0.5`, `0.0`) because uniform scores make most run metrics indistinguishable.
-- **`StubJudgeEndpoint`** ([test_api.py](tests/test_api.py)) is a stdlib HTTP server speaking
-  the OpenAI chat-completions format on a free port, scripted per criterion. The end-to-end
-  tests point `RUBRIC_EVAL_JUDGE_ENDPOINT` at it and drive the whole chain — HTTP request,
-  `JudgeConfig.from_env()`, the real `openai` SDK, a real socket, reply parsing, the weighted
-  fold. That is what proves the wire format and the self-healing retry.
+- **`StubJudgeEndpoint`** ([test_api.py](tests/test_api.py)) answers the OpenAI
+  chat-completions format from a script, one queue per criterion. The end-to-end tests hand a
+  real `OpenAIJudge` an `AsyncOpenAI` client whose transport is that stub (`client=`, see
+  [Reference](#reference)) and drive the whole chain — HTTP request, the real `openai` SDK
+  writing the call and reading the reply, parsing, the weighted fold. That is what proves the
+  wire format and the self-healing retry, without a socket or an environment variable.
 - **`run_of`** ([conftest.py](tests/conftest.py)) builds a finished `RunResult` straight
   from judge scores — `run_of({1: 2, 2: 0}, {21: 1})` is a two-case run, and
   `labels_by_case_id={1: ["table"]}` tags one. Comparison tests are about the *difference*

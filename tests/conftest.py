@@ -6,7 +6,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from rubric_eval.api import app, get_judge
-from rubric_eval.judge import JudgeReply
+from rubric_eval.judge import Judge, JudgeReply
 from rubric_eval.metrics import case_score, label_metrics, run_metrics
 from rubric_eval.models import (
     DEFAULT_SCALE,
@@ -96,8 +96,9 @@ def unconfigured_client(monkeypatch):
     get_judge.cache_clear()
 
 
-def use_judge(judge: FakeJudge) -> None:
-    """Point the app's `get_judge` dependency at a fake for the duration of one test."""
+def use_judge(judge: Judge) -> None:
+    """Point the app's `get_judge` dependency at another judge for the duration of one test —
+    a `FakeJudge`, or a real `OpenAIJudge` wired to a stub endpoint."""
     app.dependency_overrides[get_judge] = lambda: judge
 
 
