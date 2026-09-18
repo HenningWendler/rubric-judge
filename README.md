@@ -616,12 +616,12 @@ do not describe the same catalog.
 
 ```python
 class OpenAIJudge:
-    def __init__(self, config: JudgeConfig, prompt: str | None = None,
+    def __init__(self, config: JudgeConfig, system_prompt: str | None = None,
                  scale: Scale = DEFAULT_SCALE)
-    async def score(self, question: str, answer: str, criterion: Criterion) -> Verdict
+    async def score(self, question: str, answer: str, criterion: Criterion) -> JudgeReply
 ```
-The bundled judge. `prompt` replaces the system prompt and `scale` is what it grades on —
-a described scale writes its own prompt, so passing both is only for your own instructions
+The bundled judge. `system_prompt` replaces the system prompt and `scale` is what it grades
+on — a described scale writes its own prompt, so passing both is only for your own instructions
 on your own scale, see [Another scale](#another-scale). `score()` judges a single criterion
 with no fan-out and no failure handling — handy for a quick experiment. Raises `ValueError`
 for a `scale` with no `level_descriptions` and no `prompt` to go with it.
@@ -1016,16 +1016,16 @@ its backend tolerates, so that is the single place the limit lives: raise
 ```python
 from pathlib import Path
 
-judge = OpenAIJudge(JudgeConfig.from_env(), prompt=Path("my_prompt.txt").read_text())
+judge = OpenAIJudge(JudgeConfig.from_env(), system_prompt=Path("my_prompt.txt").read_text())
 ```
 
-`prompt=` replaces the **system prompt** only. Whatever you write has to keep two promises,
+`system_prompt=` replaces the **system prompt** only. Whatever you write has to keep two promises,
 or the parser will reject every reply: the model must argue first and end with a single
 `{"score": <grade>}` object, and the prose scale it describes must be the judge's `scale` —
 `0–2` unless you pass one.
 
 You usually do not need this. A scale that describes its levels writes the prompt itself —
-see [Another scale](#another-scale). Reach for `prompt=` when you want different *instructions*
+see [Another scale](#another-scale). Reach for `system_prompt=` when you want different *instructions*
 (another language, a stricter examiner, your own worked examples), not merely another scale.
 
 The user prompt and the retry complaints live in [prompt.py](src/rubric_eval/prompt.py).
@@ -1133,31 +1133,31 @@ comparison that ignored that would report a prompt edit as a change in your syst
 judge, a stub:
 
 ```python
-from rubric_eval import DEFAULT_SCALE, Criterion, Scale, Verdict
+from rubric_eval import DEFAULT_SCALE, Criterion, JudgeReply, Scale
 
 class MyJudge:
     scale: Scale = DEFAULT_SCALE
 
-    async def score(self, question: str, answer: str, criterion: Criterion) -> Verdict:
+    async def score(self, question: str, answer: str, criterion: Criterion) -> JudgeReply:
         ...
-        return Verdict(score=2, reasoning="…")
+        return JudgeReply(score=2, reasoning="…")
 ```
 
 Three responsibilities come with it:
 
 - **Declaring a scale, and staying on it.** `scale` is what `case_score()` normalizes by and
   what `is_present` cuts at, so a judge without it is a broken program: the `AttributeError`
-  is re-raised rather than scored `0`. `Verdict.score` must be an integer in
-  `0..scale.maximum` — `Verdict` itself only checks that it is an `int`, but the verdicts are
+  is re-raised rather than scored `0`. `JudgeReply.score` must be an integer in
+  `0..scale.maximum` — `JudgeReply` itself only checks that it is an `int`, but the grades are
   held against the scale, so a judge that declares `0–2` and returns `5` raises
   `ValueError: criteria [1] scored above the scale 0..2 …` out of `evaluate_case()` rather than
-  folding into a case score above `1.0`. It fails loudly on purpose: an out-of-scale verdict
+  folding into a case score above `1.0`. It fails loudly on purpose: an out-of-scale grade
   is a bug in the judge, and a bug must never come back as a plausible number (see
   [Failure and load](#failure-and-load)).
 - **Throttling.** `evaluate_case()` hands out one task per criterion whatever the rubric's
   size, because only your implementation knows what your backend tolerates. `OpenAIJudge`
   bounds itself with `max_concurrent`; yours needs its own bound.
-- **Raising on failure.** Return a valid `Verdict` or raise — never a made-up `0`. Raise
+- **Raising on failure.** Return a valid `JudgeReply` or raise — never a made-up `0`. Raise
   `JudgeUnavailableError` (importable from `rubric_eval`, and subclassable if you want to
   keep your own type) for anything your endpoint did: refused, timed out, out of quota, no
   usable reply. That is what invalidates the run and answers `503`. Anything else you raise
@@ -1190,8 +1190,8 @@ Three grains, each a pair of *what goes in* and *what comes back*:
 | a whole catalog | `Run` | `RunResult` |
 | two whole runs | `RunComparison` | `RunComparisonResult` |
 
-Plus `RunMetrics`, which is `RunResult.metrics` and nothing else, `Scale`, which every
-verdict carries, and `Verdict`, which never leaves `judge.py`.
+Plus `RunMetrics`, which is `RunResult.metrics` and nothing else, `Scale`, which every case
+result carries, and `JudgeReply`, which never leaves `judge.py`.
 
 Labels add no grain — they cut *across* one. `LabelMetrics` and `LabelMetricsDelta` are each
 a label plus the aggregate of the grain above, composed rather than copied, so the pair
@@ -1218,7 +1218,7 @@ Two rules hold the naming together — worth knowing before adding a field:
 The result types draw the layer boundary and answer the question by themselves:
 
 ```python
-Verdict:          score, reasoning                            # what the model replied
+JudgeReply:       score, reasoning                            # what the model replied
 CriterionResult:  criterion_id, weight, score, is_present,     # what the system concluded
                   spread, reasoning
 CaseResult:       case_id, score, scale, criterion_results,    # one whole case
@@ -1227,7 +1227,7 @@ RunMetrics:       the aggregate over many case results
 LabelMetrics:     that aggregate again, per label
 ```
 
-`judge.py` speaks `Verdict` — prompts, parsing and retries are *its* business, and another
+`judge.py` speaks `JudgeReply` — prompts, parsing and retries are *its* business, and another
 implementation may do all three differently. Everything that has to hold no matter who
 judges — how a grade becomes a share of the reachable points, the weighting, "a dead judge
 invalidates the run" — lives outside it, or two judges would produce incomparable scores.

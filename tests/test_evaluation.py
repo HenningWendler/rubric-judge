@@ -9,14 +9,14 @@ import asyncio
 import pytest
 from pydantic import ValidationError
 
-from tests.conftest import CASE, RUN, RUN_VERDICTS, FakeJudge
+from tests.conftest import CASE, RUN, RUN_SCORES, FakeJudge
 
 from rubric_eval import (
     DEFAULT_SCALE,
     Case,
+    JudgeReply,
     JudgeUnavailableError,
     Run,
-    Verdict,
     evaluate_case,
     evaluate_run,
 )
@@ -141,7 +141,7 @@ async def test_a_custom_judge_reports_its_outage_in_the_shared_vocabulary():
         await evaluate_case(FakeJudge({1: QuotaExceeded("no credit left"), 2: 2}), THE_CASE)
 
 
-async def test_a_verdict_off_the_scale_is_refused_rather_than_folded_into_the_score():
+async def test_a_grade_off_the_scale_is_refused_rather_than_folded_into_the_score():
     """`Judge` is a Protocol, so a custom implementation can answer 5 where the scale ends at
     2. That is a bug in the judge, not an outage, and it is refused rather than folded into a
     case score above 1.0 — a number no reader downstream could tell from a real one. The
@@ -150,8 +150,8 @@ async def test_a_verdict_off_the_scale_is_refused_rather_than_folded_into_the_sc
     class OffScaleJudge:
         scale = DEFAULT_SCALE
 
-        async def score(self, question, answer, criterion) -> Verdict:
-            return Verdict(score=5, reasoning="way past the top of the scale")
+        async def score(self, question, answer, criterion) -> JudgeReply:
+            return JudgeReply(score=5, reasoning="way past the top of the scale")
 
     with pytest.raises(ValueError, match=r"criteria \[1, 2\] scored above the scale 0\.\.2"):
         await evaluate_case(OffScaleJudge(), THE_CASE)
@@ -163,7 +163,7 @@ THE_RUN = Run(**RUN)
 
 
 async def test_a_run_returns_every_case_result_in_request_order():
-    result = await evaluate_run(FakeJudge(RUN_VERDICTS), THE_RUN)
+    result = await evaluate_run(FakeJudge(RUN_SCORES), THE_RUN)
 
     assert [case.case_id for case in result.case_results] == [1, 2, 3]
     assert [case.score for case in result.case_results] == pytest.approx([0.75, 0.5, 0.0])
@@ -171,7 +171,7 @@ async def test_a_run_returns_every_case_result_in_request_order():
 
 async def test_a_run_folds_its_case_scores_into_run_metrics():
     """The point of the run over calling `evaluate_case` in a loop: one aggregate."""
-    result = await evaluate_run(FakeJudge(RUN_VERDICTS), THE_RUN)
+    result = await evaluate_run(FakeJudge(RUN_SCORES), THE_RUN)
 
     assert result.metrics.total_cases == 3
     assert result.metrics.average_score == pytest.approx((0.75 + 0.5 + 0.0) / 3)
@@ -181,7 +181,7 @@ async def test_a_run_folds_its_case_scores_into_run_metrics():
 async def test_a_run_entry_is_the_very_same_result_as_a_single_evaluation():
     """Both paths return a `CaseResult`, so there is nothing left that could disagree. The
     one type is what guarantees it — this test only keeps the two entry points honest."""
-    judge = FakeJudge(RUN_VERDICTS)
+    judge = FakeJudge(RUN_SCORES)
 
     in_run = (await evaluate_run(judge, THE_RUN)).case_results[0]
     alone = await evaluate_case(judge, THE_CASE)
@@ -193,7 +193,7 @@ async def test_one_unanswered_criterion_invalidates_the_whole_run():
     """The same policy one grain up, and the reason it has to reach that far: the run metrics
     average the cases against each other, so a single fabricated 0 moves every number in the
     document — including the ones about cases the judge answered for perfectly well."""
-    judge = FakeJudge({**RUN_VERDICTS, 21: JudgeUnavailableError("endpoint down")})
+    judge = FakeJudge({**RUN_SCORES, 21: JudgeUnavailableError("endpoint down")})
 
     with pytest.raises(JudgeUnavailableError, match="endpoint down"):
         await evaluate_run(judge, THE_RUN)
@@ -201,7 +201,7 @@ async def test_one_unanswered_criterion_invalidates_the_whole_run():
 
 async def test_a_bug_in_one_case_aborts_the_whole_run_as_itself():
     """A bug ends the run like an outage does, and stays distinguishable from one."""
-    judge = FakeJudge({**RUN_VERDICTS, 21: RuntimeError("bound to a different event loop")})
+    judge = FakeJudge({**RUN_SCORES, 21: RuntimeError("bound to a different event loop")})
 
     with pytest.raises(RuntimeError):
         await evaluate_run(judge, THE_RUN)
@@ -228,7 +228,7 @@ class _JudgeByAnswer:
     scale = DEFAULT_SCALE
 
     async def score(self, question, answer, criterion):
-        return Verdict(score=2 if "HR tool" in answer else 0, reasoning=answer)
+        return JudgeReply(score=2 if "HR tool" in answer else 0, reasoning=answer)
 
 
 async def test_criterion_ids_may_repeat_across_the_cases_of_a_run():

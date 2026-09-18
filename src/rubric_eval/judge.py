@@ -40,7 +40,7 @@ _FIRST_BACKOFF_SECONDS = 0.5
 
 
 class JudgeUnavailableError(Exception):
-    """The judge produced no verdict, so the run it was part of is invalid.
+    """The judge produced no usable reply, so the run it was part of is invalid.
 
     The whole failure policy in one type: a criterion nobody graded has no score, and the
     plausible-looking 0 that would stand in for it is indistinguishable from a real result.
@@ -55,7 +55,7 @@ class JudgeUnavailableError(Exception):
         class MyJudge:
             scale = DEFAULT_SCALE
 
-            async def score(self, question, answer, criterion) -> Verdict:
+            async def score(self, question, answer, criterion) -> JudgeReply:
                 raise JudgeUnavailableError("my quota is used up")
     """
 
@@ -63,24 +63,34 @@ class JudgeUnavailableError(Exception):
 class UnusableReplyError(ValueError):
     """One judge reply the parser refuses, worded as the complaint to send back to the model.
 
-    A `ValueError`, because that is what `parse_verdict` has always raised for a broken
+    A `ValueError`, because that is what `parse_judge_reply` has always raised for a broken
     reply. Its own type nonetheless: the retry loop repeats an attempt for *this* exception
     and for nothing else, so a `ValueError` escaping the parser by accident stays the bug it
     is instead of being replayed to the model three times and reported as a dead endpoint.
 
     Example:
         try:
-            parse_verdict("I think it is fine.")
+            parse_judge_reply("I think it is fine.")
         except UnusableReplyError as complaint:
             str(complaint)   # "Your reply contained no JSON object …"
     """
 
 
-class Verdict(DocumentedModel):
-    """One parsed and validated judge reply, for exactly one criterion."""
+class JudgeReply(DocumentedModel):
+    """One parsed and validated judge reply, for exactly one criterion.
+
+    Named apart from `CriterionResult` because the two are different stages of the same
+    criterion: this is what the model said, before any weight, presence or scale is attached
+    to it. Only `evaluation._judge_criterion` turns one into the other.
+    """
 
     score: int
-    """Score on the integral scale the judge works on — already checked to be on it."""
+    """The grade the model named, on the integral scale the judge works on — already checked
+    to be one of `Scale.grades`, so it is an `int` and not a float that happens to be whole.
+    `CriterionResult.score` is a float because it may later be averaged over repeated runs;
+    the widening between the two is spelled out at the one place it happens rather than left
+    to Pydantic, so that a float arriving here would be a loud error and not a silent
+    grade."""
 
     reasoning: str
     """The judge's argument: everything it wrote before the closing JSON object."""
@@ -89,7 +99,7 @@ class Verdict(DocumentedModel):
 class Judge(Protocol):
     """Extension point: bring your own client, the core does not care.
 
-    An implementation scores one criterion at a time and either returns a valid `Verdict`
+    An implementation scores one criterion at a time and either returns a valid `JudgeReply`
     or raises — and a raising judge invalidates the whole run, so raise
     `JudgeUnavailableError` for what the endpoint did and anything else for a bug.
 
@@ -101,11 +111,11 @@ class Judge(Protocol):
 
     scale: Scale
     """The grading scale this judge answers on, and the reason a custom judge is not tied to
-    0..2: every verdict it produces is stored with this scale, `case_score` normalizes by its
+    0..2: every grade it produces is stored with this scale, `case_score` normalizes by its
     maximum and `is_present` uses its threshold. A judge without it is a broken program, and
     the resulting `AttributeError` reaches the caller like any other bug."""
 
-    async def score(self, question: str, answer: str, criterion: Criterion) -> Verdict:
+    async def score(self, question: str, answer: str, criterion: Criterion) -> JudgeReply:
         """Decide how well one criterion is covered by one answer.
 
         Args:
@@ -117,7 +127,7 @@ class Judge(Protocol):
                 let importance leak into the score.
 
         Returns:
-            A `Verdict` whose `score` is an integer in 0..`scale.maximum`. An implementation
+            A `JudgeReply` whose `score` is an integer in 0..`scale.maximum`. An implementation
             that returns more is refused when the `CriterionResult` is built, so a judge
             disagreeing with its own declared scale fails loudly instead of pushing the case
             score above 1.0.
@@ -154,7 +164,7 @@ class JudgeConfig(DocumentedModel):
     """Key for that endpoint. Local servers usually accept any non-empty string."""
 
     temperature: float = Field(default=0.0, ge=0)
-    """Sampling temperature. 0.0 keeps verdicts reproducible and is the right value while
+    """Sampling temperature. 0.0 keeps grades reproducible and is the right value while
     each criterion is judged once — judging one several times only says something about the
     model's certainty above 0, where the runs can actually differ."""
 
@@ -214,7 +224,7 @@ class JudgeConfig(DocumentedModel):
         return cls(**{field: value for field, value in settings.items() if value})
 
 
-def parse_verdict(reply: str, scale: Scale = DEFAULT_SCALE) -> Verdict:
+def parse_judge_reply(reply: str, scale: Scale = DEFAULT_SCALE) -> JudgeReply:
     """Pull the score and the argument out of one raw judge reply.
 
     The judge reasons first and closes with a JSON object, so the *last* `{"score": ...}`
@@ -228,7 +238,7 @@ def parse_verdict(reply: str, scale: Scale = DEFAULT_SCALE) -> Verdict:
             the only one a reply can be assumed to be on when none is named.
 
     Returns:
-        A `Verdict` with an integer score on `scale` and the text preceding the object as
+        A `JudgeReply` with an integer score on `scale` and the text preceding the object as
         `reasoning` (the whole reply, if it wrote nothing but the object).
 
     Raises:
@@ -238,14 +248,14 @@ def parse_verdict(reply: str, scale: Scale = DEFAULT_SCALE) -> Verdict:
             The wordings live in `prompt.py`.
 
     Example:
-        parse_verdict('The answer names the address.\n{"score": 2}')
-        # Verdict(score=2, reasoning="The answer names the address.")
+        parse_judge_reply('The answer names the address.\n{"score": 2}')
+        # JudgeReply(score=2, reasoning="The answer names the address.")
     """
     score_object = _last_score_object(reply, scale)
     score = _score_in(score_object, scale)
     if not _is_on(scale, score):
         raise UnusableReplyError(out_of_range_hint(score, scale))
-    return Verdict(score=int(score), reasoning=_reasoning_before(reply, score_object))
+    return JudgeReply(score=int(score), reasoning=_reasoning_before(reply, score_object))
 
 
 def _last_score_object(reply: str, scale: Scale) -> re.Match[str]:
@@ -288,35 +298,39 @@ class OpenAIJudge:
 
     Args:
         config: Endpoint, credentials, model and the retry/throttle limits.
-        prompt: Replaces the system prompt. Whatever you pass has to keep two promises or
-            every reply fails to parse: the model argues first and closes with a single
-            `{"score": <grade>}` object, and the prose scale it describes is `scale`. The
-            user prompt and the retry complaints are not covered by this — they are derived
-            from `scale` in `prompt.py`.
+        system_prompt: Replaces the generated system prompt — the only one of the three
+            prompts a judge sends that is yours to write; `criterion_prompt` is the user
+            prompt and the retry complaints are derived from `scale` in `prompt.py`. Whatever
+            you pass has to keep two promises or every reply fails to parse: the model argues
+            first and closes with a single `{"score": <grade>}` object, and the prose scale it
+            describes is `scale`.
         scale: The grading scale this judge answers on. When it describes its levels, the
             prompt is written from it by `prompt.judge_prompt` and `prompt` can be left out;
             when it does not, there is nothing to instruct the model with — see Raises.
 
     Raises:
-        ValueError: `scale` describes no levels and no `prompt` was given. Refused at
+        ValueError: `scale` describes no levels and no `system_prompt` was given. Refused at
             construction rather than at the first reply: a model told 0-2 while its answers
             are checked against 0..10 fails every criterion of every case, one paid call at
             a time, and the run still comes back looking like a bad system.
 
     Example:
         judge = OpenAIJudge(JudgeConfig.from_env())
-        verdict = await judge.score("How do I report sick leave?", answer, criterion)
+        judge_reply = await judge.score("How do I report sick leave?", answer, criterion)
 
         ten_point = Scale(maximum=10, presence_threshold=5, level_descriptions={...})
         finer = OpenAIJudge(config, scale=ten_point)      # prompt written from the scale
     """
 
     def __init__(
-        self, config: JudgeConfig, prompt: str | None = None, scale: Scale = DEFAULT_SCALE
+        self,
+        config: JudgeConfig,
+        system_prompt: str | None = None,
+        scale: Scale = DEFAULT_SCALE,
     ):
         self.config = config
         self.scale = scale
-        self.system_prompt = prompt or _prompt_for(scale)
+        self.system_prompt = system_prompt or _system_prompt_for(scale)
         self.client = AsyncOpenAI(
             base_url=config.endpoint, api_key=config.api_key, max_retries=0
         )
@@ -352,7 +366,7 @@ class OpenAIJudge:
             loop: slots for loop, slots in self._slots_per_loop.items() if not loop.is_closed()
         }
 
-    async def score(self, question: str, answer: str, criterion: Criterion) -> Verdict:
+    async def score(self, question: str, answer: str, criterion: Criterion) -> JudgeReply:
         """Ask the model about one criterion until it answers usably, or give the run up.
 
         Two kinds of failure share the one attempt budget, because each of them costs a call.
@@ -367,10 +381,10 @@ class OpenAIJudge:
             criterion: The single requirement to judge — only its `content` is sent.
 
         Returns:
-            A `Verdict` with a validated integer score and the model's argument for it.
+            A `JudgeReply` with a validated integer score and the model's argument for it.
 
         Raises:
-            JudgeUnavailableError: No usable verdict within `config.max_attempts`, naming
+            JudgeUnavailableError: No usable reply within `config.max_attempts`, naming
                 the last cause and chaining it as `__cause__`. The run is invalid from here
                 on — nothing above turns this into a score.
             openai.OpenAIError: An endpoint failure no retry can heal — a rejected key, an
@@ -378,12 +392,12 @@ class OpenAIJudge:
 
         Example:
             judge = OpenAIJudge(JudgeConfig.from_env())
-            verdict = await judge.score(
+            judge_reply = await judge.score(
                 "How do I report sick leave?",
                 "Email hr@example.com before 10:00.",
                 Criterion(id=1, content="Report by email before 10:00", weight=3),
             )
-            verdict.score   # 2
+            judge_reply.score   # 2
         """
         conversation = self._opening_messages(question, answer, criterion)
         last_failure: Exception | None = None
@@ -395,7 +409,7 @@ class OpenAIJudge:
                 await asyncio.sleep(self._backoff_seconds(attempt))
                 continue
             try:
-                return parse_verdict(reply, self.scale)
+                return parse_judge_reply(reply, self.scale)
             except UnusableReplyError as complaint:
                 last_failure = complaint
                 conversation = conversation + _correction(reply, complaint)
@@ -467,7 +481,7 @@ def _reply_text(response: ChatCompletion) -> str:
     return choice.message.content
 
 
-def _prompt_for(scale: Scale) -> str:
+def _system_prompt_for(scale: Scale) -> str:
     """The system prompt a judge gets when it brings none of its own.
 
     `JUDGE_EN` for the bundled scale rather than `judge_prompt(scale)`, because the bundled

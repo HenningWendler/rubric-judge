@@ -12,7 +12,8 @@ prompt that agrees with the parser instead of one somebody had to keep in sync b
 
 A Python module rather than a `.txt`, so the prompt cannot go missing from a wheel or a
 container image. Callers who want their own wording pass it to
-`OpenAIJudge(config, prompt=...)`; reading that from a file is their job, not the judge's.
+`OpenAIJudge(config, system_prompt=...)`; reading that from a file is their job, not the
+judge's.
 """
 
 import textwrap
@@ -100,7 +101,8 @@ def judge_prompt(scale: Scale, examples: str = "") -> str:
 
     Everything the judge is told about *grading* comes from `scale`: the header, one line per
     level in its own words, and the reply format down to the list of grades it may answer
-    with. Nothing in the result can therefore contradict what `judge.parse_verdict` accepts.
+    with. Nothing in the result can therefore contradict what `judge.parse_judge_reply`
+    accepts.
 
     Args:
         scale: The scale to instruct the judge on. It has to describe its levels — see Raises.

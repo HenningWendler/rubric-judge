@@ -1,5 +1,5 @@
 """The grading scale as a judge-owned setting: what a valid scale is, what it does to a
-verdict, and what it stops you from doing with two runs that disagree about it.
+criterion result, and what it stops you from doing with two runs that disagree about it.
 
 The scale story cuts across every module — model, judge, evaluation, comparison — so it is
 told in one file rather than in five fragments nobody reads together.
@@ -20,7 +20,7 @@ from rubric_eval import (
     RunResult,
     RunsNotComparableError,
     Scale,
-    Verdict,
+    JudgeReply,
     compare_runs,
     evaluate_case,
 )
@@ -35,11 +35,15 @@ def _criterion(criterion_id: int = 1, weight: float = 1) -> Criterion:
     return Criterion(id=criterion_id, content="x", weight=weight)
 
 
-def _case_result_of(*verdicts: CriterionResult, scale: Scale = DEFAULT_SCALE) -> CaseResult:
-    """A case around the given verdicts — the object that owns the scale, and therefore the
-    one that has to refuse a verdict disagreeing with it. Its own `score` is irrelevant here
-    and left at 0.0."""
-    return CaseResult(case_id=1, score=0.0, scale=scale, criterion_results=list(verdicts))
+def _case_result_of(
+    *criterion_results: CriterionResult, scale: Scale = DEFAULT_SCALE
+) -> CaseResult:
+    """A case around the given criterion results — the object that owns the scale, and
+    therefore the one that has to refuse a result disagreeing with it. Its own `score` is
+    irrelevant here and left at 0.0."""
+    return CaseResult(
+        case_id=1, score=0.0, scale=scale, criterion_results=list(criterion_results)
+    )
 
 
 # --------------------------------------------------------------------------- the scale itself
@@ -128,7 +132,7 @@ def test_the_grades_of_a_scale_run_from_zero_to_its_maximum_inclusive():
     assert list(TEN_POINT.grades) == [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
 
 
-def test_a_scale_is_not_stored_on_the_verdict_but_on_the_case_above_it():
+def test_a_scale_is_not_stored_on_the_criterion_result_but_on_the_case_above_it():
     """One judge, one scale, one case — so a 10-criterion case stores it once, not ten times."""
     assert "scale" not in CriterionResult.judged(_criterion(), 2, None, DEFAULT_SCALE).model_dump()
     assert _case_result_of(CriterionResult.judged(_criterion(), 2, None, DEFAULT_SCALE)).scale
@@ -140,7 +144,7 @@ def test_rejects_a_threshold_that_is_not_a_real_number(threshold):
         Scale(maximum=2, presence_threshold=threshold)
 
 
-# ------------------------------------------------------------------ what a verdict does with it
+# --------------------------------------------------- what a criterion result does with it
 
 
 def test_presence_follows_the_scales_own_threshold_not_half_a_point():
@@ -161,11 +165,11 @@ def test_presence_is_refused_the_other_way_round_too():
         _case_result_of(CriterionResult(criterion_id=1, weight=1, score=2.0, is_present=False))
 
 
-def test_presence_is_part_of_the_serialized_verdict():
+def test_presence_is_part_of_the_serialized_criterion_result():
     assert CriterionResult.judged(_criterion(), 2, None, DEFAULT_SCALE).model_dump()["is_present"]
 
 
-def test_rejects_a_case_whose_verdict_is_graded_above_its_scale():
+def test_rejects_a_case_whose_criterion_result_is_graded_above_its_scale():
     with pytest.raises(ValidationError, match="above the scale"):
         _case_result_of(CriterionResult(criterion_id=1, weight=1, score=3.0, is_present=True))
 
@@ -257,11 +261,11 @@ def test_rejects_a_run_whose_average_criterion_score_is_off_its_own_scale():
 
 
 def test_a_perfect_case_scores_one_on_any_scale():
-    verdicts = [CriterionResult.judged(_criterion(1, 3), 10, None, TEN_POINT)]
-    assert case_score(verdicts, TEN_POINT) == 1.0
+    criterion_results = [CriterionResult.judged(_criterion(1, 3), 10, None, TEN_POINT)]
+    assert case_score(criterion_results, TEN_POINT) == 1.0
 
 
-def test_the_fold_refuses_a_verdict_the_scale_cannot_carry():
+def test_the_fold_refuses_a_grade_the_scale_cannot_carry():
     """`case_score` divides by the maximum, so it cannot make a share of the reachable points
     out of a grade above it — and it is the first thing `evaluate_case` calls, which is what
     makes the complaint name the criterion instead of the case score it would have produced."""
@@ -269,12 +273,12 @@ def test_the_fold_refuses_a_verdict_the_scale_cannot_carry():
         case_score([CriterionResult.judged(_criterion(1), 10, None, TEN_POINT)], DEFAULT_SCALE)
 
 
-def test_the_fold_normalizes_by_the_scale_the_verdict_names():
-    verdicts = [
+def test_the_fold_normalizes_by_the_scale_the_case_names():
+    criterion_results = [
         CriterionResult.judged(_criterion(1, 3), 10, None, TEN_POINT),
         CriterionResult.judged(_criterion(2, 1), 0, None, TEN_POINT),
     ]
-    assert case_score(verdicts, TEN_POINT) == pytest.approx(0.75)  # (3*10/10 + 1*0/10) / 4
+    assert case_score(criterion_results, TEN_POINT) == pytest.approx(0.75)  # 3*10/10 / 4
 
 
 def test_the_same_shape_of_answer_scores_the_same_on_two_scales():
@@ -293,7 +297,8 @@ async def test_a_custom_scale_reaches_the_results_it_produced():
     result = await evaluate_case(judge, Case(**CASE))
 
     assert result.scale == TEN_POINT
-    assert [verdict.score for verdict in result.criterion_results] == [10.0, 0.0]
+    graded = [criterion_result.score for criterion_result in result.criterion_results]
+    assert graded == [10.0, 0.0]
     assert result.score == pytest.approx(0.75)  # weights 3 and 1
 
 
@@ -311,7 +316,7 @@ async def test_a_judge_that_declares_no_scale_is_a_broken_program_not_an_outage(
 
     class ScalelessJudge:
         async def score(self, question, answer, criterion):
-            return Verdict(score=2, reasoning="")
+            return JudgeReply(score=2, reasoning="")
 
     with pytest.raises(AttributeError):
         await evaluate_case(ScalelessJudge(), Case(**CASE))
@@ -330,12 +335,16 @@ async def test_a_judge_scoring_above_the_scale_it_declared_is_refused():
 
 def test_refuses_to_compare_runs_judged_on_different_scales():
     with pytest.raises(RunsNotComparableError, match="different scales"):
-        compare_runs(RunComparison(baseline=run_of({1: 2}), candidate=run_of({1: 7}, scale=TEN_POINT)))
+        compare_runs(
+            RunComparison(baseline=run_of({1: 2}), candidate=run_of({1: 7}, scale=TEN_POINT))
+        )
 
 
 def test_the_refusal_names_both_scales():
     with pytest.raises(RunsNotComparableError, match=r"0\.\.2.*0\.\.10"):
-        compare_runs(RunComparison(baseline=run_of({1: 2}), candidate=run_of({1: 7}, scale=TEN_POINT)))
+        compare_runs(
+            RunComparison(baseline=run_of({1: 2}), candidate=run_of({1: 7}, scale=TEN_POINT))
+        )
 
 
 def test_two_runs_on_the_same_custom_scale_compare_normally():
@@ -367,7 +376,9 @@ def test_a_run_of_cases_on_different_scales_has_no_metrics_to_report():
 def test_two_scales_sharing_a_maximum_are_still_two_scales():
     strict = Scale(maximum=2, presence_threshold=2)
     with pytest.raises(RunsNotComparableError, match="different scales"):
-        compare_runs(RunComparison(baseline=run_of({1: 1}), candidate=run_of({1: 1}, scale=strict)))
+        compare_runs(
+            RunComparison(baseline=run_of({1: 1}), candidate=run_of({1: 1}, scale=strict))
+        )
 
 
 def test_a_run_stored_before_scales_existed_compares_with_a_new_one():
@@ -444,7 +455,9 @@ def test_rewording_a_level_makes_it_a_different_scale():
     )
     assert reworded != DEFAULT_SCALE
     with pytest.raises(RunsNotComparableError, match="different scales"):
-        compare_runs(RunComparison(baseline=run_of({1: 1}), candidate=run_of({1: 1}, scale=reworded)))
+        compare_runs(
+            RunComparison(baseline=run_of({1: 1}), candidate=run_of({1: 1}, scale=reworded))
+        )
 
 
 def test_the_refusal_says_which_grade_was_reworded_when_the_scales_print_alike():
@@ -454,7 +467,9 @@ def test_the_refusal_says_which_grade_was_reworded_when_the_scales_print_alike()
         update={"level_descriptions": DEFAULT_SCALE.level_descriptions | {1: "Halfway there."}}
     )
     with pytest.raises(RunsNotComparableError, match=r"the wording of \[1\] differs"):
-        compare_runs(RunComparison(baseline=run_of({1: 1}), candidate=run_of({1: 1}, scale=reworded)))
+        compare_runs(
+            RunComparison(baseline=run_of({1: 1}), candidate=run_of({1: 1}, scale=reworded))
+        )
 
 
 def test_a_run_says_which_grade_was_reworded_too_when_its_cases_print_alike():
@@ -481,7 +496,9 @@ def test_a_refusal_over_different_maximums_stays_short():
     """The two names already explain it, so listing eleven reworded grades would be noise."""
     ten_point = Scale(maximum=10, presence_threshold=5)
     with pytest.raises(RunsNotComparableError, match=r"candidate 0\.\.10 \(covered from 5\.0\)$"):
-        compare_runs(RunComparison(baseline=run_of({1: 1}), candidate=run_of({1: 1}, scale=ten_point)))
+        compare_runs(
+            RunComparison(baseline=run_of({1: 1}), candidate=run_of({1: 1}, scale=ten_point))
+        )
 
 
 def test_descriptions_survive_a_json_round_trip_with_their_grades_as_numbers():

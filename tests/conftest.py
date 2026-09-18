@@ -6,7 +6,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from rubric_eval.api import app, get_judge
-from rubric_eval.judge import Verdict
+from rubric_eval.judge import JudgeReply
 from rubric_eval.metrics import case_score, label_metrics, run_metrics
 from rubric_eval.models import (
     DEFAULT_SCALE,
@@ -52,7 +52,7 @@ lookup table scores each criterion of each case separately. With `{1: 2, 2: 0, 2
 the cases score 0.75, 0.5 and 0.0 — one strong, one partial, one total miss, which is what
 makes the run metrics say something."""
 
-RUN_VERDICTS = {1: 2, 2: 0, 21: 1, 31: 0}
+RUN_SCORES = {1: 2, 2: 0, 21: 1, 31: 0}
 """The lookup table producing exactly those three scores."""
 
 
@@ -67,11 +67,11 @@ class FakeJudge:
         self.by_criterion = by_criterion
         self.scale = scale
 
-    async def score(self, question, answer, criterion) -> Verdict:
+    async def score(self, question, answer, criterion) -> JudgeReply:
         outcome = self.by_criterion[criterion.id]
         if isinstance(outcome, Exception):
             raise outcome
-        return Verdict(score=outcome, reasoning=f"reasoning for {criterion.id}")
+        return JudgeReply(score=outcome, reasoning=f"reasoning for {criterion.id}")
 
 
 @pytest.fixture

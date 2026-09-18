@@ -5,10 +5,10 @@ from rubric_eval.evaluation import evaluate_case, evaluate_run, filter_cases_by_
 from rubric_eval.judge import (
     Judge,
     JudgeConfig,
+    JudgeReply,
     JudgeUnavailableError,
     OpenAIJudge,
     UnusableReplyError,
-    Verdict,
 )
 from rubric_eval.metrics import case_score, label_metrics, run_metrics
 from rubric_eval.models import (
@@ -52,6 +52,7 @@ __all__ = [
     "CriterionResult",
     "Judge",
     "JudgeConfig",
+    "JudgeReply",
     "JudgeUnavailableError",
     "LabelFilter",
     "LabelMetrics",
@@ -66,7 +67,6 @@ __all__ = [
     "RunsNotComparableError",
     "Scale",
     "UnusableReplyError",
-    "Verdict",
     "case_score",
     "compare_runs",
     "evaluate_case",

@@ -1,7 +1,7 @@
 """Scoring cases: judge every criterion and fold the results into scores.
 
 The layer between the judge and the transport, and the only place that speaks both
-languages: a `Judge` answers with a `Verdict` or raises, a caller wants a complete
+languages: a `Judge` answers with a `JudgeReply` or raises, a caller wants a complete
 `CaseResult`. Nothing here knows about HTTP, so a CLI or a notebook uses the exact same
 entry points as `POST /evaluate` and `POST /evaluate/run`.
 
@@ -184,10 +184,16 @@ def filter_cases_by_labels(cases: list[Case], label_filter: list[list[str]]) -> 
 
 
 async def _judge_criterion(judge: Judge, case: Case, criterion: Criterion) -> CriterionResult:
-    """Turn one `Verdict` into one `CriterionResult`, on the scale its judge declares.
+    """Turn one `JudgeReply` into one `CriterionResult`, on the scale its judge declares.
+
+    The one place the judge's integer grade becomes the float a result carries, written out
+    rather than left to Pydantic: a `CriterionResult.score` may later be an average over
+    repeated runs, and that is the only reason the two types disagree about the type.
 
     Nothing is caught here: the judge decides what its failures mean by which exception it
     raises, and both answers — the run is invalid, or the program is broken — travel up.
     """
-    verdict = await judge.score(case.question, case.answer, criterion)
-    return CriterionResult.judged(criterion, verdict.score, verdict.reasoning, judge.scale)
+    judge_reply = await judge.score(case.question, case.answer, criterion)
+    return CriterionResult.judged(
+        criterion, float(judge_reply.score), judge_reply.reasoning, judge.scale
+    )

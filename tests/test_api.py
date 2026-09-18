@@ -8,7 +8,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import pytest
 from fastapi.testclient import TestClient
 
-from tests.conftest import CASE, RUN, RUN_VERDICTS, FakeJudge, run_of, use_judge
+from tests.conftest import CASE, RUN, RUN_SCORES, FakeJudge, run_of, use_judge
 
 from rubric_eval import JudgeUnavailableError
 from rubric_eval.api import app, get_judge
@@ -47,7 +47,7 @@ def test_criterion_content_must_not_be_empty(client):
 
 def test_criterion_content_must_not_be_only_whitespace(client):
     """`min_length=1` lets "   " through, and a blank criterion costs a real LLM call to
-    produce a meaningless verdict."""
+    produce a meaningless grade."""
     use_judge(FakeJudge({}))
     bad = {**CASE, "criteria": [{"id": 1, "content": "   ", "weight": 3}]}
     assert client.post("/evaluate", json=bad).status_code == 422
@@ -111,7 +111,7 @@ def test_evaluate_fails_loudly_when_the_judge_is_unconfigured(unconfigured_clien
 
 
 def test_evaluate_run_serves_every_case_and_the_run_metrics(client):
-    use_judge(FakeJudge(RUN_VERDICTS))
+    use_judge(FakeJudge(RUN_SCORES))
 
     body = client.post("/evaluate/run", json=RUN).json()
 
@@ -121,7 +121,7 @@ def test_evaluate_run_serves_every_case_and_the_run_metrics(client):
 
 def test_the_run_result_carries_every_published_field(client):
     """The result shape is a published interface — it may grow, never shrink."""
-    use_judge(FakeJudge(RUN_VERDICTS))
+    use_judge(FakeJudge(RUN_SCORES))
 
     body = client.post("/evaluate/run", json=RUN).json()
 
@@ -139,7 +139,7 @@ def test_the_run_result_carries_every_published_field(client):
 def test_a_run_entry_is_serialized_exactly_like_a_single_evaluation(client):
     """Both endpoints return a `CaseResult`, so the documents must be identical — not merely
     similar. That is what lets a caller treat the two results interchangeably."""
-    use_judge(FakeJudge(RUN_VERDICTS))
+    use_judge(FakeJudge(RUN_SCORES))
 
     in_run = client.post("/evaluate/run", json=RUN).json()["case_results"][0]
     alone = client.post("/evaluate", json=CASE).json()
@@ -171,7 +171,7 @@ def test_duplicate_case_ids_are_rejected(client):
 def test_one_invalid_case_rejects_the_whole_run_before_any_call(client):
     """Validation stays at the boundary: a run is not partially judged and partially
     refused, so nothing is paid for a run whose result would be incomplete anyway."""
-    use_judge(FakeJudge(RUN_VERDICTS))
+    use_judge(FakeJudge(RUN_SCORES))
     broken = {"cases": [RUN["cases"][0], {**RUN["cases"][1], "criteria": []}]}
 
     response = client.post("/evaluate/run", json=broken)
@@ -321,7 +321,7 @@ def test_an_unhealable_endpoint_answers_503_rather_than_a_partial_result(client,
 def test_an_outage_in_one_case_answers_503_for_the_whole_run(client):
     """The run metrics average the cases against each other, so there is no honest partial
     run to hand back — not even the cases that were judged."""
-    use_judge(FakeJudge({**RUN_VERDICTS, 21: JudgeUnavailableError("endpoint down")}))
+    use_judge(FakeJudge({**RUN_SCORES, 21: JudgeUnavailableError("endpoint down")}))
 
     response = client.post("/evaluate/run", json=RUN)
 
@@ -338,7 +338,7 @@ def test_one_judge_serves_the_whole_process_so_its_limit_is_shared(stub_endpoint
 def test_a_rubric_larger_than_the_concurrency_limit_is_scored_completely(
     client, stub_endpoint, monkeypatch
 ):
-    """Twenty criteria through two slots: queueing must lose no verdict, mix up no reply and
+    """Twenty criteria through two slots: queueing must lose no grade, mix up no reply and
     deadlock nowhere. The limit only bounds the connections, never the result."""
     monkeypatch.setenv("RUBRIC_EVAL_JUDGE_MAX_CONCURRENT", "2")
     get_judge.cache_clear()
@@ -455,7 +455,7 @@ def test_the_comparison_carries_every_published_field(client):
 def test_a_run_result_can_be_posted_straight_back_to_compare(client):
     """The two endpoints have to fit together without reshaping: whatever `/evaluate/run`
     returned is a valid half of a `/compare` body, verbatim."""
-    use_judge(FakeJudge(RUN_VERDICTS))
+    use_judge(FakeJudge(RUN_SCORES))
     run = client.post("/evaluate/run", json=RUN).json()
 
     response = client.post("/compare", json={"baseline": run, "candidate": run})
@@ -595,7 +595,7 @@ case 3 only `links` — enough to tell a subset filter from an exact-match one."
 
 
 def test_a_run_reports_its_metrics_once_per_label(client):
-    use_judge(FakeJudge(RUN_VERDICTS))
+    use_judge(FakeJudge(RUN_SCORES))
 
     body = client.post("/evaluate/run", json=LABELLED_RUN).json()
 
@@ -606,7 +606,7 @@ def test_a_run_reports_its_metrics_once_per_label(client):
 
 def test_a_label_filter_in_the_body_runs_only_the_matching_cases(client):
     """No query string: the label filter travels in the body, and the server runs the subset."""
-    use_judge(FakeJudge(RUN_VERDICTS))
+    use_judge(FakeJudge(RUN_SCORES))
     narrowed = {**LABELLED_RUN, "label_filter": [["links"]]}
 
     body = client.post("/evaluate/run", json=narrowed).json()
@@ -616,7 +616,7 @@ def test_a_label_filter_in_the_body_runs_only_the_matching_cases(client):
 
 
 def test_one_group_requires_every_label_in_it(client):
-    use_judge(FakeJudge(RUN_VERDICTS))
+    use_judge(FakeJudge(RUN_SCORES))
     narrowed = {**LABELLED_RUN, "label_filter": [["table", "images"]]}
 
     body = client.post("/evaluate/run", json=narrowed).json()
@@ -626,7 +626,7 @@ def test_one_group_requires_every_label_in_it(client):
 
 def test_an_or_of_ands_travels_over_http_intact(client):
     """`(table AND images) OR links` — the combination the flat form could not express."""
-    use_judge(FakeJudge(RUN_VERDICTS))
+    use_judge(FakeJudge(RUN_SCORES))
     narrowed = {**LABELLED_RUN, "label_filter": [["table", "images"], ["links"]]}
 
     body = client.post("/evaluate/run", json=narrowed).json()
@@ -637,7 +637,7 @@ def test_an_or_of_ands_travels_over_http_intact(client):
 def test_the_metrics_describe_the_selected_cases_only(client):
     """The run is the subset, so its aggregate and its buckets are the subset's — otherwise
     a narrowed run would report numbers for cases it never judged."""
-    use_judge(FakeJudge(RUN_VERDICTS))
+    use_judge(FakeJudge(RUN_SCORES))
     narrowed = {**LABELLED_RUN, "label_filter": [["links"]]}
 
     body = client.post("/evaluate/run", json=narrowed).json()
@@ -648,7 +648,7 @@ def test_the_metrics_describe_the_selected_cases_only(client):
 
 def test_a_selection_matching_nothing_names_the_labels_that_do_exist(client):
     """Nearly always a typo, and the right spelling is unguessable from "nothing matched"."""
-    use_judge(FakeJudge(RUN_VERDICTS))
+    use_judge(FakeJudge(RUN_SCORES))
     typo = {**LABELLED_RUN, "label_filter": [["tabel"]]}
 
     response = client.post("/evaluate/run", json=typo)
@@ -661,14 +661,14 @@ def test_a_selection_matching_nothing_names_the_labels_that_do_exist(client):
 
 
 def test_a_blank_label_in_a_selection_is_rejected(client):
-    use_judge(FakeJudge(RUN_VERDICTS))
+    use_judge(FakeJudge(RUN_SCORES))
     blank = {**LABELLED_RUN, "label_filter": [[""]]}
 
     assert client.post("/evaluate/run", json=blank).status_code == 422
 
 
 def test_a_repeated_group_is_rejected(client):
-    use_judge(FakeJudge(RUN_VERDICTS))
+    use_judge(FakeJudge(RUN_SCORES))
     repeated = {**LABELLED_RUN, "label_filter": [["table"], ["table"]]}
 
     assert client.post("/evaluate/run", json=repeated).status_code == 422
@@ -677,7 +677,7 @@ def test_a_repeated_group_is_rejected(client):
 def test_a_flat_list_of_labels_is_rejected_rather_than_read_as_a_group(client):
     """`"label_filter": ["table"]` is a plausible mistake; JSON gives no type error of its
     own, so the schema has to be the one that refuses it."""
-    use_judge(FakeJudge(RUN_VERDICTS))
+    use_judge(FakeJudge(RUN_SCORES))
     flat = {**LABELLED_RUN, "label_filter": ["table"]}
 
     assert client.post("/evaluate/run", json=flat).status_code == 422
