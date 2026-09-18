@@ -9,7 +9,7 @@ story is in `test_scale.py`. The HTTP end of it lives in `test_api.py`.
 import pytest
 from pydantic import ValidationError
 
-from conftest import CASE, FakeJudge, run_of
+from tests.conftest import CASE, FakeJudge, run_of
 from rubric_eval import (
     Batch,
     BatchResult,

@@ -8,7 +8,7 @@ told in one file rather than in five fragments nobody reads together.
 import pytest
 from pydantic import ValidationError
 
-from conftest import CASE, FakeJudge, run_of
+from tests.conftest import CASE, FakeJudge, run_of
 from rubric_eval import (
     DEFAULT_SCALE,
     BatchResult,

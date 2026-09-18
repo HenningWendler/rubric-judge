@@ -8,7 +8,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import pytest
 from fastapi.testclient import TestClient
 
-from conftest import BATCH, BATCH_VERDICTS, CASE, FakeJudge, run_of, use_judge
+from tests.conftest import BATCH, BATCH_VERDICTS, CASE, FakeJudge, run_of, use_judge
 
 from rubric_eval import JudgeUnavailableError
 from rubric_eval.api import app, get_judge

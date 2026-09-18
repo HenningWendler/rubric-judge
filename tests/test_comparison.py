@@ -7,7 +7,7 @@ and deltas out with no judge and no event loop in between.
 import pytest
 from pydantic import ValidationError
 
-from conftest import run_of
+from tests.conftest import run_of
 from rubric_eval import (
     SCORE_EQUALITY_TOLERANCE,
     ChangeStatus,

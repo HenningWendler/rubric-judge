@@ -9,7 +9,7 @@ import asyncio
 import pytest
 from pydantic import ValidationError
 
-from conftest import BATCH, BATCH_VERDICTS, CASE, FakeJudge
+from tests.conftest import BATCH, BATCH_VERDICTS, CASE, FakeJudge
 
 from rubric_eval import (
     DEFAULT_SCALE,
