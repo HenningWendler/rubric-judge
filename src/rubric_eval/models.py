@@ -568,7 +568,6 @@ class CriterionResult(DocumentedModel):
             DEFAULT_SCALE,
         )
         criterion_result.is_present   # True
-        criterion_result.spread       # 0.0 — one judge run, so no spread to report
     """
 
     criterion_id: int
@@ -589,10 +588,6 @@ class CriterionResult(DocumentedModel):
     with the scale of the `CaseResult` this result belongs to. Never asked of the judge —
     one question less for it to get wrong — and `CaseResult` refuses a result whose value
     here contradicts its own score, so it cannot drift away from the number it describes."""
-
-    spread: float = Field(default=0.0, ge=0, allow_inf_nan=False)
-    """Standard deviation of `score` across repeated judge runs. Stays 0.0 while every
-    criterion is judged exactly once, which is the only mode implemented so far."""
 
     reasoning: str | None = None
     """The judge's own argument for the score."""

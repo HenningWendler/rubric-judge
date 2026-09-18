@@ -75,7 +75,6 @@
           "weight": 3.0,
           "score": 0.0,
           "is_present": false,
-          "spread": 0.0,
           "reasoning": "The answer names no recipient and no deadline."
         },
         {
@@ -83,7 +82,6 @@
           "weight": 1.0,
           "score": 0.0,
           "is_present": false,
-          "spread": 0.0,
           "reasoning": "Neither the expected last day nor any duration is mentioned."
         }
       ],
@@ -109,7 +107,6 @@
           "weight": 1.0,
           "score": 2.0,
           "is_present": true,
-          "spread": 0.0,
           "reasoning": "The answer names the HR tool as the place to submit the request."
         }
       ],
@@ -136,7 +133,6 @@
           "weight": 1.0,
           "score": 2.0,
           "is_present": true,
-          "spread": 0.0,
           "reasoning": "The answer names the line manager as the approver."
         }
       ],

@@ -94,10 +94,9 @@ def test_the_result_carries_every_published_field(client):
     assert set(body) == {"case_id", "score", "scale", "criterion_results", "labels"}
     assert body["scale"] == DEFAULT_SCALE.model_dump(mode="json")  # grades as JSON keys
     assert set(body["criterion_results"][0]) == {
-        "criterion_id", "weight", "score", "is_present", "spread", "reasoning",
+        "criterion_id", "weight", "score", "is_present", "reasoning",
     }
     assert body["criterion_results"][0]["weight"] == 3
-    assert body["criterion_results"][0]["spread"] == 0.0
 
 
 def test_health_answers_even_when_the_judge_is_unconfigured(unconfigured_client):

@@ -645,7 +645,6 @@ What a `Judge` returns and the only type a custom judge has to produce. It is no
 | `weight` | `float` | `> 0` | Copy of `Criterion.weight`, so a result can be re-scored without the rubric at hand |
 | `score` | `float` | `0.0 … scale.maximum` | The judge's **raw** grade, not normalized. On the default scale: `2` fully covered · `1` partially · `0` not covered. A float so averaging repeated runs cannot change the type. Bounded by `CaseResult.scale`, which is the object that knows it |
 | `is_present` | `bool` | — | `score >= scale.presence_threshold`, using the scale of the `CaseResult` above. Never asked of the judge, and a `CaseResult` **refuses** a result whose value here contradicts its own score |
-| `spread` | `float` | `>= 0` | Standard deviation across repeated runs of this criterion. Always `0.0` today: each criterion is judged exactly once |
 | `reasoning` | `str \| None` | — | The judge's own argument for the score |
 
 There is exactly one constructor, `CriterionResult.judged()` — see
@@ -1019,7 +1018,6 @@ complete response for it, from a judge grading that rubric `2` and `0`:
       "weight": 3.0,
       "score": 2.0,
       "is_present": true,
-      "spread": 0.0,
       "reasoning": "The answer instructs the reader to email hr@example.com before 10:00 on the first day, which is exactly what the criterion asks for."
     },
     {
@@ -1027,7 +1025,6 @@ complete response for it, from a judge grading that rubric `2` and `0`:
       "weight": 1.0,
       "score": 0.0,
       "is_present": false,
-      "spread": 0.0,
       "reasoning": "Neither the expected last day nor any duration is mentioned."
     }
   ],
@@ -1327,8 +1324,9 @@ reported by, with nothing about the system under test changed. So:
 - **Read a one-grade criterion move against its `weight`** before calling it a regression.
 - **Re-run the baseline before you believe a small delta.** Two runs of an *unchanged* system
   measure your noise floor, and that is the cheapest way to learn which deltas mean anything.
-- `CriterionResult.spread` is the field that would carry this and is `0.0` today, because each
-  criterion is judged exactly once — so **a run does not tell you how steady its own numbers are.**
+- **Nothing in a result measures this for you.** Each criterion is judged exactly once and no
+  field reports how much that grade would move on a re-run — so **a run does not tell you how
+  steady its own numbers are.**
 
 ### Unparseable replies heal themselves
 
@@ -1447,7 +1445,7 @@ The result types draw the layer boundary and answer the question by themselves:
 ```python
 JudgeReply:       score, reasoning                            # what the model replied
 CriterionResult:  criterion_id, weight, score, is_present,     # what the system concluded
-                  spread, reasoning
+                  reasoning
 CaseResult:       case_id, score, scale, criterion_results,    # one whole case
                   labels
 RunMetrics:       the aggregate over many case results
@@ -1554,7 +1552,7 @@ label, and comparing two finished runs against each other, as a library or over 
 
 **Not implemented** — rubric catalog files, a CLI, negation in a `label_filter` ("table but
 not images" cannot be written), streaming progress for long runs, and self-consistency
-(judging each criterion several times and reporting the `spread`).
+(judging each criterion several times and reporting how far the grades spread).
 
 ## License
 
