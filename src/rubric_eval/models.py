@@ -222,8 +222,10 @@ DEFAULT_SCALE = Scale(
         ),
     },
 )
-"""The scale `prompt.JUDGE_EN` is generated from, and the one results are read on when they
-name none — every run stored before scales were configurable was judged on exactly this.
+"""The scale `prompt.JUDGE_EN` is generated from, and the one `OpenAIJudge` grades on unless
+it is given another. Never a stand-in for a scale a document failed to name: a result carries
+the scale it was judged on or is refused, because guessing the unit of a set of scores is how
+a ten-point run ends up compared against a three-point one.
 
 The three sentences live here rather than in `prompt.py` because they are not only prompt
 text: a `CaseResult` carries them, so a run read back months later still says what its grades
@@ -598,12 +600,13 @@ class CaseResult(DocumentedModel):
     was fully covered. Bounded for the same reason the criterion scores under it are: this
     model is what `/compare` takes in, and every delta of a comparison subtracts it."""
 
-    scale: Scale = DEFAULT_SCALE
+    scale: Scale
     """The grading scale every result below was given on, copied off the judge once for the
     whole case. Here rather than on each result because a case is judged by one judge on one
     scale, and `evaluate_case` returns this document on its own — so this is the lowest level
-    that always exists. Defaulted, because a result that names no scale was written before
-    scales were configurable and was therefore judged on exactly this one."""
+    that always exists. Required and never defaulted: a default would decide the unit of every
+    score under it, so a stored 0..10 result that lost this field would validate as a 0..2 one
+    and `/compare` would subtract it from a genuine 0..2 run and answer 200."""
 
     criterion_results: list[CriterionResult] = Field(min_length=1)
     """One result per criterion of the case, in rubric order. At least one, because

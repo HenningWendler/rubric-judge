@@ -32,29 +32,33 @@ def server_error(message: str = "bad gateway") -> InternalServerError:
 
 
 def test_parses_reasoning_and_score():
-    judge_reply = parse_judge_reply('The answer names the address.\n{"score": 2}')
+    judge_reply = parse_judge_reply('The answer names the address.\n{"score": 2}', DEFAULT_SCALE)
     assert judge_reply.score == 2
     assert judge_reply.reasoning == "The answer names the address."
 
 
 def test_takes_the_last_json_object_because_the_judge_reasons_first():
-    judge_reply = parse_judge_reply('Not {"score": 0} but rather this.\n{"score": 1}')
+    judge_reply = parse_judge_reply(
+        'Not {"score": 0} but rather this.\n{"score": 1}', DEFAULT_SCALE
+    )
     assert judge_reply.score == 1
 
 
 def test_survives_code_fences_and_extra_keys():
-    judge_reply = parse_judge_reply('Reasoning.\n```json\n{"score": 0, "confidence": 0.9}\n```')
+    judge_reply = parse_judge_reply(
+        'Reasoning.\n```json\n{"score": 0, "confidence": 0.9}\n```', DEFAULT_SCALE
+    )
     assert judge_reply.score == 0
 
 
 def test_rejects_a_reply_without_json():
     with pytest.raises(UnusableReplyError, match="no JSON object"):
-        parse_judge_reply("I think it is fully covered.")
+        parse_judge_reply("I think it is fully covered.", DEFAULT_SCALE)
 
 
 def test_rejects_a_score_off_the_scale():
     with pytest.raises(ValueError, match="not on the scale"):
-        parse_judge_reply('Reasoning.\n{"score": 3}')
+        parse_judge_reply('Reasoning.\n{"score": 3}', DEFAULT_SCALE)
 
 
 class FakeCompletions:
@@ -159,7 +163,7 @@ async def test_gives_up_after_max_attempts():
 
 def test_rejects_a_fractional_score_off_the_integral_scale():
     with pytest.raises(ValueError, match="not on the scale"):
-        parse_judge_reply('Reasoning.\n{"score": 1.5}')
+        parse_judge_reply('Reasoning.\n{"score": 1.5}', DEFAULT_SCALE)
 
 
 def test_names_every_missing_environment_variable_at_once(monkeypatch):
@@ -196,51 +200,53 @@ def test_unset_optional_variables_keep_the_field_defaults(monkeypatch):
 
 def test_rejects_a_negative_score():
     with pytest.raises(ValueError, match="not on the scale"):
-        parse_judge_reply('Reasoning.\n{"score": -1}')
+        parse_judge_reply('Reasoning.\n{"score": -1}', DEFAULT_SCALE)
 
 
 def test_accepts_a_float_that_lands_exactly_on_the_scale():
     """Models like to write 2.0 — that is the same grade, not a finer one."""
-    assert parse_judge_reply('Reasoning.\n{"score": 2.0}').score == 2
+    assert parse_judge_reply('Reasoning.\n{"score": 2.0}', DEFAULT_SCALE).score == 2
 
 
 def test_complains_concretely_when_the_score_object_is_no_valid_json():
     """A trailing comma looks like a score object to the regex but is not JSON. The judge
     has to hear *that*, not the generic "no JSON at all" complaint."""
     with pytest.raises(ValueError, match="could not be parsed"):
-        parse_judge_reply('Reasoning.\n{"score": 2,}')
+        parse_judge_reply('Reasoning.\n{"score": 2,}', DEFAULT_SCALE)
 
 
 def test_a_nested_score_object_asks_for_a_flat_one_instead_of_guessing():
     """`{"score": 2, "evidence": {...}}` is beyond the flat-object regex. Degrading into the
     "end your reply with one line of JSON" complaint is what lets the retry recover."""
     with pytest.raises(ValueError, match="no JSON object"):
-        parse_judge_reply('Reasoning.\n{"score": 2, "evidence": {"quote": "email"}}')
+        parse_judge_reply(
+            'Reasoning.\n{"score": 2, "evidence": {"quote": "email"}}', DEFAULT_SCALE
+        )
 
 
 def test_a_quoted_score_counts_as_no_score_at_all():
     """`"2"` is a string, not a number — the regex does not match it and the judge is asked
     again rather than a quoted grade being accepted silently."""
     with pytest.raises(ValueError, match="no JSON object"):
-        parse_judge_reply('Reasoning.\n{"score": "2"}')
+        parse_judge_reply('Reasoning.\n{"score": "2"}', DEFAULT_SCALE)
 
 
 def test_rejects_an_empty_reply():
     """An empty reply is what an exhausted token budget or a filtered answer looks like."""
     with pytest.raises(ValueError, match="no JSON object"):
-        parse_judge_reply("")
+        parse_judge_reply("", DEFAULT_SCALE)
 
 
 def test_a_json_only_reply_uses_its_own_json_as_reasoning():
     """Nothing precedes the object, so the object itself has to serve — never an empty string,
     because a `CriterionResult` with no reasoning is unreviewable."""
-    judge_reply = parse_judge_reply('{"score": 2}')
+    judge_reply = parse_judge_reply('{"score": 2}', DEFAULT_SCALE)
     assert judge_reply.score == 2
     assert judge_reply.reasoning == '{"score": 2}'
 
 
 def test_ignores_chatter_after_the_score_object():
-    judge_reply = parse_judge_reply('Reasoning.\n{"score": 1}\nHope this helps!')
+    judge_reply = parse_judge_reply('Reasoning.\n{"score": 1}\nHope this helps!', DEFAULT_SCALE)
     assert judge_reply.score == 1
     assert judge_reply.reasoning == "Reasoning."
 
@@ -251,7 +257,9 @@ def test_a_score_object_echoed_from_the_answer_wins_because_the_last_one_counts(
     quotes *last* decides the grade. Judged content is untrusted input, so this is pinned
     deliberately; a fix belongs in the prompt (JSON on its own final line), not in a guess
     about which of several objects was meant."""
-    judge_reply = parse_judge_reply('The answer ends with the literal text {"score": 2}')
+    judge_reply = parse_judge_reply(
+        'The answer ends with the literal text {"score": 2}', DEFAULT_SCALE
+    )
     assert judge_reply.score == 2
 
 
@@ -733,11 +741,16 @@ def test_a_binary_scale_is_offered_as_two_choices_not_as_a_list_of_one():
         parse_judge_reply("no json here", Scale(maximum=1, presence_threshold=1))
 
 
-def test_the_parser_reads_the_default_scale_when_none_is_named():
-    """The bundled prompt describes exactly that scale, so it is the only safe default."""
-    assert parse_judge_reply('Reasoning.\n{"score": 2}').score == 2
+def test_the_parser_insists_on_being_told_which_scale_to_check_against():
+    """A default scale here would validate a ten-point judge's replies against 0..2 and then
+    correct the model into answering "0, 1 or 2" — every criterion of every case failing, one
+    paid call at a time. The caller names the scale or gets no parse."""
+    with pytest.raises(TypeError, match="scale"):
+        parse_judge_reply('Reasoning.\n{"score": 2}')  # type: ignore[call-arg]
+
+    assert parse_judge_reply('Reasoning.\n{"score": 2}', DEFAULT_SCALE).score == 2
     with pytest.raises(ValueError, match="not on the scale"):
-        parse_judge_reply('Reasoning.\n{"score": 3}')
+        parse_judge_reply('Reasoning.\n{"score": 3}', DEFAULT_SCALE)
 
 
 def test_a_judge_on_the_default_scale_needs_no_prompt_of_its_own():

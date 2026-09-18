@@ -566,6 +566,20 @@ def test_a_run_whose_scores_or_weights_are_off_their_scale_is_rejected(client):
         assert client.post("/compare", json=run).status_code == 422, f"{field}={unusable}"
 
 
+def test_a_run_whose_case_dropped_its_scale_is_rejected_rather_than_read_on_the_default(client):
+    """The `422` that used to be a wrong `200`: a ten-point run posted without its `scale`
+    would have validated as a 0..2 one, matched the other side's scale exactly, and come back
+    as a set of deltas in a unit neither run was judged in."""
+    ten_point = Scale(maximum=10, presence_threshold=5)
+    run = _runs(run_of({1: 2}, scale=ten_point), run_of({1: 2}))
+    del run["baseline"]["case_results"][0]["scale"]
+
+    response = client.post("/compare", json=run)
+
+    assert response.status_code == 422
+    assert "scale" in response.text
+
+
 def test_a_run_naming_the_same_case_twice_is_rejected_rather_than_dropping_one(client):
     """Cases are paired by id. A repeated id was never producible but is postable, and would
     silently compare one case while `metrics` still describes two."""

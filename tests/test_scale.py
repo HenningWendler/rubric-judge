@@ -184,15 +184,20 @@ def test_accepts_a_score_that_would_be_off_the_default_scale_but_fits_the_cases_
     assert case_result.criterion_results[0].score == 9.0
 
 
-def test_a_case_without_a_scale_is_read_on_the_default_one():
-    """Runs stored before the scale existed were all judged 0..2 — reading them as anything
-    else would silently rescale history."""
-    stored = CaseResult(
-        case_id=1,
-        score=1.0,
-        criterion_results=[{"criterion_id": 1, "weight": 1.0, "score": 2.0, "is_present": True}],
-    )
-    assert stored.scale == DEFAULT_SCALE
+def test_a_case_that_names_no_scale_is_refused_rather_than_read_on_the_default():
+    """A default here would decide the unit of every score under it: a stored 0..10 case that
+    lost the field would validate as a 0..2 one, and `/compare` would subtract it from a real
+    0..2 run and answer 200. The document has to say what its grades were out of."""
+    with pytest.raises(ValidationError, match="scale"):
+        CaseResult.model_validate(
+            {
+                "case_id": 1,
+                "score": 1.0,
+                "criterion_results": [
+                    {"criterion_id": 1, "weight": 1.0, "score": 2.0, "is_present": True}
+                ],
+            }
+        )
 
 
 def test_a_zero_is_never_present_on_any_scale():
@@ -381,26 +386,25 @@ def test_two_scales_sharing_a_maximum_are_still_two_scales():
         )
 
 
-def test_a_run_stored_before_scales_existed_compares_with_a_new_one():
-    """Old rows name no scale and are read on the default, which is exactly the scale they
-    were judged on — so a run from last month still compares against one from today."""
-    stored = RunResult(
-        **{
-            "metrics": run_of({1: 2}).metrics.model_dump(),
-            "case_results": [
-                {
-                    "case_id": 1,
-                    "score": 1.0,
-                    "criterion_results": [
-                        {"criterion_id": 1, "weight": 1.0, "score": 2.0, "is_present": True}
-                    ],
-                }
-            ],
-        }
-    )
-    assert stored.scale == DEFAULT_SCALE
-    comparison = compare_runs(RunComparison(baseline=stored, candidate=run_of({1: 2})))
-    assert comparison.metrics_delta.average_score_delta == 0.0
+def test_a_run_whose_case_names_no_scale_is_refused_at_load():
+    """`RunResult` reads its scale off its cases, so a case that names none takes the whole
+    run's unit with it. Refused where the document is read, not where a delta is computed —
+    by then the number already looks like a result."""
+    with pytest.raises(ValidationError, match="scale"):
+        RunResult(
+            **{
+                "metrics": run_of({1: 2}).metrics.model_dump(),
+                "case_results": [
+                    {
+                        "case_id": 1,
+                        "score": 1.0,
+                        "criterion_results": [
+                            {"criterion_id": 1, "weight": 1.0, "score": 2.0, "is_present": True}
+                        ],
+                    }
+                ],
+            }
+        )
 
 
 def test_a_custom_scale_survives_a_json_round_trip():

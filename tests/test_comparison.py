@@ -17,7 +17,7 @@ from rubric_eval import (
     compare_runs,
 )
 from rubric_eval.metrics import case_score, run_metrics
-from rubric_eval.models import CaseResult, CriterionResult, RunResult
+from rubric_eval.models import DEFAULT_SCALE, CaseResult, CriterionResult, RunResult
 
 
 def compared(baseline: RunResult, candidate: RunResult):
@@ -376,7 +376,12 @@ class TestRefusal:
         would drop a result out of the comparison while still counting in the case score."""
         criterion_results = run_of({1: 1}).case_results[0].criterion_results
         with pytest.raises(ValidationError, match=r"criterion ids must be unique, repeated: \[1\]"):
-            CaseResult(case_id=1, score=0.5, criterion_results=criterion_results * 2)
+            CaseResult(
+                case_id=1,
+                score=0.5,
+                scale=DEFAULT_SCALE,
+                criterion_results=criterion_results * 2,
+            )
 
     def test_nothing_is_computed_before_the_refusal(self):
         """The check runs first on purpose — a half-built document is worse than none."""

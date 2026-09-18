@@ -369,7 +369,8 @@ included; two runs are comparable only if their scales are equal.
 | `level_descriptions` | `dict[int, str]` | empty, or one entry per grade | What each grade means, keyed by the grade. Either complete or absent — a prompt explaining four of ten levels is worse than one explaining none. A described scale **writes its own judge prompt**; an undescribed one is arithmetic only |
 
 `DEFAULT_SCALE` is the `0–2` scale the bundled prompt describes, descriptions included, and
-the one a stored result is read on when it names none.
+the one `OpenAIJudge` grades on unless you give it another. It is never a stand-in for a
+scale a stored result failed to name — see `CaseResult.scale` below.
 
 #### `CriterionResult` — what one criterion was given
 
@@ -388,7 +389,7 @@ the one a stored result is read on when it names none.
 |---|---|---|---|
 | `case_id` | `int` | — | The `Case.id` this result belongs to |
 | `score` | `float` | `0.0 … 1.0` | The weighted case score, see [How scoring works](#how-scoring-works). `1.0` means every criterion fully covered |
-| `scale` | `Scale` | — | What the grades below mean. Stored **once per case**, not per criterion result: one case is judged by one judge on one scale, and `POST /evaluate` returns this document on its own, so this is the lowest level that always exists. Defaults to `DEFAULT_SCALE` when a stored result names none |
+| `scale` | `Scale` | — | What the grades below mean. Stored **once per case**, not per criterion result: one case is judged by one judge on one scale, and `POST /evaluate` returns this document on its own, so this is the lowest level that always exists. **Required** — posting a result without it is a `422`, never a silent `0–2` |
 | `criterion_results` | `list[CriterionResult]` | ≥ 1 entry | One result per criterion, **in rubric order**, so it can be zipped with `Case.criteria`. Never empty — a rubric has at least one criterion, so a case result has at least one criterion result. Criterion ids must be unique: they are what pairs the two sides when two runs are compared |
 | `labels` | `list[str]` | — | The `Case.labels` this result came from, copied over so a stored run can still be sliced without the catalog at hand. `[]` for an untagged case, and for a result written before labels existed |
 
@@ -742,9 +743,10 @@ naming the labels your run does carry, with counts, because that is nearly alway
 ```
 
 Every `case_results` entry carries its own `scale` — the cases of one run are all judged by
-one judge, so they all repeat the same one. It is a field you may *omit when posting* a
-stored run back to `/compare`, where it then reads as `DEFAULT_SCALE`; it is never absent
-from a response.
+one judge, so they all repeat the same one. It is **required when posting** a stored run back
+to `/compare` too. Were it read as `DEFAULT_SCALE` instead, a `0–10` run that lost the field
+would match a genuine `0–2` run's scale exactly and come back as deltas in a unit neither run
+was judged in, with a `200`.
 
 A `case_results[i]` entry is **the same document** `POST /evaluate` returns for that case —
 the same type, not a similar one — so the two endpoints cannot disagree.
@@ -819,6 +821,7 @@ Everything is validated **before** the first LLM call, so a malformed request co
 |---|---|---|
 | `criteria`, `cases`, `criterion_results` or `case_results` empty; duplicate ids in any of them; `content` blank; `weight` `0`, negative, `Infinity` or `NaN`; missing field | `pydantic.ValidationError` | `422` |
 | A run posted to `/compare` whose numbers leave the ranges the [output tables](#outputs) give — a score above its own `scale.maximum` or off `0 … 1`, a non-positive weight, any `Infinity` or `NaN` | `pydantic.ValidationError` | `422` |
+| A `CaseResult` posted without its `scale` — no default stands in, because one would decide the unit of every score under it | `pydantic.ValidationError` | `422` |
 | A run whose cases name more than one `scale`; a result whose `is_present` contradicts its own score | `pydantic.ValidationError` | `422` |
 | A blank label, or the same label twice — on one case, or in one group of a label filter | `pydantic.ValidationError` | `422` |
 | The same group twice in a label filter, in any order — in a `label_filter` or in `filter_cases_by_labels()` | `pydantic.ValidationError` | `422` |

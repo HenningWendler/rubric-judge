@@ -70,7 +70,7 @@ class UnusableReplyError(ValueError):
 
     Example:
         try:
-            parse_judge_reply("I think it is fine.")
+            parse_judge_reply("I think it is fine.", DEFAULT_SCALE)
         except UnusableReplyError as complaint:
             str(complaint)   # "Your reply contained no JSON object …"
     """
@@ -223,7 +223,7 @@ class JudgeConfig(DocumentedModel):
         return cls(**{field: value for field, value in settings.items() if value})
 
 
-def parse_judge_reply(reply: str, scale: Scale = DEFAULT_SCALE) -> JudgeReply:
+def parse_judge_reply(reply: str, scale: Scale) -> JudgeReply:
     """Pull the score and the argument out of one raw judge reply.
 
     The judge reasons first and closes with a JSON object, so the *last* `{"score": ...}`
@@ -233,8 +233,9 @@ def parse_judge_reply(reply: str, scale: Scale = DEFAULT_SCALE) -> JudgeReply:
         reply: The model's message content, unmodified. Markdown fences, prose around the
             object and several score objects are all tolerated.
         scale: What counts as a valid grade, and what the complaints offer the judge instead
-            of an invalid one. Defaults to the scale `prompt.JUDGE_EN` describes, which is
-            the only one a reply can be assumed to be on when none is named.
+            of an invalid one. The judge's own `scale` and never a guess: assuming one would
+            check a ten-point reply against 0..2 and then instruct the model to "answer with
+            0, 1 or 2" — failing every criterion of every case, one paid call at a time.
 
     Returns:
         A `JudgeReply` with an integer score on `scale` and the text preceding the object as
@@ -247,7 +248,7 @@ def parse_judge_reply(reply: str, scale: Scale = DEFAULT_SCALE) -> JudgeReply:
             The wordings live in `prompt.py`.
 
     Example:
-        parse_judge_reply('The answer names the address.\n{"score": 2}')
+        parse_judge_reply('The answer names the address.\n{"score": 2}', DEFAULT_SCALE)
         # JudgeReply(score=2, reasoning="The answer names the address.")
     """
     score_object = _last_score_object(reply, scale)

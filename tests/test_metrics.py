@@ -83,6 +83,7 @@ def _case(case_id: int, *judged_criteria: CriterionResult) -> CaseResult:
     return CaseResult(
         case_id=case_id,
         score=case_score(criterion_results, DEFAULT_SCALE),
+        scale=DEFAULT_SCALE,
         criterion_results=criterion_results,
     )
 
@@ -169,17 +170,18 @@ def test_a_case_result_always_carries_at_least_one_criterion_result():
     the *result* type, a run loaded back from disk reaches `run_metrics` as a division by
     zero instead of a clean rejection."""
     with pytest.raises(ValueError):
-        CaseResult(case_id=1, score=0.0, criterion_results=[])
+        CaseResult(case_id=1, score=0.0, scale=DEFAULT_SCALE, criterion_results=[])
 
 
 def test_a_run_loaded_back_from_stored_rows_is_aggregated_like_a_fresh_one():
     """The documented use of `run_metrics`: case results read from a file, not from a judge.
     They arrive as plain dicts, so the model is the only thing standing between a malformed
     row and the formulas."""
+    stored_scale = DEFAULT_SCALE.model_dump(mode="json")
     rows = [
-        {"case_id": 1, "score": 0.75, "criterion_results": [
+        {"case_id": 1, "score": 0.75, "scale": stored_scale, "criterion_results": [
             {"criterion_id": 1, "weight": 3.0, "score": 2.0, "is_present": True}]},
-        {"case_id": 2, "score": 0.0, "criterion_results": [
+        {"case_id": 2, "score": 0.0, "scale": stored_scale, "criterion_results": [
             {"criterion_id": 1, "weight": 1.0, "score": 0.0, "is_present": False}]},
     ]
 

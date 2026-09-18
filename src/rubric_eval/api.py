@@ -188,6 +188,10 @@ async def compare_runs(run_comparison: RunComparison) -> RunComparisonResult:
     all of them. `applied_label_filter` is not compared: two runs covering the same case ids
     are comparable however each was selected.
 
+    Every `case_results` entry has to name the `scale` it was judged on; a run that dropped
+    the field is refused rather than read as the bundled `0–2`, because a 0–10 run silently
+    reinterpreted that way would subtract cleanly from a real `0–2` one and answer `200`.
+
     **422** if a body is invalid, or if the two runs are not comparable — a different grading
     scale, different case ids, different criteria within a case, different weights, or a case
     whose labels changed between the runs (which would put different cases in the two buckets
