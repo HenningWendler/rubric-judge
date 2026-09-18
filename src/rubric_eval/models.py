@@ -254,7 +254,7 @@ def one_scale_of(scales: Iterable[Scale]) -> Scale:
         ValueError: They do not agree. The message names every distinct scale found.
 
     Example:
-        one_scale_of(result.scale for result in run_result.case_results)
+        one_scale_of(case_result.scale for case_result in run_result.case_results)
     """
     distinct: list[Scale] = []
     for scale in scales:
@@ -647,13 +647,13 @@ class CaseResult(DocumentedModel):
         it. Refused rather than recomputed, because silently rewriting a caller's number would
         hide whichever of the two is actually wrong."""
         for criterion_result in self.criterion_results:
-            on_scale = criterion_result.score >= self.scale.presence_threshold
-            if criterion_result.is_present != on_scale:
+            covered = criterion_result.score >= self.scale.presence_threshold
+            if criterion_result.is_present != covered:
                 raise ValueError(
                     f"criterion {criterion_result.criterion_id} scored "
                     f"{criterion_result.score} and claims "
-                    f"is_present={criterion_result.is_present}, which the scale "
-                    f"{self.scale} does not"
+                    f"is_present={criterion_result.is_present}, "
+                    f"which the scale {self.scale} does not"
                 )
         return self
 
@@ -855,7 +855,7 @@ class RunResult(DocumentedModel):
         them — but a stored run is postable to `/compare`, which keys cases by id to pair the
         two runs up. A repeated id would silently drop a case there and report deltas over
         fewer cases than `metrics` describes, with a 200."""
-        if repeated := _duplicates(result.case_id for result in case_results):
+        if repeated := _duplicates(case_result.case_id for case_result in case_results):
             raise ValueError(f"case ids must be unique, repeated: {repeated}")
         return case_results
 
@@ -870,7 +870,7 @@ class RunResult(DocumentedModel):
         Raises:
             ValueError: The cases name more than one scale.
         """
-        return one_scale_of(result.scale for result in self.case_results)
+        return one_scale_of(case_result.scale for case_result in self.case_results)
 
     @model_validator(mode="after")
     def _reject_a_mix_of_scales(self) -> "RunResult":
@@ -899,7 +899,7 @@ class RunResult(DocumentedModel):
         a stored run is the path where a claim can have been edited since."""
         every_case_must_match(
             self.applied_label_filter,
-            {result.case_id: result.labels for result in self.case_results},
+            {case_result.case_id: case_result.labels for case_result in self.case_results},
         )
         return self
 
@@ -911,7 +911,9 @@ class RunResult(DocumentedModel):
         all — and `/compare`, which pairs the two runs' buckets by label, can rely on the
         breakdown covering exactly the labels that are there."""
         described = {bucket.label for bucket in self.label_metrics}
-        present = {label for result in self.case_results for label in result.labels}
+        present = {
+            label for case_result in self.case_results for label in case_result.labels
+        }
         if described != present:
             raise ValueError(
                 f"label_metrics describes {sorted(described)} but the cases carry "
@@ -1072,13 +1074,13 @@ class CaseComparisonResult(DocumentedModel):
         )
 
 
-def _criterion_results_in_id_order(result: CaseResult) -> list[CriterionResult]:
+def _criterion_results_in_id_order(case_result: CaseResult) -> list[CriterionResult]:
     """Both runs' criterion results brought into one order, so zipping them pairs the same
     criterion. Rubric order is not enough: two runs may have been stored with their criteria
     in different orders, and zipping those would compare unrelated results. Zipped `strict`,
     so a caller reaching `CaseComparisonResult.between` past `compare_runs` gets a crash rather
     than a silently truncated comparison."""
-    return sorted(result.criterion_results, key=attrgetter("criterion_id"))
+    return sorted(case_result.criterion_results, key=attrgetter("criterion_id"))
 
 
 class RunMetricsDelta(DocumentedModel):

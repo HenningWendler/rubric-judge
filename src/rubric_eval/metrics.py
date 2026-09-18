@@ -75,7 +75,9 @@ def _weights_scaled_to_at_most_one(
     score untouched — but it keeps both sums inside the float range. Summed raw, two weights
     of 1e308 overflow to `inf`, and `inf / inf` would make the whole case score `nan`.
     """
-    largest_weight = max(result.weight for result in criterion_results)
+    largest_weight = max(
+        criterion_result.weight for criterion_result in criterion_results
+    )
     return [
         criterion_result.weight / largest_weight for criterion_result in criterion_results
     ]
@@ -114,8 +116,8 @@ def run_metrics(case_results: list[CaseResult]) -> RunMetrics:
     """
     if not case_results:
         raise ValueError("run metrics need at least one case")
-    one_scale_of(result.scale for result in case_results)
-    scores = [result.score for result in case_results]
+    one_scale_of(case_result.scale for case_result in case_results)
+    scores = [case_result.score for case_result in case_results]
     variance = _variance(scores)
     return RunMetrics(
         total_cases=len(case_results),
@@ -173,7 +175,9 @@ def _labels_present_in(case_results: list[CaseResult]) -> list[str]:
     """Which buckets there are to build, alphabetically — a set so a label shared by forty
     cases opens one bucket, sorted so the breakdown reads the same whatever order the run was
     stored in."""
-    return sorted({label for result in case_results for label in result.labels})
+    return sorted(
+        {label for case_result in case_results for label in case_result.labels}
+    )
 
 
 def _cases_carrying(label: str, case_results: list[CaseResult]) -> list[CaseResult]:
@@ -182,7 +186,9 @@ def _cases_carrying(label: str, case_results: list[CaseResult]) -> list[CaseResu
     `images` is one of them. Through the same predicate `filter_cases_by_labels` uses, so
     a bucket and the filter of the same name can never select different cases."""
     return [
-        result for result in case_results if carries_every_label(result.labels, [label])
+        case_result
+        for case_result in case_results
+        if carries_every_label(case_result.labels, [label])
     ]
 
 
@@ -211,20 +217,26 @@ def _fulfillment_rate_per_case(case_results: list[CaseResult]) -> list[float]:
     No division by zero to guard here — `CaseResult.criterion_results` rejects an empty list.
     """
     return [
-        sum(result.is_present for result in case_result.criterion_results)
+        sum(
+            criterion_result.is_present
+            for criterion_result in case_result.criterion_results
+        )
         / len(case_result.criterion_results)
         for case_result in case_results
     ]
 
 
 def _case_ids_scoring_zero(case_results: list[CaseResult]) -> list[int]:
-    return [result.case_id for result in case_results if result.score == 0.0]
+    return [
+        case_result.case_id for case_result in case_results if case_result.score == 0.0
+    ]
 
 
 def _weakest_case_ids_above_zero(case_results: list[CaseResult]) -> list[int]:
     """The weakest cases that still scored something, weakest first. Cases at exactly 0 are
     reported separately, so this list does not fill up with them and hide the near misses."""
     above_zero = sorted(
-        (result for result in case_results if result.score > 0), key=attrgetter("score")
+        (case_result for case_result in case_results if case_result.score > 0),
+        key=attrgetter("score"),
     )
-    return [result.case_id for result in above_zero[:WEAKEST_CASES_REPORTED]]
+    return [case_result.case_id for case_result in above_zero[:WEAKEST_CASES_REPORTED]]

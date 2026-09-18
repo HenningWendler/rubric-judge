@@ -108,7 +108,7 @@ def _compare_cases(baseline: RunResult, candidate: RunResult) -> list[CaseCompar
 def _case_results_by_id(run: RunResult) -> dict[int, CaseResult]:
     """Cases are matched by id, never by position: two runs of the same catalog may well be
     stored in different orders, and zipping those would compare unrelated answers."""
-    return {result.case_id: result for result in run.case_results}
+    return {case_result.case_id: case_result for case_result in run.case_results}
 
 
 def _metrics_delta(baseline: RunMetrics, candidate: RunMetrics) -> RunMetricsDelta:
@@ -310,10 +310,10 @@ def _weight_differences(
     ]
 
 
-def _weights_by_criterion_id(result: CaseResult) -> dict[int, float]:
+def _weights_by_criterion_id(case_result: CaseResult) -> dict[int, float]:
     """Keyed by id because the two runs are checked criterion by criterion, not position by
     position — the criteria of a stored result come in whatever order it was saved in."""
     return {
         criterion_result.criterion_id: criterion_result.weight
-        for criterion_result in result.criterion_results
+        for criterion_result in case_result.criterion_results
     }
