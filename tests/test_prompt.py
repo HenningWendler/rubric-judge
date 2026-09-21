@@ -9,8 +9,8 @@ from pathlib import Path
 
 import pytest
 
-from rubric_eval import DEFAULT_SCALE, Scale
-from rubric_eval.prompt import JUDGE_EN, WORKED_EXAMPLES_EN, judge_prompt
+from rubric_judge import DEFAULT_SCALE, Scale
+from rubric_judge.prompt import JUDGE_EN, WORKED_EXAMPLES_EN, judge_prompt
 
 GOLDEN = Path(__file__).with_name("judge_prompt_en.txt")
 """The prompt as it was written by hand, before the scale generated it. A plain text file so

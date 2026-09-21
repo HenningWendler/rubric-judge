@@ -14,7 +14,7 @@ while meaning nothing.
 import statistics
 from operator import attrgetter
 
-from rubric_eval.models import (
+from rubric_judge.models import (
     CaseComparisonResult,
     CaseResult,
     ChangeMagnitude,

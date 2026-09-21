@@ -16,9 +16,9 @@ Three public functions, one fan-out: `evaluate_case` scores a single answer,
 
 import asyncio
 
-from rubric_eval.judge import Judge
-from rubric_eval.metrics import case_score, label_metrics, run_metrics
-from rubric_eval.models import (
+from rubric_judge.judge import Judge
+from rubric_judge.metrics import case_score, label_metrics, run_metrics
+from rubric_judge.models import (
     Case,
     CaseResult,
     Criterion,

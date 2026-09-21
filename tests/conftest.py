@@ -8,10 +8,10 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 
-from rubric_eval.api import app, get_judge
-from rubric_eval.judge import Judge, JudgeReply
-from rubric_eval.metrics import case_score, label_metrics, run_metrics
-from rubric_eval.models import (
+from rubric_judge.api import app, get_judge
+from rubric_judge.judge import Judge, JudgeReply
+from rubric_judge.metrics import case_score, label_metrics, run_metrics
+from rubric_judge.models import (
     DEFAULT_SCALE,
     CaseResult,
     Criterion,

@@ -1,9 +1,9 @@
-# rubric-eval
+# rubric-judge
 
 Judge the answers of an LLM application against weighted reference criteria.
 
 You know what a good answer to a question has to contain. Write that down as a **rubric** —
-a list of weighted criteria — hand over the answer your system produced, and rubric-eval
+a list of weighted criteria — hand over the answer your system produced, and rubric-judge
 asks an LLM judge, **one call per criterion**, whether each one is covered. Back comes a
 score per criterion with the judge's own reasoning, one normalized score for the answer,
 and — for a whole catalog of them — metrics over the entire run.
@@ -17,7 +17,7 @@ the numbers below are exactly what you get when you run it — a real one is one
 ```python
 import asyncio
 
-from rubric_eval import DEFAULT_SCALE, Case, Criterion, JudgeReply, evaluate_case
+from rubric_judge import DEFAULT_SCALE, Case, Criterion, JudgeReply, evaluate_case
 
 
 class ScoresFromATable:
@@ -52,7 +52,7 @@ print(result.scale.maximum)                          # 2
 judge — nothing else in the program changes:
 
 ```python
-from rubric_eval import JudgeConfig, OpenAIJudge
+from rubric_judge import JudgeConfig, OpenAIJudge
 
 judge = OpenAIJudge(JudgeConfig.from_env())     # any OpenAI-compatible endpoint
 result = asyncio.run(evaluate_case(judge, case))
@@ -114,7 +114,7 @@ The **grading scale** is not an environment variable. It is set in code, on the 
 ## Quickstart
 
 Two entry points: the Python library and the HTTP service. **There is no CLI** — the package
-installs no console script and `python -m rubric_eval` does nothing.
+installs no console script and `python -m rubric_judge` does nothing.
 
 ### As a library
 
@@ -131,7 +131,7 @@ judge = OpenAIJudge(JudgeConfig.from_env())     # once, at startup
 **One answer** → a `CaseResult`:
 
 ```python
-from rubric_eval import Case, Criterion, evaluate_case
+from rubric_judge import Case, Criterion, evaluate_case
 
 result = await evaluate_case(judge, Case(
     id=1,
@@ -159,7 +159,7 @@ judge owns it, and you can give it another one — see [Another scale](#another-
 **A whole catalog** → a `RunResult`: every `CaseResult` plus the aggregate over them.
 
 ```python
-from rubric_eval import Run, evaluate_run
+from rubric_judge import Run, evaluate_run
 
 run_result = await evaluate_run(judge, Run(cases=[
     Case(id=1, question="How do I report sick leave?", answer="Email hr@example.com.",
@@ -262,7 +262,7 @@ three-case catalog, before and after a change, so this runs as it stands:
 ```python
 from pathlib import Path
 
-from rubric_eval import RunComparison, RunResult, compare_runs
+from rubric_judge import RunComparison, RunResult, compare_runs
 
 baseline = RunResult.model_validate_json(
     Path("examples/run_result_baseline.json").read_text()
@@ -320,7 +320,7 @@ case — all of them, or no comparison. The message names **every** difference a
 ### As an HTTP service
 
 ```bash
-.venv/bin/uvicorn rubric_eval.api:app --env-file .env --port 8000
+.venv/bin/uvicorn rubric_judge.api:app --env-file .env --port 8000
 ```
 
 Interactive, generated API docs: [localhost:8000/docs](http://localhost:8000/docs).
@@ -363,7 +363,7 @@ see [Another scale](#another-scale). Reach for `system_prompt=` when you want di
 *instructions* (another language, a stricter examiner, your own worked examples), not merely
 another scale.
 
-The user prompt and the retry complaints live in [prompt.py](src/rubric_eval/prompt.py).
+The user prompt and the retry complaints live in [prompt.py](src/rubric_judge/prompt.py).
 Every sentence the model ever reads is in that one file, as plain Python strings.
 
 | In `prompt.py` | Sent as |
@@ -388,7 +388,7 @@ A judge is not tied to `0–2`. Describe the grades you want, and the judge writ
 prompt from them — no prompt to rewrite, no text to keep in sync:
 
 ```python
-from rubric_eval import JudgeConfig, OpenAIJudge, Scale
+from rubric_judge import JudgeConfig, OpenAIJudge, Scale
 
 judge = OpenAIJudge(JudgeConfig.from_env(), scale=Scale(
     maximum=3,
@@ -444,7 +444,7 @@ OpenAIJudge(config, scale=Scale(maximum=10, presence_threshold=5))
 without them. To add your own:
 
 ```python
-from rubric_eval import judge_prompt
+from rubric_judge import judge_prompt
 
 OpenAIJudge(config, system_prompt=judge_prompt(my_scale, my_examples), scale=my_scale)
 ```
@@ -470,7 +470,7 @@ old ones.
 judge, a stub:
 
 ```python
-from rubric_eval import DEFAULT_SCALE, Criterion, JudgeReply, Scale
+from rubric_judge import DEFAULT_SCALE, Criterion, JudgeReply, Scale
 
 class MyJudge:
     scale: Scale = DEFAULT_SCALE
@@ -492,7 +492,7 @@ Three responsibilities come with it:
   size, because only your implementation knows what your backend tolerates. `OpenAIJudge`
   bounds itself with `max_concurrent`; yours needs its own bound.
 - **Raising on failure.** Return a valid `JudgeReply` or raise — never a made-up `0`. Raise
-  `JudgeUnavailableError` (importable from `rubric_eval`, and subclassable if you want to
+  `JudgeUnavailableError` (importable from `rubric_judge`, and subclassable if you want to
   keep your own type) for anything your endpoint did: refused, timed out, out of quota, no
   usable reply. That is what invalidates the run and answers `503`. Anything else you raise
   is read as a bug in the program and answers `500`.
@@ -501,7 +501,7 @@ Three responsibilities come with it:
 dependency, so override it before the first request and every endpoint uses yours:
 
 ```python
-from rubric_eval.api import app, get_judge
+from rubric_judge.api import app, get_judge
 
 app.dependency_overrides[get_judge] = lambda: MyJudge()
 ```
@@ -565,7 +565,7 @@ On a `Run` this field is an **instruction**; the `RunResult` carries the same gr
 
 Constrained aliases rather than models, so a label obeys one rule wherever it appears — on a
 `Case`, on a `CaseResult`, in a `Run.label_filter` or in a call to
-`filter_cases_by_labels()`. Only `LabelFilter` is importable from `rubric_eval`.
+`filter_cases_by_labels()`. Only `LabelFilter` is importable from `rubric_judge`.
 
 | Type | Shape | Rules |
 |---|---|---|
@@ -1308,7 +1308,7 @@ this README are graded from a table.
 A fifth run of the same case, recorded here so the table-graded headline can be checked
 against a real judge at least once: on **2026-09-18** against **`gpt-5.4-mini-2026-03-17`**
 it returned `0.75` with grades `[2.0, 0.0]` — the same numbers the
-[headline example](#rubric-eval) produces from its table. One sample agreeing is not a
+[headline example](#rubric-judge) produces from its table. One sample agreeing is not a
 promise that yours will: the row above is what to expect.
 
 Note which explanation it rules out: it is **not** a matter of scale granularity. The same
@@ -1391,13 +1391,13 @@ Seven modules, each with one job. A request walks straight down through them:
 
 | Step | File | Responsibility |
 |---|---|---|
-| 1 | [api.py](src/rubric_eval/api.py) | FastAPI endpoints: validate the body, inject the judge, hand back JSON. No domain logic |
-| 2 | [evaluation.py](src/rubric_eval/evaluation.py) | `evaluate_case()` and `evaluate_run()` — fan out over the rubric and fold the results |
-| 3 | [judge.py](src/rubric_eval/judge.py) | `Judge` protocol, OpenAI-compatible client, reply parsing, retries, throttle, env config |
-| 4 | [prompt.py](src/rubric_eval/prompt.py) | every word the judge is told, written from the scale |
-| — | [models.py](src/rubric_eval/models.py) | the types above, `Scale` and `DEFAULT_SCALE`, `CriterionResult.judged()` |
-| — | [metrics.py](src/rubric_eval/metrics.py) | `case_score()` and `run_metrics()` — the formulas, nothing else |
-| — | [comparison.py](src/rubric_eval/comparison.py) | `compare_runs()` — two finished runs into their differences. Reads no judge and no config |
+| 1 | [api.py](src/rubric_judge/api.py) | FastAPI endpoints: validate the body, inject the judge, hand back JSON. No domain logic |
+| 2 | [evaluation.py](src/rubric_judge/evaluation.py) | `evaluate_case()` and `evaluate_run()` — fan out over the rubric and fold the results |
+| 3 | [judge.py](src/rubric_judge/judge.py) | `Judge` protocol, OpenAI-compatible client, reply parsing, retries, throttle, env config |
+| 4 | [prompt.py](src/rubric_judge/prompt.py) | every word the judge is told, written from the scale |
+| — | [models.py](src/rubric_judge/models.py) | the types above, `Scale` and `DEFAULT_SCALE`, `CriterionResult.judged()` |
+| — | [metrics.py](src/rubric_judge/metrics.py) | `case_score()` and `run_metrics()` — the formulas, nothing else |
+| — | [comparison.py](src/rubric_judge/comparison.py) | `compare_runs()` — two finished runs into their differences. Reads no judge and no config |
 
 ### The vocabulary
 

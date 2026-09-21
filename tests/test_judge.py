@@ -12,8 +12,8 @@ from openai import (
     RateLimitError,
 )
 
-from rubric_eval import Case, Run, evaluate_case, evaluate_run
-from rubric_eval.judge import (
+from rubric_judge import Case, Run, evaluate_case, evaluate_run
+from rubric_judge.judge import (
     JudgeConfig,
     JudgeReply,
     JudgeUnavailableError,
@@ -21,8 +21,8 @@ from rubric_eval.judge import (
     UnusableReplyError,
     parse_judge_reply,
 )
-from rubric_eval.prompt import JUDGE_EN
-from rubric_eval.models import DEFAULT_SCALE, Criterion, Scale
+from rubric_judge.prompt import JUDGE_EN
+from rubric_judge.models import DEFAULT_SCALE, Criterion, Scale
 
 ScriptedAnswer = str | None | Exception | type
 """One prepared answer from the stubbed endpoint: the text the model wrote, `None` for a reply
@@ -136,7 +136,7 @@ def _completion(content: str | None, finish_reason: str = "stop") -> type:
 def instant_backoff(monkeypatch):
     """No real waiting between retries. Reaching for the private constant on purpose: the
     backoff has no public surface, and a suite that really slept would only be slower."""
-    monkeypatch.setattr("rubric_eval.judge._FIRST_BACKOFF_SECONDS", 0)
+    monkeypatch.setattr("rubric_judge.judge._FIRST_BACKOFF_SECONDS", 0)
 
 
 def _client_answering(completions: object) -> AsyncOpenAI:
@@ -272,10 +272,10 @@ def test_the_parser_is_importable_beside_the_error_it_raises():
     """`UnusableReplyError` is part of the package's published surface, and this is the only
     thing that raises it — its own docstring shows the two used together, so exporting one
     without the other leaves that example unrunnable."""
-    import rubric_eval
+    import rubric_judge
 
-    assert rubric_eval.parse_judge_reply is parse_judge_reply
-    assert "parse_judge_reply" in rubric_eval.__all__
+    assert rubric_judge.parse_judge_reply is parse_judge_reply
+    assert "parse_judge_reply" in rubric_judge.__all__
 
 
 def test_a_quoted_score_counts_as_no_score_at_all():
@@ -415,7 +415,7 @@ def test_the_wait_after_a_transport_failure_doubles_and_stops_at_the_last_attemp
     """Backing off is the whole point of retrying a rate limit: asking again immediately is
     what got throttled in the first place. Read off the private schedule rather than from the
     clock — a test that really waited would be slow and still prove nothing exactly."""
-    monkeypatch.setattr("rubric_eval.judge._FIRST_BACKOFF_SECONDS", 0.5)
+    monkeypatch.setattr("rubric_judge.judge._FIRST_BACKOFF_SECONDS", 0.5)
     judge, _ = _judge([], max_attempts=3)
 
     assert [judge._backoff_seconds(failed) for failed in range(3)] == [0.5, 1.0, 0.0]

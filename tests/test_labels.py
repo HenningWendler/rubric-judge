@@ -12,7 +12,7 @@ import pytest
 from pydantic import ValidationError
 
 from tests.conftest import CASE, FakeJudge, run_of
-from rubric_eval import (
+from rubric_judge import (
     Case,
     Criterion,
     LabelMetrics,

@@ -1,8 +1,8 @@
-"""rubric-eval — judge LLM answers against weighted reference criteria."""
+"""rubric-judge — judge LLM answers against weighted reference criteria."""
 
-from rubric_eval.comparison import RunsNotComparableError, compare_runs
-from rubric_eval.evaluation import evaluate_case, evaluate_run, filter_cases_by_labels
-from rubric_eval.judge import (
+from rubric_judge.comparison import RunsNotComparableError, compare_runs
+from rubric_judge.evaluation import evaluate_case, evaluate_run, filter_cases_by_labels
+from rubric_judge.judge import (
     Judge,
     JudgeConfig,
     JudgeReply,
@@ -11,8 +11,8 @@ from rubric_eval.judge import (
     UnusableReplyError,
     parse_judge_reply,
 )
-from rubric_eval.metrics import case_score, label_metrics, run_metrics
-from rubric_eval.models import (
+from rubric_judge.metrics import case_score, label_metrics, run_metrics
+from rubric_judge.models import (
     DEFAULT_SCALE,
     SCORE_EQUALITY_TOLERANCE,
     WEAKEST_CASES_REPORTED,
@@ -36,7 +36,7 @@ from rubric_eval.models import (
     RunResult,
     Scale,
 )
-from rubric_eval.prompt import judge_prompt
+from rubric_judge.prompt import judge_prompt
 
 __all__ = [
     "DEFAULT_SCALE",

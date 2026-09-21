@@ -11,7 +11,7 @@ import pytest
 from pydantic import ValidationError
 
 from tests.conftest import run_of
-from rubric_eval import (
+from rubric_judge import (
     SCORE_EQUALITY_TOLERANCE,
     ChangeMagnitude,
     ChangeStatus,
@@ -21,9 +21,9 @@ from rubric_eval import (
     RunsNotComparableError,
     compare_runs,
 )
-from rubric_eval.comparison import _metric_difference
-from rubric_eval.metrics import case_score, run_metrics
-from rubric_eval.models import DEFAULT_SCALE, CaseResult, CriterionResult, RunResult
+from rubric_judge.comparison import _metric_difference
+from rubric_judge.metrics import case_score, run_metrics
+from rubric_judge.models import DEFAULT_SCALE, CaseResult, CriterionResult, RunResult
 
 
 def a_real_move(magnitude: float | None) -> float:

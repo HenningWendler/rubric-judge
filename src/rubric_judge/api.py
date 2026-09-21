@@ -11,9 +11,9 @@ from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
-from rubric_eval import comparison, evaluation
-from rubric_eval.judge import Judge, JudgeConfig, JudgeUnavailableError, OpenAIJudge
-from rubric_eval.models import (
+from rubric_judge import comparison, evaluation
+from rubric_judge.judge import Judge, JudgeConfig, JudgeUnavailableError, OpenAIJudge
+from rubric_judge.models import (
     Case,
     CaseResult,
     Run,
@@ -22,7 +22,7 @@ from rubric_eval.models import (
     RunResult,
 )
 
-app = FastAPI(title="rubric-eval", version="0.1.0")
+app = FastAPI(title="rubric-judge", version="0.1.0")
 
 
 @lru_cache

@@ -12,10 +12,10 @@ from openai import AsyncOpenAI
 
 from tests.conftest import CASE, RUN, RUN_SCORES, FakeJudge, run_of, use_judge
 
-from rubric_eval import JudgeUnavailableError, RunResult
-from rubric_eval.api import app, get_judge
-from rubric_eval.judge import JudgeConfig, OpenAIJudge
-from rubric_eval.models import DEFAULT_SCALE, Scale
+from rubric_judge import JudgeUnavailableError, RunResult
+from rubric_judge.api import app, get_judge
+from rubric_judge.judge import JudgeConfig, OpenAIJudge
+from rubric_judge.models import DEFAULT_SCALE, Scale
 
 
 def test_health(client):

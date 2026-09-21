@@ -6,8 +6,8 @@ from typing import Any
 import pytest
 from pydantic import ValidationError
 
-from rubric_eval.metrics import case_score, run_metrics
-from rubric_eval.models import (
+from rubric_judge.metrics import case_score, run_metrics
+from rubric_judge.models import (
     DEFAULT_SCALE,
     WEAKEST_CASES_REPORTED,
     CaseResult,

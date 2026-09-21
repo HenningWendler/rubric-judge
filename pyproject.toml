@@ -1,5 +1,5 @@
 [project]
-name = "rubric-eval"
+name = "rubric-judge"
 version = "0.1.0"
 description = "Judge LLM answers against weighted reference criteria"
 readme = "README.md"
@@ -21,7 +21,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/rubric_eval"]
+packages = ["src/rubric_judge"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

@@ -15,8 +15,8 @@ from openai import APIConnectionError, AsyncOpenAI, InternalServerError, RateLim
 from openai.types.chat import ChatCompletion, ChatCompletionMessageParam
 from pydantic import Field
 
-from rubric_eval.models import DEFAULT_SCALE, Criterion, DocumentedModel, Scale
-from rubric_eval.prompt import (
+from rubric_judge.models import DEFAULT_SCALE, Criterion, DocumentedModel, Scale
+from rubric_judge.prompt import (
     JUDGE_EN,
     criterion_prompt,
     judge_prompt,

@@ -11,7 +11,7 @@ from pydantic import ValidationError
 
 from tests.conftest import CASE, RUN, RUN_SCORES, FakeJudge
 
-from rubric_eval import (
+from rubric_judge import (
     DEFAULT_SCALE,
     Case,
     JudgeReply,

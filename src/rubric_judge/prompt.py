@@ -18,7 +18,7 @@ judge's.
 
 import textwrap
 
-from rubric_eval.models import DEFAULT_SCALE, Scale
+from rubric_judge.models import DEFAULT_SCALE, Scale
 
 _WRAP_WIDTH = 80
 """Where a level description is broken across lines. The width the bundled prompt was written

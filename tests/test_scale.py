@@ -12,7 +12,7 @@ import pytest
 from pydantic import ValidationError
 
 from tests.conftest import CASE, FakeJudge, run_of
-from rubric_eval import (
+from rubric_judge import (
     DEFAULT_SCALE,
     Case,
     CaseResult,
@@ -28,7 +28,7 @@ from rubric_eval import (
     compare_runs,
     evaluate_case,
 )
-from rubric_eval.metrics import case_score, run_metrics
+from rubric_judge.metrics import case_score, run_metrics
 
 TEN_POINT = Scale(maximum=10, presence_threshold=5)
 """A scale that shares nothing with the default: a different maximum *and* a threshold that
