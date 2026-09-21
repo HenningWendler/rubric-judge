@@ -4,25 +4,38 @@ Every run here is built by `run_of` from plain judge scores, so a test reads as 
 and deltas out with no judge and no event loop in between.
 """
 
+import json
+from pathlib import Path
+
 import pytest
 from pydantic import ValidationError
 
-from conftest import run_of
-from rubric_eval import (
+from tests.conftest import run_of
+from rubric_judge import (
     SCORE_EQUALITY_TOLERANCE,
+    ChangeMagnitude,
     ChangeStatus,
+    RunComparison,
+    RunComparisonResult,
     RunMetricsDelta,
-    RunPair,
     RunsNotComparableError,
     compare_runs,
 )
-from rubric_eval.metrics import case_score, run_metrics
-from rubric_eval.models import BatchResult, CaseResult, Criterion, CriterionResult
+from rubric_judge.comparison import _metric_difference
+from rubric_judge.metrics import case_score, run_metrics
+from rubric_judge.models import DEFAULT_SCALE, CaseResult, CriterionResult, RunResult
 
 
-def compared(baseline: BatchResult, candidate: BatchResult):
+def a_real_move(magnitude: float | None) -> float:
+    """A magnitude the test is asserting *did* move. `None` there is the failure the assertion
+    is about, so it is reported here rather than three lines later as a `TypeError`."""
+    assert magnitude is not None
+    return magnitude
+
+
+def compared(baseline: RunResult, candidate: RunResult) -> RunComparisonResult:
     """The result of comparing two runs — the whole file's one line of setup."""
-    return compare_runs(RunPair(baseline=baseline, candidate=candidate))
+    return compare_runs(RunComparison(baseline=baseline, candidate=candidate))
 
 
 UNEVEN_BASELINE = run_of({1: 0, 2: 0}, {3: 0, 4: 1}, {5: 0, 6: 2})
@@ -48,7 +61,7 @@ class TestDirection:
         assert result.case_comparison_results[0].score_delta == -1.0
 
     def test_swapping_the_sides_flips_the_whole_document_not_only_the_average(self):
-        """`RunPair` exists because a swapped pair would be undetectable. What such a swap
+        """`RunComparison` exists because a swapped pair would be undetectable. What such a swap
         would cost is every number in the result, so every number has to invert: each delta
         changes sign, the movers trade lists, and each magnitude mirrors the other side."""
         forward = compared(UNEVEN_BASELINE, UNEVEN_CANDIDATE)
@@ -57,9 +70,15 @@ class TestDirection:
         for field in RunMetricsDelta.model_fields:
             assert getattr(forward.metrics_delta, field) == -getattr(backward.metrics_delta, field)
         assert forward.summary.improved_case_ids == backward.summary.worsened_case_ids
-        assert forward.summary.improvement.largest == -backward.summary.worsening.largest
-        assert forward.summary.improvement.mean == -backward.summary.worsening.mean
-        assert forward.summary.improvement.median == -backward.summary.worsening.median
+        assert forward.summary.improvement.largest == -a_real_move(
+            backward.summary.worsening.largest
+        )
+        assert forward.summary.improvement.mean == -a_real_move(
+            backward.summary.worsening.mean
+        )
+        assert forward.summary.improvement.median == -a_real_move(
+            backward.summary.worsening.median
+        )
 
     def test_every_metric_delta_subtracts_its_own_pair_of_metrics(self):
         """One delta per `RunMetrics` field that subtracts, each reading the *same* metric on
@@ -75,7 +94,16 @@ class TestDirection:
         assert delta.average_criterion_score_delta == pytest.approx(1.1666666666666667)
         assert delta.criteria_fulfillment_rate_delta == pytest.approx(0.6666666666666667)
         assert delta.cases_with_score_zero_count_delta == -1
-        assert delta.failed_criteria_count_delta == 0
+
+    def test_a_metric_that_cannot_be_subtracted_is_refused_not_skipped(self):
+        """The deltas are derived from the fields `RunMetricsDelta` declares, so a delta
+        naming a metric that does not subtract — an id list, say — has to stop the comparison.
+        Skipped instead, it would leave the field at whatever a missing value defaults to and
+        report "this metric did not move"."""
+        metrics = UNEVEN_BASELINE.metrics
+
+        with pytest.raises(TypeError, match="cases_with_score_zero does not subtract"):
+            _metric_difference("cases_with_score_zero_delta", metrics, metrics)
 
     def test_a_run_compared_with_itself_moves_nothing(self):
         """The fixed point of a comparison, and the cheapest check that every delta really
@@ -197,13 +225,27 @@ class TestSummary:
         assert result.summary.worsened_case_ids[0] == 2
         assert result.summary.worsening.largest == -1.0
 
-    def test_a_magnitude_is_all_zero_when_nothing_moved_that_way(self):
-        """`statistics.mean` raises on an empty list, and a run where nothing got worse has
-        no worsening to report — both have to come out as a plain zero."""
+    def test_a_magnitude_is_null_when_nothing_moved_that_way(self):
+        """A run where nothing got worse has no worsening to report, and 0.0 would report one
+        of exactly zero: a JSON consumer reading the magnitude alone cannot tell those apart,
+        because only the emptiness of the id list next to it says which it is."""
         result = compared(run_of({1: 0}), run_of({1: 2}))
-        assert result.summary.worsening.largest == 0.0
-        assert result.summary.worsening.mean == 0.0
-        assert result.summary.worsening.median == 0.0
+
+        assert result.summary.worsened_case_ids == []
+        assert result.summary.worsening.largest is None
+        assert result.summary.worsening.mean is None
+        assert result.summary.worsening.median is None
+
+    def test_a_magnitude_of_null_survives_the_json_a_stored_comparison_is_read_from(self):
+        """The `null`s are the published answer, not an in-memory nicety: a reader of the
+        stored document has to see "no data" where a zero used to stand."""
+        result = compared(run_of({1: 0}), run_of({1: 2}))
+
+        assert json.loads(result.model_dump_json())["summary"]["worsening"] == {
+            "largest": None,
+            "mean": None,
+            "median": None,
+        }
 
     def test_a_magnitude_median_sits_between_the_two_middle_moves(self):
         """Four improvements of 0.25, 0.5, 1.0 and 1.0: the median of an even-sized side lies
@@ -262,7 +304,7 @@ class TestOrderIndependence:
     def test_criteria_are_sorted_by_id_even_when_neither_run_stored_them_that_way(self):
         """Ordering by id is what makes the document independent of both storage orders. Here
         neither run is in id order and the two disagree with each other, so a comparison that
-        trusted either order — or sorted only one side — would pair unrelated verdicts and
+        trusted either order — or sorted only one side — would pair unrelated results and
         report deltas for criteria that never moved."""
         case = compared(
             run_of({300: 0, 7: 1, 50: 2}),
@@ -357,27 +399,32 @@ class TestRefusal:
 
     def test_a_run_without_cases_cannot_exist_to_be_compared(self):
         """`run_metrics` refuses to describe a distribution over no cases, so an empty run was
-        never producible. Without the constraint on `BatchResult` the comparison of two of
+        never producible. Without the constraint on `RunResult` the comparison of two of
         them builds fine and then divides by zero computing the rates."""
         with pytest.raises(ValidationError, match="at least 1 item"):
-            BatchResult(metrics=run_of({1: 1}).metrics, case_results=[])
+            RunResult(metrics=run_of({1: 1}).metrics, case_results=[])
 
     def test_a_run_naming_the_same_case_twice_cannot_exist_to_be_compared(self):
-        """`Batch.cases` rejects repeated ids, so `evaluate_batch` never produces such a run —
+        """`Run.cases` rejects repeated ids, so `evaluate_run` never produces such a run —
         but it is postable, and cases are paired by id. Without the constraint the second of
         a repeated pair silently replaces the first, and the comparison reports deltas over
         fewer cases than its own `metrics` block describes."""
         run = run_of({1: 1}, {2: 1})
         twice = [run.case_results[0], run.case_results[1].model_copy(update={"case_id": 1})]
         with pytest.raises(ValidationError, match=r"case ids must be unique, repeated: \[1\]"):
-            BatchResult(metrics=run.metrics, case_results=twice)
+            RunResult(metrics=run.metrics, case_results=twice)
 
     def test_a_case_naming_the_same_criterion_twice_cannot_exist_to_be_compared(self):
-        """Same hole one level down: verdicts are paired by criterion id, so a repeated one
-        would drop a verdict out of the comparison while still counting in the case score."""
-        verdicts = run_of({1: 1}).case_results[0].criterion_results
+        """Same hole one level down: results are paired by criterion id, so a repeated one
+        would drop a result out of the comparison while still counting in the case score."""
+        criterion_results = run_of({1: 1}).case_results[0].criterion_results
         with pytest.raises(ValidationError, match=r"criterion ids must be unique, repeated: \[1\]"):
-            CaseResult(case_id=1, score=0.5, criterion_results=verdicts * 2)
+            CaseResult(
+                case_id=1,
+                score=0.5,
+                scale=DEFAULT_SCALE,
+                criterion_results=criterion_results * 2,
+            )
 
     def test_nothing_is_computed_before_the_refusal(self):
         """The check runs first on purpose — a half-built document is worse than none."""
@@ -385,16 +432,113 @@ class TestRefusal:
             compared(run_of({1: 1}), run_of({2: 1}))
 
 
-class TestJudgeOutages:
-    """A failed criterion is scored 0 today, so it shows up as an ordinary regression. The
-    run-level delta is what tells a reader the movement is an artefact."""
+class TestStoredComparison:
+    """A comparison read back from JSON has to mean what it meant when it was written."""
 
-    def test_a_run_with_more_outages_is_flagged_at_the_run_level(self):
-        baseline = run_of({1: 2})
-        candidate = _with_failed_criterion(run_of({1: 0}), criterion_id=1)
-        result = compared(baseline, candidate)
-        assert result.metrics_delta.failed_criteria_count_delta == 1
-        assert result.summary.worsened_case_ids == [1]
+    def test_a_null_magnitude_is_still_null_after_the_round_trip_a_stored_run_makes(self):
+        """The nulls are documented as "nothing moved that way", and only reading them back as
+        nulls keeps that true. Read as 0.0 — which is what a default would do — a stored
+        comparison would claim a regression of exactly zero on a side nothing moved to."""
+        written = compared(run_of({1: 0}), run_of({1: 2}))
+
+        read_back = RunComparisonResult.model_validate_json(written.model_dump_json())
+
+        assert read_back.summary.worsening.largest is None
+        assert read_back.summary.worsening.mean is None
+        assert read_back.summary.worsening.median is None
+        assert read_back == written
+
+    def test_a_magnitude_cannot_leave_a_field_out_and_be_read_as_null(self):
+        """Null is an answer here, so it has to be written down. A field that defaulted to
+        `None` when absent would make "no data" indistinguishable from "this document was
+        produced by something that does not report it"."""
+        with pytest.raises(ValidationError, match="median"):
+            ChangeMagnitude.model_validate({"largest": 1.0, "mean": 1.0})
+
+    def test_a_magnitude_that_did_move_survives_the_round_trip_as_a_number(self):
+        """The other half: nulls that are read back as nulls are only worth something if real
+        moves are not turned into nulls on the way."""
+        written = compared(run_of({1: 2}), run_of({1: 0}))
+
+        read_back = RunComparisonResult.model_validate_json(written.model_dump_json())
+
+        assert read_back.summary.worsening.largest == -1.0
+        assert read_back.summary.improvement.largest is None
+
+
+class TestPublishedExamples:
+    """The three documents in `examples/`, which the README quotes numbers out of by hand.
+
+    They are the only place a reader can check the library against something they did not
+    compute themselves, so "real output, not an illustration" has to stay true.
+    """
+
+    EXAMPLES = Path(__file__).resolve().parent.parent / "examples"
+
+    def _stored(self, name: str) -> RunResult:
+        return RunResult.model_validate_json((self.EXAMPLES / name).read_text())
+
+    def test_the_stored_comparison_is_what_the_two_stored_runs_produce(self):
+        """Every digit of `run_comparison_result.json`, recomputed from its own two inputs."""
+        recomputed = compared(
+            self._stored("run_result_baseline.json"),
+            self._stored("run_result_candidate.json"),
+        )
+        stored = RunComparisonResult.model_validate_json(
+            (self.EXAMPLES / "run_comparison_result.json").read_text()
+        )
+
+        assert recomputed == stored
+
+    def test_the_readme_quotes_those_documents_verbatim(self):
+        """The numbers the README prints in its comparison quickstart, down to the trailing
+        digits it deliberately shows — they are what summing weights 3 and 1 really produces,
+        and rounding them in the prose would hide why "stable" is a tolerance and not an
+        `==`."""
+        result = compared(
+            self._stored("run_result_baseline.json"),
+            self._stored("run_result_candidate.json"),
+        )
+
+        assert result.metrics_delta.average_score_delta == 0.1250000000000001
+        assert result.metrics_delta.median_score_delta == -0.12499999999999989
+        assert result.summary.improved_case_ids == [1]
+        assert result.summary.worsened_case_ids == [3]
+        assert result.summary.improvement.largest == 0.8750000000000001
+        assert result.summary.worsening.largest == -0.5
+        assert [
+            (bucket.label, bucket.metrics_delta.average_score_delta)
+            for bucket in result.label_metrics_deltas
+        ] == [("policy", 0.4375), ("tool", -0.25)]
+
+    def test_the_readme_drill_down_lands_on_the_criterion_it_names(self):
+        """The README follows one regression from the run down to the criterion that caused
+        it — the path the whole three-grain design exists for."""
+        result = compared(
+            self._stored("run_result_baseline.json"),
+            self._stored("run_result_candidate.json"),
+        )
+        regressed = result.case_comparison_results[2]
+
+        assert regressed.case_id == 3
+        assert (regressed.baseline_score, regressed.candidate_score) == (1.0, 0.5)
+        assert regressed.criterion_comparison_results[0].score_delta == -1.0
+        assert regressed.criterion_comparison_results[0].status is ChangeStatus.WORSENED
+
+    def test_the_stored_baseline_reports_the_metrics_the_readme_prints_for_it(self):
+        """The README prints that `metrics` object as the response of `POST /evaluate/run`."""
+        assert self._stored("run_result_baseline.json").metrics.model_dump() == {
+            "total_cases": 3,
+            "average_score": 0.6666666666666666,
+            "median_score": 1.0,
+            "variance": 0.3333333333333333,
+            "standard_deviation": 0.5773502691896257,
+            "average_criterion_score": 1.0,
+            "criteria_fulfillment_rate": 0.6666666666666666,
+            "cases_with_score_zero": [1],
+            "cases_with_score_zero_count": 1,
+            "weakest_cases_above_zero": [2, 3],
+        }
 
 
 def _case_status_for_score(candidate_score: float) -> ChangeStatus:
@@ -411,43 +555,25 @@ def _case_status_for_score(candidate_score: float) -> ChangeStatus:
     return compared(baseline, candidate).case_comparison_results[0].status
 
 
-def _reweighted(run: BatchResult, weights: dict[int, float]) -> BatchResult:
+def _reweighted(run: RunResult, weights: dict[int, float]) -> RunResult:
     """A run whose criteria carry different weights — the one thing `run_of` keeps constant."""
     case_results = [
         _rebuilt(
             result,
             [
-                verdict.model_copy(update={"weight": weights[verdict.criterion_id]})
-                for verdict in result.criterion_results
-            ],
-        )
-        for result in run.case_results
-    ]
-    return BatchResult(metrics=run_metrics(case_results), case_results=case_results)
-
-
-def _with_failed_criterion(run: BatchResult, criterion_id: int) -> BatchResult:
-    """A run in which the judge never answered for one criterion, as `evaluate_case` records it."""
-    case_results = [
-        _rebuilt(
-            result,
-            [
-                CriterionResult.unjudged(
-                    Criterion(id=verdict.criterion_id, content="x", weight=verdict.weight),
-                    "down",
+                criterion_result.model_copy(
+                    update={"weight": weights[criterion_result.criterion_id]}
                 )
-                if verdict.criterion_id == criterion_id
-                else verdict
-                for verdict in result.criterion_results
+                for criterion_result in result.criterion_results
             ],
         )
         for result in run.case_results
     ]
-    return BatchResult(metrics=run_metrics(case_results), case_results=case_results)
+    return RunResult(metrics=run_metrics(case_results), case_results=case_results)
 
 
 def _rebuilt(result: CaseResult, criterion_results: list[CriterionResult]) -> CaseResult:
-    """A case result re-scored from changed verdicts, so its `score` never lies about them."""
+    """A case result re-scored from changed criterion results, so its `score` never lies."""
     return CaseResult(
         case_id=result.case_id,
         score=case_score(criterion_results, result.scale),

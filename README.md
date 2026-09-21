@@ -1,9 +1,9 @@
-# rubric-eval
+# rubric-judge
 
 Judge the answers of an LLM application against weighted reference criteria.
 
 You know what a good answer to a question has to contain. Write that down as a **rubric** —
-a list of weighted criteria — hand over the answer your system produced, and rubric-eval
+a list of weighted criteria — hand over the answer your system produced, and rubric-judge
 asks an LLM judge, **one call per criterion**, whether each one is covered. Back comes a
 score per criterion with the judge's own reasoning, one normalized score for the answer,
 and — for a whole catalog of them — metrics over the entire run.
@@ -11,13 +11,28 @@ and — for a whole catalog of them — metrics over the entire run.
 **It is a pure evaluator.** No RAG, no retrieval, no answer generation, no database, no
 storage. Answers come in ready; results go out as JSON.
 
+The smallest complete program, judge included. The judge here grades from a table so that
+the numbers below are exactly what you get when you run it — a real one is one line away:
+
 ```python
 import asyncio
-from rubric_eval import Case, Criterion, JudgeConfig, OpenAIJudge, evaluate_case
 
-judge = OpenAIJudge(JudgeConfig.from_env())
+from rubric_judge import DEFAULT_SCALE, Case, Criterion, JudgeReply, evaluate_case
 
-result = asyncio.run(evaluate_case(judge, Case(
+
+class ScoresFromATable:
+    """A `Judge` with no LLM behind it: the grade of a criterion is looked up by its id."""
+
+    scale = DEFAULT_SCALE
+    grade_per_criterion_id = {1: 2, 2: 0}
+
+    async def score(self, question, answer, criterion) -> JudgeReply:
+        return JudgeReply(
+            score=self.grade_per_criterion_id[criterion.id], reasoning="looked up"
+        )
+
+
+result = asyncio.run(evaluate_case(ScoresFromATable(), Case(
     id=1,
     question="How do I report sick leave?",
     answer="Send an email to hr@example.com before 10:00 on your first day.",
@@ -27,18 +42,29 @@ result = asyncio.run(evaluate_case(judge, Case(
     ],
 )))
 
-print(result.score)                       # 0.75  →  criterion 1 covered, criterion 2 missing
-for verdict in result.criterion_results:
-    print(verdict.criterion_id, verdict.score, verdict.reasoning)
-# 1 2.0 The answer instructs the reader to email hr@example.com before 10:00 …
-# 2 0.0 Neither the expected last day nor any duration is mentioned …
+print(result.score)                                  # 0.75
+print([r.score for r in result.criterion_results])   # [2.0, 0.0]
+print(result.scale.maximum)                          # 2
 ```
 
-**Contents** — [Install](#install) · [Configure](#configure) · [Quickstart](#quickstart) ·
-[Comparing two runs](#comparing-two-runs) · [Reference](#reference) ([inputs](#inputs) · [outputs](#outputs) ·
+`0.75` because criterion 1 (weight 3) was fully covered and criterion 2 (weight 1) was not:
+`3/4` of the reachable points. To judge with a real LLM, swap the one line that builds the
+judge — nothing else in the program changes:
+
+```python
+from rubric_judge import JudgeConfig, OpenAIJudge
+
+judge = OpenAIJudge(JudgeConfig.from_env())     # any OpenAI-compatible endpoint
+result = asyncio.run(evaluate_case(judge, case))
+```
+
+**Contents** — [Install](#install) · [Configure](#configure) · [Quickstart](#quickstart)
+([library](#as-a-library) · [labels](#slicing-a-run-by-label) ·
+[comparing](#comparing-two-runs) · [HTTP](#as-an-http-service)) ·
+[Extending](#extending) · [Reference](#reference) ([inputs](#inputs) · [outputs](#outputs) ·
 [functions](#functions) · [HTTP](#http-api) · [errors](#errors)) ·
 [How scoring works](#how-scoring-works) · [Failure and load](#failure-and-load) ·
-[Extending](#extending) · [Architecture](#architecture) · [Tests](#tests) · [Scope](#scope)
+[Architecture](#architecture) · [Tests](#tests) · [Scope](#scope)
 
 ---
 
@@ -65,24 +91,30 @@ a committed file. Copy [.env.example](.env.example) to `.env` and fill it in.
 | `RUBRIC_EVAL_JUDGE_MODEL` | string | **required** | Model name as *that* endpoint knows it: `gpt-4o-mini`, `qwen3:8b`, … |
 | `RUBRIC_EVAL_JUDGE_TEMPERATURE` | float ≥ 0 | `0.0` | Keep at `0.0`: it is as reproducible as the endpoint gets, which matters while each criterion is judged once. Not a guarantee — see [Repeatability](#repeatability) |
 | `RUBRIC_EVAL_JUDGE_MAX_TOKENS` | int ≥ 1 | `768` | Budget per judge call. Must fit the reasoning **and** the closing JSON — a reply cut off before the JSON is unparseable and costs a retry |
-| `RUBRIC_EVAL_JUDGE_MAX_ATTEMPTS` | int ≥ 1 | `3` | Tries per criterion, **the first one included**. Raise it for a small model that formats badly |
+| `RUBRIC_EVAL_JUDGE_MAX_ATTEMPTS` | int ≥ 1 | `3` | Tries per criterion, **the first one included** — an unusable reply and a failed connection each cost one. Running out fails the whole run with a `503`. Raise it for a small model that formats badly, or for a flaky endpoint |
 | `RUBRIC_EVAL_JUDGE_MAX_CONCURRENT` | int ≥ 1 | `8` | Judge calls in flight at once. Raise for a local vLLM or Ollama, lower for a small hosted tier |
 
-An empty value counts as missing. **All** missing or invalid variables are reported in one
-error, so configuration is fixed in a single pass instead of one restart per mistake:
+A variable exported **empty** is refused for every variable alike: an empty optional one does
+*not* fall back to its default. An optional variable that is not set **at all** is what falls
+back. **All** missing or empty variables are reported in one error:
 
 ```
-RuntimeError: Missing environment variables: RUBRIC_EVAL_JUDGE_API_KEY, RUBRIC_EVAL_JUDGE_MODEL
+RuntimeError: Unusable environment variables: RUBRIC_EVAL_JUDGE_API_KEY is missing, RUBRIC_EVAL_JUDGE_MODEL is missing, RUBRIC_EVAL_JUDGE_MAX_TOKENS is empty
 ```
+
+A numeric variable that does not parse is a separate, later failure — a
+`pydantic.ValidationError` naming the setting, not this `RuntimeError`.
 
 Any OpenAI-compatible endpoint works — OpenAI, vLLM, Azure, Ollama, Groq, OpenRouter —
 because the official `openai` SDK talks to whatever `base_url` you give it.
 
-The **grading scale** is deliberately not an environment variable: it carries a sentence per
-grade, and prose does not belong in a variable meant for a URL or a key. It is set in code, on
-the judge — see [Another scale](#another-scale).
+The **grading scale** is not an environment variable. It is set in code, on the judge — see
+[Another scale](#another-scale).
 
 ## Quickstart
+
+Two entry points: the Python library and the HTTP service. **There is no CLI** — the package
+installs no console script and `python -m rubric_judge` does nothing.
 
 ### As a library
 
@@ -99,7 +131,7 @@ judge = OpenAIJudge(JudgeConfig.from_env())     # once, at startup
 **One answer** → a `CaseResult`:
 
 ```python
-from rubric_eval import Case, Criterion, evaluate_case
+from rubric_judge import Case, Criterion, evaluate_case
 
 result = await evaluate_case(judge, Case(
     id=1,
@@ -108,36 +140,41 @@ result = await evaluate_case(judge, Case(
     criteria=[Criterion(id=1, content="Report by email before 10:00", weight=3)],
 ))
 
-result.case_id                       # 1        — the id you gave the case
-result.score                         # 1.0      — weighted, normalized to [0, 1]
-result.criterion_results[0].score    # 2.0      — the raw judge score, 0 / 1 / 2
-result.criterion_results[0].reasoning  # "The answer instructs the reader to …"
-result.scale.maximum                 # 2        — what those raw scores are out of
+result.case_id                         # 1     — the id you gave the case
+result.score                           # the weighted score, normalized to [0, 1]
+result.criterion_results[0].score      # the raw judge grade, 0 / 1 / 2
+result.criterion_results[0].reasoning  # the judge's own argument for it
+result.scale.maximum                   # 2     — what those raw scores are out of
 ```
+
+> The comments above name the *fields*, not fixed values: a live judge decides the grades,
+> and the same answer can be graded differently twice — see [Repeatability](#repeatability).
+> Every number claimed as an output further down was produced by a judge that grades from a
+> table, so it is reproducible.
 
 The `scale` comes along because a result has to stay readable on its own: it says what the
 grades are out of, from where one counts as covered, and what each grade means in words. The
 judge owns it, and you can give it another one — see [Another scale](#another-scale).
 
-**A whole catalog** → a `BatchResult`: every `CaseResult` plus the aggregate over them.
+**A whole catalog** → a `RunResult`: every `CaseResult` plus the aggregate over them.
 
 ```python
-from rubric_eval import Batch, evaluate_batch
+from rubric_judge import Run, evaluate_run
 
-run = await evaluate_batch(judge, Batch(cases=[
+run_result = await evaluate_run(judge, Run(cases=[
     Case(id=1, question="How do I report sick leave?", answer="Email hr@example.com.",
          criteria=[Criterion(id=1, content="Report by email before 10:00", weight=3)]),
     Case(id=2, question="How do I request vacation?", answer="Ask your team lead.",
-         criteria=[Criterion(id=1, content="Submit the request in the HR tool", weight=1)]),
+         criteria=[Criterion(id=21, content="Submit the request in the HR tool", weight=1)]),
 ]))
 
-run.metrics.average_score          # 0.5   — mean over the cases
-run.metrics.cases_with_score_zero  # [2]   — read these answers first
-run.case_results[0].score          # 1.0   — the individual results are all still there
+run_result.metrics.average_score          # mean over the cases
+run_result.metrics.cases_with_score_zero  # ids of the answers to read first
+run_result.case_results[0].score          # the individual results are still there
 ```
 
-`run.case_results[0]` is exactly the `CaseResult` `evaluate_case()` would have returned for
-that case on its own — the batch is a fan-out over it plus the aggregate, nothing more.
+`run_result.case_results[0]` is exactly the `CaseResult` `evaluate_case()` would have
+returned for that case on its own — the run is a fan-out over it plus the aggregate.
 
 Every result is a Pydantic model, so `result.model_dump()` and `result.model_dump_json()`
 give you plain data to write to disk.
@@ -161,11 +198,11 @@ catalog = [
          labels=["table"]),
 ]
 
-run = await evaluate_batch(judge, Batch(cases=catalog))
+run_result = await evaluate_run(judge, Run(cases=catalog))
 
-run.metrics.average_score                    # 0.3333333333333333 — mediocre, but why?
-{b.label: b.metrics.average_score for b in run.label_metrics}
-# {'one_page_expected': 0.5, 'table': 0.0}   — every table question failed
+run_result.metrics.average_score                         # mediocre, but why?
+{b.label: b.metrics.average_score for b in run_result.label_metrics}
+# {'one_page_expected': …, 'table': …}   — a number per kind of question
 ```
 
 A label is yours to invent: any non-blank string, no vocabulary to register. A case may carry
@@ -176,64 +213,77 @@ Labels never reach the judge. They slice a run; they do not grade an answer. A r
 answer actually has to meet belongs in `criteria`, where it is checkable and weighted —
 adding a label cannot move a single score.
 
-**Running only part of the catalog** — hand the whole thing to a `Batch` together with a
-`label_filter`. It runs the cases the selection covers and records what picked them:
+**Running only part of the catalog** — hand the whole thing to a `Run` together with a
+`label_filter`. It runs the cases the label filter covers and records what picked them:
 
 ```python
-run = await evaluate_batch(judge, Batch(cases=catalog, label_filter=[["table"]]))
+run_result = await evaluate_run(judge, Run(cases=catalog, label_filter=[["table"]]))
 
-[r.case_id for r in run.case_results]   # [2, 3]  — only the table cases were judged
-run.label_filter                        # [['table']]
+[r.case_id for r in run_result.case_results]  # [2, 3] — only table cases were judged
+run_result.applied_label_filter               # [['table']]
 ```
 
-The extra bracket is the whole boolean story. A `label_filter` is an **OR of ANDs**: a case
-runs when it carries every label of at least one group. Against the catalog above:
+A `label_filter` is an **OR of ANDs**: a case runs when it carries every label of at least
+one group. Against the catalog above — these four lines are what
+`filter_cases_by_labels(catalog, …)` really returns:
 
 ```python
-[["table"]]                            # just table                   -> cases 2, 3
-[["table", "one_page_expected"]]       # table AND one_page_expected  -> case 2
-[["table"], ["one_page_expected"]]     # table OR one_page_expected   -> cases 1, 2, 3
-[]                                     # everything                   -> cases 1, 2, 3
+[["table"]]                            # just table                   -> [2, 3]
+[["table", "one_page_expected"]]       # table AND one_page_expected  -> [2]
+[["table"], ["one_page_expected"]]     # table OR one_page_expected   -> [1, 2, 3]
+[]                                     # everything                   -> [1, 2, 3]
 ```
 
-Groups and labels combine freely, and every boolean combination of labels can be written this
-way — which is why one extra level of list replaces an expression grammar. The general shape
-is `[["table", "split_infos"], ["agentic"]]`, meaning `(table AND split_infos) OR agentic`.
+The general shape is `[["table", "split_infos"], ["agentic"]]`, meaning
+`(table AND split_infos) OR agentic`. Negation is not expressible: "table but not images"
+needs something this deliberately does not have yet.
 
-A selection matching no case is rejected when the `Batch` is built — before a single judge
-call — and the error names the labels your catalog does carry, with counts, because that is
-nearly always a typo. Negation is not expressible: "table but not images" needs something
-this deliberately does not have yet.
+A label filter matching no case is rejected when the `Run` is built — before a single judge
+call — and the error names the labels your catalog does carry, with counts:
 
-`filter_cases_by_labels(catalog, selection)` applies the same rule without running anything,
-for when you want to see what a selection would pick first.
+```python
+Run(cases=catalog, label_filter=[["tabel"]])
+# ValidationError: label_filter [['tabel']] matches no case; labels present in this run:
+#                  one_page_expected (2), table (2)
+```
+
+`filter_cases_by_labels(catalog, label_filter)` applies the same rule without running
+anything, for when you want to see what a label filter would pick first.
 
 ### Comparing two runs
 
-Two `BatchResult`s of the **same catalog** → one `ComparisonResult`: did your change help,
+Two `RunResult`s of the **same catalog** → one `RunComparisonResult`: did your change help,
 where, and what did it cost. No judge, no network, no cost — runs stored as JSON months
 apart compare exactly like runs produced a second ago.
 
+The two documents in [examples/](examples) are real output of `POST /evaluate/run` over one
+three-case catalog, before and after a change, so this runs as it stands:
+
 ```python
 from pathlib import Path
-from rubric_eval import BatchResult, RunPair, compare_runs
 
-baseline = BatchResult.model_validate_json(Path("run_before.json").read_text())
-candidate = BatchResult.model_validate_json(Path("run_after.json").read_text())
+from rubric_judge import RunComparison, RunResult, compare_runs
 
-result = compare_runs(RunPair(baseline=baseline, candidate=candidate))
+baseline = RunResult.model_validate_json(
+    Path("examples/run_result_baseline.json").read_text()
+)
+candidate = RunResult.model_validate_json(
+    Path("examples/run_result_candidate.json").read_text()
+)
 
-result.metrics_delta.average_score_delta   # +0.125  — the run got better on average
-result.metrics_delta.median_score_delta    # -0.125  — but the typical case did not
-result.summary.improved_case_ids           # [1]     — biggest improvement first
-result.summary.worsened_case_ids           # [3]     — what the win cost
+result = compare_runs(RunComparison(baseline=baseline, candidate=candidate))
+
+result.metrics_delta.average_score_delta   # 0.1250000000000001  — better on average
+result.metrics_delta.median_score_delta    # -0.12499999999999989 — the typical case was not
+result.summary.improved_case_ids           # [1]   — biggest improvement first
+result.summary.worsened_case_ids           # [3]   — what the win cost
+result.summary.improvement.largest         # 0.8750000000000001
 result.summary.worsening.largest           # -0.5
 ```
 
 Every delta is **candidate minus baseline**, so a positive number always means the candidate
-did better. `compare_runs` takes a `RunPair` rather than two arguments on purpose: both
-sides have the same type, so a swapped pair would be undetectable and would invert every
-sign. Only what comes back carries `Result` in its name — `RunPair` is what you hand in.
+did better. `compare_runs` takes one `RunComparison` holding both sides; only what comes back
+carries `Result` in its name.
 
 Drill down when a number needs explaining — run, case, criterion:
 
@@ -247,28 +297,30 @@ dropped.score_delta                                    # -1.0  — the judge dro
 dropped.status                                         # ChangeStatus.WORSENED
 ```
 
+Labelled runs get the same deltas once per label, which is what says whether an average rose
+across the board or by fixing one kind of case:
+
+```python
+[(b.label, b.metrics_delta.average_score_delta) for b in result.label_metrics_deltas]
+# [('policy', 0.4375), ('tool', -0.25)]
+```
+
 Comparing runs of **different** catalogs is refused rather than approximated:
 
 ```python
-compare_runs(RunPair(baseline=run_of_8_cases, candidate=run_of_7_cases))
-# RunsNotComparableError: the runs are not comparable: cases only in the baseline: [6]
+compare_runs(RunComparison(baseline=baseline, candidate=run_without_case_3))
+# RunsNotComparableError: the runs are not comparable: cases only in the baseline: [3]
 ```
 
 `RunsNotComparableError` subclasses `ValueError`, so `except ValueError` still catches it.
-It has its own name so the HTTP layer can tell a genuinely incomparable pair from a bug —
-`ValidationError` and `StatisticsError` are `ValueError`s too, and reporting one of those as
-a `422` would blame the caller for our mistake.
 
-Same case ids, same criterion ids per case, same weights — all three, or no comparison.
-Weights are the denominator every case score is normalized by, so `0.5` scored under one
-set of weights and `0.5` under another are not the same `0.5`, and their difference is not
-`0`. The message names **every** difference at once, because fixing them one error at a
-time would mean re-judging the whole catalog for each.
+Same grading scale, same case ids, same criterion ids per case, same weights, same labels per
+case — all of them, or no comparison. The message names **every** difference at once.
 
 ### As an HTTP service
 
 ```bash
-.venv/bin/uvicorn rubric_eval.api:app --env-file .env --port 8000
+.venv/bin/uvicorn rubric_judge.api:app --env-file .env --port 8000
 ```
 
 Interactive, generated API docs: [localhost:8000/docs](http://localhost:8000/docs).
@@ -286,7 +338,177 @@ curl -s localhost:8000/evaluate -H 'content-type: application/json' -d '{
 ```
 
 The service is stateless: no catalog, no run ids, no persistence. It is the same library
-behind a different door, so both paths always produce identical scores.
+behind a different door, so both paths always produce identical scores. Every request and
+response shape is in [HTTP API](#http-api).
+
+---
+
+## Extending
+
+### Your own prompt
+
+```python
+from pathlib import Path
+
+judge = OpenAIJudge(JudgeConfig.from_env(), system_prompt=Path("my_prompt.txt").read_text())
+```
+
+`system_prompt=` replaces the **system prompt** only. Whatever you write has to keep two
+promises, or the parser will reject every reply: the model must argue first and end with a
+single `{"score": <grade>}` object, and the prose scale it describes must be the judge's
+`scale` — `0–2` unless you pass one.
+
+You usually do not need this. A scale that describes its levels writes the prompt itself —
+see [Another scale](#another-scale). Reach for `system_prompt=` when you want different
+*instructions* (another language, a stricter examiner, your own worked examples), not merely
+another scale.
+
+The user prompt and the retry complaints live in [prompt.py](src/rubric_judge/prompt.py).
+Every sentence the model ever reads is in that one file, as plain Python strings.
+
+| In `prompt.py` | Sent as |
+|---|---|
+| `judge_prompt(scale, examples)` | the system message, written from the scale |
+| `JUDGE_EN` | what that returns for `DEFAULT_SCALE` plus `WORKED_EXAMPLES_EN` |
+| `criterion_prompt(question, answer, criterion)` | the user message |
+| `no_json_hint(scale)`, `out_of_range_hint(score, scale)`, `malformed_json_hint(error, scale)` | the follow-up on a retry |
+
+Every one of them takes the judge's `Scale` and lists its grades out, so a judge on a
+ten-point scale is never corrected into answering `0`, `1` or `2`.
+[tests/judge_prompt_en.txt](tests/judge_prompt_en.txt) holds the hand-written original that a
+test pins the generated `JUDGE_EN` to, byte for byte.
+
+The complaints are worded as instructions on purpose: the parser raises them as
+`UnusableReplyError` messages and the retry loop hands that text straight back to the model.
+The exception message *is* the corrective prompt — rewording one means changing the prompt.
+
+### Another scale
+
+A judge is not tied to `0–2`. Describe the grades you want, and the judge writes its own
+prompt from them — no prompt to rewrite, no text to keep in sync:
+
+```python
+from rubric_judge import JudgeConfig, OpenAIJudge, Scale
+
+judge = OpenAIJudge(JudgeConfig.from_env(), scale=Scale(
+    maximum=3,
+    presence_threshold=2,
+    level_descriptions={
+        3: "Fully covered, with the specifics the criterion names.",
+        2: "Covered in substance, but a detail is missing or imprecise.",
+        1: "Touched on only. The reader could not act on what is there.",
+        0: "Not covered. Absent, or no recognizable connection to the criterion.",
+    },
+))
+```
+
+`judge.system_prompt` is then generated, scale block, header and reply format alike, so the
+model can never be instructed on a scale the parser does not enforce. Its middle and its last
+lines, printed verbatim:
+
+```
+Use this 0-3 scale:
+
+3 = Fully covered, with the specifics the criterion names.
+2 = Covered in substance, but a detail is missing or imprecise.
+1 = Touched on only. The reader could not act on what is there.
+0 = Not covered. Absent, or no recognizable connection to the criterion.
+```
+
+```
+[Two or three sentences arguing which score the scale calls for.]
+{"score": 0, 1, 2 or 3}
+```
+
+**Describe every grade or none.** A half-described scale is refused, because a prompt that
+explains four of ten levels is worse than one that explains none:
+
+```python
+Scale(maximum=2, presence_threshold=0.5, level_descriptions={2: "Yes.", 0: "No."})
+# ValidationError: level descriptions must describe every grade of the scale 0..2 and no
+#                  other, got [0, 2]
+```
+
+A scale with **no** descriptions is arithmetic only — legal, but then you owe the judge a
+prompt:
+
+```python
+OpenAIJudge(config, scale=Scale(maximum=10, presence_threshold=5))
+# ValueError: the scale 0..10 (covered from 5.0) describes no levels, so no prompt can be
+#             written from it: give it a level_descriptions entry per grade, or pass a
+#             prompt of your own
+```
+
+**Worked examples are not generated.** The three bundled ones close on grades of `0`, `1` and
+`2`, so they belong to `DEFAULT_SCALE` alone — a judge on another scale gets the instructions
+without them. To add your own:
+
+```python
+from rubric_judge import judge_prompt
+
+OpenAIJudge(config, system_prompt=judge_prompt(my_scale, my_examples), scale=my_scale)
+```
+
+What changes with the scale, and what does not:
+
+| | Follows the scale | Stays the same |
+|---|---|---|
+| grades | `CriterionResult.score`, `RunMetrics.average_criterion_score`, every criterion-level delta | |
+| coverage | `is_present`, via `presence_threshold` | |
+| the prompt | the scale block, the header, the list of allowed grades, every retry complaint | the instructions and examples around them |
+| normalized | | `CaseResult.score`, `average_score`, `median_score`, `criteria_fulfillment_rate` — all still `0 … 1` |
+
+Two runs judged on different scales are **not comparable**: `compare_runs()` refuses them the
+same way it refuses different weights. **The descriptions count as part of the scale**, so
+rewording what a grade means — even fixing a typo in it — makes new runs incomparable with
+old ones.
+
+### Your own judge
+
+`Judge` is a `Protocol`. Anything with this attribute and this method plugs into
+`evaluate_case()` and `evaluate_run()` unchanged — a different SDK, a local model, a cached
+judge, a stub:
+
+```python
+from rubric_judge import DEFAULT_SCALE, Criterion, JudgeReply, Scale
+
+class MyJudge:
+    scale: Scale = DEFAULT_SCALE
+
+    async def score(self, question: str, answer: str, criterion: Criterion) -> JudgeReply:
+        return JudgeReply(score=2, reasoning="…")
+```
+
+Three responsibilities come with it:
+
+- **Declaring a scale, and staying on it.** `scale` is what `case_score()` normalizes by and
+  what `is_present` cuts at, so a judge without it is a broken program: the `AttributeError`
+  is re-raised rather than scored `0`. `JudgeReply.score` must be an integer in
+  `0..scale.maximum` — `JudgeReply` itself only checks that it is an `int`, but the grades are
+  held against the scale, so a judge that declares `0–2` and returns `5` raises
+  `ValueError: criteria [1] scored above the scale 0..2 …` out of `evaluate_case()` rather than
+  folding into a case score above `1.0`.
+- **Throttling.** `evaluate_case()` hands out one task per criterion whatever the rubric's
+  size, because only your implementation knows what your backend tolerates. `OpenAIJudge`
+  bounds itself with `max_concurrent`; yours needs its own bound.
+- **Raising on failure.** Return a valid `JudgeReply` or raise — never a made-up `0`. Raise
+  `JudgeUnavailableError` (importable from `rubric_judge`, and subclassable if you want to
+  keep your own type) for anything your endpoint did: refused, timed out, out of quota, no
+  usable reply. That is what invalidates the run and answers `503`. Anything else you raise
+  is read as a bug in the program and answers `500`.
+
+**Plugging it into the HTTP service.** The endpoints take their judge from the `get_judge`
+dependency, so override it before the first request and every endpoint uses yours:
+
+```python
+from rubric_judge.api import app, get_judge
+
+app.dependency_overrides[get_judge] = lambda: MyJudge()
+```
+
+Serve that same `app` object with uvicorn — for example from a `my_service.py` holding the
+two lines above, started with `uvicorn my_service:app`. Without an override, `get_judge`
+builds one `OpenAIJudge(JudgeConfig.from_env())` and caches it for the whole process.
 
 ---
 
@@ -294,8 +516,7 @@ behind a different door, so both paths always produce identical scores.
 
 ### Inputs
 
-Four input types. All are Pydantic models — construct them in Python, or post the same
-shape as JSON.
+All are Pydantic models — construct them in Python, or post the same shape as JSON.
 
 #### `Criterion` — one requirement a good answer has to satisfy
 
@@ -317,42 +538,76 @@ Criterion(id=2, content="Email HR before 10:00 and inform your team", weight=3) 
 
 | Field | Type | Required | Rules |
 |---|---|---|---|
-| `id` | `int` | yes | Yours. Echoed back as `CaseResult.case_id`. Unique within its batch |
+| `id` | `int` | yes | Yours. Echoed back as `CaseResult.case_id`. Unique within its run |
 | `question` | `str` | yes | Context for the judge only — it is **never scored**. May be empty |
 | `answer` | `str` | yes | The answer under test, judged exactly as it comes in. May be empty: a system that returned nothing is a valid case that scores `0` |
 | `criteria` | `list[Criterion]` | yes | At least one. Criterion ids must be unique |
-| `labels` | `list[str]` | no, default `[]` | What kind of case this is — `["table", "images"]`. Your own vocabulary, never checked against a list. Each stripped and non-empty; no duplicates within one case. **Never shown to the judge** |
+| `labels` | `Labels` | no, default `[]` | What kind of case this is — `["table", "images"]`. Your own vocabulary, never checked against a list. Rules under [`Labels`](#label-labels-and-labelfilter--the-label-types) below. **Never shown to the judge** |
 
 `id` is mandatory even for a single evaluation. That is what makes one result type serve
 both paths — see [the vocabulary](#the-vocabulary).
 
-#### `Batch` — many cases evaluated in one go
+#### `Run` — many cases evaluated in one go
 
 | Field | Type | Required | Rules |
 |---|---|---|---|
 | `cases` | `list[Case]` | yes | At least one. Case ids must be unique |
-| `label_filter` | `list[list[str]]` | no, default `[]` | Which of those cases to run, as an **OR of ANDs**: a case runs when it carries every label of at least one group. `[]` runs all of them. A selection matching *no* case is rejected, naming the labels the batch does carry |
+| `label_filter` | `LabelFilter` | no, default `[]` | Which of those cases to run, as an **OR of ANDs**: a case runs when it carries every label of at least one group. `[]` runs all of them. A label filter matching *no* case is rejected, naming the labels the run does carry, with counts. Further rules under [`LabelFilter`](#label-labels-and-labelfilter--the-label-types) |
 
 `cases` is what you have; `label_filter` decides what runs. Post a whole catalog with
 `[["table", "split_infos"], ["agentic"]]` and the run covers the cases carrying both `table`
-and `split_infos`, plus the cases carrying `agentic`.
+and `split_infos`, plus the cases carrying `agentic`. Negation cannot be written.
 
-Every boolean combination of labels can be written as an OR of ANDs, which is why one extra
-level of list replaces an expression grammar. Negation is the exception and is absent by
-design: "table but not images" cannot be written.
+On a `Run` this field is an **instruction**; the `RunResult` carries the same groups back as
+`applied_label_filter`, a **record** of what ran, and there it is validated — see below.
 
-On a `Batch` this field is an **instruction**; on a `BatchResult` the same field is a
-**record** of what ran, and there it is validated — see below.
+#### `Label`, `Labels` and `LabelFilter` — the label types
 
-#### `RunPair` — two finished runs to hold against each other
+Constrained aliases rather than models, so a label obeys one rule wherever it appears — on a
+`Case`, on a `CaseResult`, in a `Run.label_filter` or in a call to
+`filter_cases_by_labels()`. Only `LabelFilter` is importable from `rubric_judge`.
+
+| Type | Shape | Rules |
+|---|---|---|
+| `Label` | `str` | Surrounding whitespace stripped, then at least 1 character. A blank tag is rejected, never silently dropped |
+| `Labels` | `list[Label]` | Every entry a `Label`; the same label twice in one list is rejected. Order is irrelevant everywhere — labels are read as a set |
+| `LabelFilter` | `list[Labels]` | Every group a `Labels`; the same **group** twice is rejected, in any order, so `[["a","b"], ["b","a"]]` is refused. `[]` selects everything |
+
+```python
+Case(id=1, question="q", answer="a", labels=["table", "table"],
+     criteria=[Criterion(id=1, content="c", weight=1)])
+# ValidationError: labels must be unique, repeated: ['table']
+
+Run(cases=catalog, label_filter=[["table"], ["table"]])
+# ValidationError: label groups must be unique, repeated: [['table']]
+```
+
+#### `RunComparison` — two finished runs to hold against each other
 
 | Field | Type | Required | Rules |
 |---|---|---|---|
-| `baseline` | `BatchResult` | yes | The run compared *against* — the state of things before your change |
-| `candidate` | `BatchResult` | yes | The run *under test*. Must have been judged on the same `scale` and must cover the same case ids, the same criterion ids per case, the same weights and the same labels per case as `baseline` |
+| `baseline` | `RunResult` | yes | The run compared *against* — the state of things before your change |
+| `candidate` | `RunResult` | yes | The run *under test*. Must have been judged on the same `scale` and must cover the same case ids, the same criterion ids per case, the same weights and the same labels per case as `baseline` |
 
-A named pair rather than two arguments: both sides have the same type, so a swap would be
-impossible to detect and would invert the sign of every number in the result.
+#### `JudgeConfig` — how to reach the judge model and how hard to try
+
+Built from the environment by [`JudgeConfig.from_env()`](#functions) in production, by hand in
+tests or when your settings come from somewhere else. The variable behind each field is in
+[Configure](#configure).
+
+| Field | Type | Required | Rules |
+|---|---|---|---|
+| `model` | `str` | yes | Model name as the endpoint knows it: `"gpt-4o-mini"`, `"qwen3:8b"` |
+| `endpoint` | `str` | yes | OpenAI-compatible base URL including the version path |
+| `api_key` | `str` | yes | Key for that endpoint |
+| `temperature` | `float` | no, default `0.0` | `>= 0` |
+| `max_tokens` | `int` | no, default `768` | `> 0`. Must fit the reasoning and the closing JSON object |
+| `max_attempts` | `int` | no, default `3` | `>= 1`, the first try included. The **only** retry budget: the SDK's own is switched off |
+| `max_concurrent` | `int` | no, default `8` | `>= 1`. Judge calls in flight at once, per judge *instance* |
+
+```python
+JudgeConfig(model="qwen3:8b", endpoint="http://localhost:11434/v1", api_key="ollama")
+```
 
 ### Outputs
 
@@ -366,22 +621,35 @@ included; two runs are comparable only if their scales are equal.
 |---|---|---|---|
 | `maximum` | `int` | `> 0` | Best score one criterion can reach. The scale is **integral**: `maximum = 2` offers exactly the grades `0`, `1`, `2` |
 | `presence_threshold` | `float` | `> 0`, `<= maximum` | From which score `is_present` counts the criterion as covered. Above `0` because a `0` is by definition not covered |
-| `level_descriptions` | `dict[int, str]` | empty, or one entry per grade | What each grade means, keyed by the grade. Either complete or absent — a prompt explaining four of ten levels is worse than one explaining none. A described scale **writes its own judge prompt**; an undescribed one is arithmetic only |
+| `level_descriptions` | `dict[int, str]` | empty, or one entry per grade | What each grade means, keyed by the grade. Either complete or absent. A described scale **writes its own judge prompt**; an undescribed one is arithmetic only |
 
 `DEFAULT_SCALE` is the `0–2` scale the bundled prompt describes, descriptions included, and
-the one a stored result is read on when it names none.
+the one `OpenAIJudge` grades on unless you give it another. It is never a stand-in for a
+scale a stored result failed to name — see `CaseResult.scale` below.
 
-#### `CriterionResult` — the verdict for one criterion
+#### `JudgeReply` — what the model said, before anything is attached to it
+
+What a `Judge` returns and the only type a custom judge has to produce. It is not part of a
+`CaseResult`: `evaluate_case()` turns each one into a `CriterionResult` on the judge's scale.
 
 | Field | Type | Range | Meaning |
 |---|---|---|---|
-| `criterion_id` | `int` | — | The `Criterion.id` this verdict belongs to |
+| `score` | `int` | `0 … scale.maximum` | The grade the model named. A whole number — the scale is integral. Only the `int` type is checked here; the bound is checked against the judge's scale when the `CriterionResult` is built |
+| `reasoning` | `str` | — | The judge's argument: everything it wrote before the closing JSON object. Never `None` |
+
+#### `CriterionResult` — what one criterion was given
+
+| Field | Type | Range | Meaning |
+|---|---|---|---|
+| `criterion_id` | `int` | — | The `Criterion.id` this result belongs to |
 | `weight` | `float` | `> 0` | Copy of `Criterion.weight`, so a result can be re-scored without the rubric at hand |
 | `score` | `float` | `0.0 … scale.maximum` | The judge's **raw** grade, not normalized. On the default scale: `2` fully covered · `1` partially · `0` not covered. A float so averaging repeated runs cannot change the type. Bounded by `CaseResult.scale`, which is the object that knows it |
-| `is_present` | `bool` | — | `score >= scale.presence_threshold`, using the scale of the `CaseResult` above. Never asked of the judge, and a `CaseResult` **refuses** a verdict whose value here contradicts its own score |
-| `spread` | `float` | `>= 0` | Standard deviation across repeated runs of this criterion. Always `0.0` today: each criterion is judged exactly once |
-| `failed` | `bool` | — | `true` when the judge produced no usable verdict even after all retries. The criterion still counts as `0` and keeps its weight |
-| `reasoning` | `str \| None` | — | The judge's argument for the score — or, when `failed`, the error that prevented one |
+| `is_present` | `bool` | — | `score >= scale.presence_threshold`, using the scale of the `CaseResult` above. Never asked of the judge, and a `CaseResult` **refuses** a result whose value here contradicts its own score |
+| `reasoning` | `str \| None` | — | The judge's own argument for the score |
+
+There is exactly one constructor, `CriterionResult.judged()` — see
+[Functions](#functions). There is none for a criterion the judge never answered for: such a
+run is invalidated instead of being completed around the gap.
 
 #### `CaseResult` — one whole answer
 
@@ -389,35 +657,27 @@ the one a stored result is read on when it names none.
 |---|---|---|---|
 | `case_id` | `int` | — | The `Case.id` this result belongs to |
 | `score` | `float` | `0.0 … 1.0` | The weighted case score, see [How scoring works](#how-scoring-works). `1.0` means every criterion fully covered |
-| `scale` | `Scale` | — | What the grades below mean. Stored **once per case**, not per verdict: one case is judged by one judge on one scale, and `POST /evaluate` returns this document on its own, so this is the lowest level that always exists. Defaults to `DEFAULT_SCALE` when a stored result names none |
-| `criterion_results` | `list[CriterionResult]` | ≥ 1 entry | One verdict per criterion, **in rubric order**, so it can be zipped with `Case.criteria`. Never empty — a rubric has at least one criterion, so a result has at least one verdict. Criterion ids must be unique: verdicts are paired by id when two runs are compared |
-| `labels` | `list[str]` | — | The `Case.labels` this result came from, copied over so a stored run can still be sliced without the catalog at hand. `[]` for an untagged case, and for a result written before labels existed |
+| `scale` | `Scale` | — | What the grades below mean. Stored **once per case**, not per criterion result: one case is judged by one judge on one scale, and `POST /evaluate` returns this document on its own. **Required** — posting a result without it is a `422`, never a silent `0–2` |
+| `criterion_results` | `list[CriterionResult]` | ≥ 1 entry | One result per criterion, **in rubric order**, so it can be zipped with `Case.criteria`. Never empty — a rubric has at least one criterion. Criterion ids must be unique: they are what pairs the two sides when two runs are compared |
+| `labels` | `Labels` | — | The `Case.labels` this result came from, copied over so a stored run can still be sliced without the catalog at hand. `[]` for an untagged case, and for a result written before labels existed |
 
-> Named `criterion_results`, not `criteria`: the list holds *verdicts*, one per criterion —
-> `Case.criteria` is the rubric, and one name must not mean two things.
-
-`BatchResult.scale` reads the one scale its cases were judged on — a Python accessor, not a
-JSON field, since the cases already carry it. A run whose cases name more than one scale is
-rejected, and so is a comparison of two runs whose scales differ.
-
-#### `RunMetrics` — the aggregate over a batch
+#### `RunMetrics` — the aggregate over a run
 
 Every case counts **once**, whatever the size of its rubric — otherwise one case with
 twenty criteria would outvote nineteen cases with one.
 
-| Field | Type | Range | What it answers |
+| Field | Type | Range | Meaning |
 |---|---|---|---|
 | `total_cases` | `int` | `>= 1` | How many cases went into these numbers |
 | `average_score` | `float` | `0 … 1` | Mean of the case scores — the single number a run is usually reported by |
 | `median_score` | `float` | `0 … 1` | Middle case score. Far above the mean means a few catastrophic cases drag an otherwise solid run down |
-| `variance` | `float` | `>= 0` | Sample variance of the case scores. `0.0` for a single case, which has no spread |
-| `standard_deviation` | `float` | `>= 0` | Square root of it, in score units. Small = uniformly good or bad; large = it depends heavily on the question |
+| `variance` | `float` | `0 … 0.5` | Sample variance of the case scores. `0.0` for a single case, which has no spread |
+| `standard_deviation` | `float` | `0 … √0.5` (≈ `0.71`) | Square root of it, in score units. Small = uniformly good or bad; large = it depends heavily on the question |
 | `average_criterion_score` | `float` | `0 … scale.maximum` | How the judge rates an average *statement*, on the run's **raw** scale (`1.4` of `2`, not `0.7`), ignoring weights and case boundaries. A different question from `average_score` |
 | `criteria_fulfillment_rate` | `float` | `0 … 1` | Mean share of criteria counting as `is_present`, averaged **per case first** so a long rubric cannot dominate |
-| `cases_with_score_zero` | `list[int]` | — | Ids of answers that missed their rubric completely. Read these first |
-| `cases_with_score_zero_count` | `int` | `>= 0` | Length of that list. Derived, so the two can never disagree |
+| `cases_with_score_zero` | `list[int]` | ≤ `total_cases` entries | Ids of answers that missed their rubric completely. Read these first |
+| `cases_with_score_zero_count` | `int` | `0 … total_cases` | Length of that list. Derived, so the two can never disagree |
 | `weakest_cases_above_zero` | `list[int]` | ≤ 5 entries | The weakest cases that still scored *something*, weakest first. Kept apart from the zeros because a total miss and a partial answer usually have different causes |
-| `failed_criteria_count` | `int` | `>= 0` | Criteria the judge never answered for. **Read this before the average**: anything above `0` means the run is depressed by outages, not only by the answers |
 
 #### `LabelMetrics` — one label's slice of a run
 
@@ -431,18 +691,18 @@ case counts add up to more than the run. That is the question a bucket answers: 
 involving tables do*, not *how do cases that are only tables do*. Cases with no labels are in
 the run-wide `metrics` and in no bucket at all.
 
-Composed rather than flattened: a twin that redeclared every `RunMetrics` field would have to
-be edited in step with it forever, and the half that got forgotten would go on serializing a
-stale number under a familiar name.
+#### `RunResult` — one whole run
 
-#### `BatchResult` — one whole run
+| Field | Type | Range | Meaning |
+|---|---|---|---|
+| `metrics` | `RunMetrics` | — | The aggregate over every case of the run |
+| `label_metrics` | `list[LabelMetrics]` | 0 … one per label carried | The same aggregate once per label, **in alphabetical label order**. One entry per label occurring anywhere in `case_results` and no others — `[]` for a run of untagged cases |
+| `applied_label_filter` | `LabelFilter` | `[]` … one group per selection | The label filter that picked these cases, copied from `Run.label_filter` so a stored run still says which subset it is. `[]` for an unfiltered run. Named apart from the input field because it is a *record*, so it is checked: every case result must match it |
+| `case_results` | `list[CaseResult]` | ≥ 1 entry | One per **selected** case, in request order — fewer than `Run.cases` when a `label_filter` narrowed the run. Never empty: `run_metrics` refuses a run of no cases, so such a run was never producible. Case ids must be unique: cases are paired by id when two runs are compared |
 
-| Field | Type | Meaning |
-|---|---|---|
-| `metrics` | `RunMetrics` | The aggregate over every case of the run |
-| `label_metrics` | `list[LabelMetrics]` | The same aggregate once per label, **in alphabetical label order**. One entry per label occurring anywhere in `case_results` and no others — `[]` for a run of untagged cases |
-| `label_filter` | `list[list[str]]` | The selection that picked these cases, echoed from `Batch.label_filter` so a stored run still says which subset it is. `[]` for an unfiltered run. Here it is a *record*, so it is checked: every case result must match it |
-| `case_results` | `list[CaseResult]` | ≥ 1 entry. One per **selected** case, in request order — fewer than `Batch.cases` when a `label_filter` narrowed the run — so any suspicious number can be traced back. Never empty: `run_metrics` refuses a run of no cases, so such a run was never producible. Case ids must be unique: cases are paired by id when two runs are compared |
+`RunResult.scale` reads the one scale its cases were judged on — a Python accessor, not a
+JSON field, since the cases already carry it. A run whose cases name more than one scale is
+rejected, and so is a comparison of two runs whose scales differ.
 
 #### `ChangeStatus` — which way a score moved
 
@@ -468,7 +728,7 @@ improved.
 | `baseline_score` | `float` | `0.0 … scale.maximum` | What the baseline run's judge gave it, on the runs' shared raw scale |
 | `candidate_score` | `float` | `0.0 … scale.maximum` | What the candidate run's judge gave it, same scale |
 | `score_delta` | `float` | `-maximum … maximum` | `candidate_score - baseline_score`. Both runs were judged on one scale — a comparison of two is refused |
-| `status` | `ChangeStatus` | — | That delta as a verdict |
+| `status` | `ChangeStatus` | one of three | That delta as a status |
 
 #### `CaseComparisonResult` — one case across two runs
 
@@ -478,7 +738,7 @@ improved.
 | `baseline_score` | `float` | `0.0 … 1.0` | Its weighted score in the baseline run |
 | `candidate_score` | `float` | `0.0 … 1.0` | Its weighted score in the candidate run |
 | `score_delta` | `float` | `-1.0 … 1.0` | `candidate_score - baseline_score` |
-| `status` | `ChangeStatus` | — | That delta as a verdict |
+| `status` | `ChangeStatus` | one of three | That delta as a status |
 | `criterion_comparison_results` | `list[CriterionComparisonResult]` | ≥ 1 entry | One per criterion, **ordered by `criterion_id`** — so the list reads the same whichever order either run happened to be stored in |
 
 A case can be `"stable"` while its criteria moved hard in opposite directions. That is
@@ -491,38 +751,37 @@ subtracted. `total_cases` has none — a comparison of different case sets is re
 the two id lists have none, because a set of ids does not subtract; `ChangeSummary` reports
 the movement of cases instead.
 
-| Field | Type | Meaning |
-|---|---|---|
-| `average_score_delta` | `float` | Change in the mean case score. The headline number |
-| `median_score_delta` | `float` | Change in the median. Read next to the mean: a mean that rose while the median fell means a few cases carried the win |
-| `variance_delta` | `float` | Change in the sample variance of the case scores |
-| `standard_deviation_delta` | `float` | Change in their spread. Negative means more uniform — an improvement or a regression depending on which way the mean went |
-| `average_criterion_score_delta` | `float` | Change on the runs' shared raw scale, ignoring weights and case boundaries. Moves independently of `average_score_delta` |
-| `criteria_fulfillment_rate_delta` | `float` | Change in the mean share of criteria counting as covered |
-| `cases_with_score_zero_count_delta` | `int` | Change in how many answers missed completely. **Negative is the good direction here** |
-| `failed_criteria_count_delta` | `int` | Change in judge outages. **Read this first**: anything but `0` and every other number above is partly an artefact of the outage rather than of the answers |
+| Field | Type | Range | Meaning |
+|---|---|---|---|
+| `average_score_delta` | `float` | `-1 … 1` | Change in the mean case score. The headline number |
+| `median_score_delta` | `float` | `-1 … 1` | Change in the median. Read next to the mean: a mean that rose while the median fell means a few cases carried the win |
+| `variance_delta` | `float` | `-0.5 … 0.5` | Change in the sample variance of the case scores |
+| `standard_deviation_delta` | `float` | `-√0.5 … √0.5` | Change in their spread. Negative means more uniform — an improvement or a regression depending on which way the mean went |
+| `average_criterion_score_delta` | `float` | `-maximum … maximum` | Change on the runs' shared raw scale, ignoring weights and case boundaries. Moves independently of `average_score_delta` |
+| `criteria_fulfillment_rate_delta` | `float` | `-1 … 1` | Change in the mean share of criteria counting as covered |
+| `cases_with_score_zero_count_delta` | `int` | `-total_cases … total_cases` | Change in how many answers missed completely. **Negative is the good direction here** |
 
 #### `LabelMetricsDelta` — one label's slice of a comparison
 
-| Field | Type | Meaning |
-|---|---|---|
-| `label` | `str` | The label this slice is about. Always present on both runs — a case whose labels changed between them makes the comparison incomparable |
-| `metrics_delta` | `RunMetricsDelta` | The table above, over only the cases carrying `label`. Signs point the same way they do for the whole run |
+| Field | Type | Range | Meaning |
+|---|---|---|---|
+| `label` | `str` | — | The label this slice is about. Always present on both runs — a case whose labels changed between them makes the comparison incomparable |
+| `metrics_delta` | `RunMetricsDelta` | — | The table above, over only the cases carrying `label`. Signs point the same way they do for the whole run |
 
-The mirror of `LabelMetrics`, and what answers *"my average went up — but did I fix
-`agentic_search` or break `table`?"*
+What answers *"my average went up — but did I fix `agentic_search` or break `table`?"*
 
 #### `ChangeMagnitude` — how large the moves on one side were
 
-| Field | Type | Meaning |
-|---|---|---|
-| `largest` | `float` | The single biggest move on this side |
-| `mean` | `float` | Mean of the moves — what a typical one was worth |
-| `median` | `float` | Median of them. Far below the mean on the improvement side means one case carries the win |
+| Field | Type | Range | Meaning |
+|---|---|---|---|
+| `largest` | `float \| null` | `-1.0 … 1.0`, or `null` | The single biggest move on this side |
+| `mean` | `float \| null` | `-1.0 … 1.0`, or `null` | Mean of the moves — what a typical one was worth |
+| `median` | `float \| null` | `-1.0 … 1.0`, or `null` | Median of them. Far below the mean on the improvement side means one case carries the win |
 
 All three carry the **sign of their side**, so a worsening's `largest` is the most negative
-delta, not its absolute value. All three are `0.0` when nothing moved that way — a run where
-nothing got worse has no worsening to report.
+delta, not its absolute value. All three are `null` when nothing moved that way — a run where
+nothing got worse has no worsening to report, and a `0.0` there would read as a regression of
+exactly zero.
 
 #### `ChangeSummary` — where the run moved, case by case
 
@@ -531,57 +790,57 @@ says whether every case rose a little or one rose a lot while another collapsed.
 
 | Field | Type | Range | Meaning |
 |---|---|---|---|
-| `improved_case_ids` | `list[int]` | — | Cases the candidate scored higher on, **biggest improvement first**. Complete, not capped — the top three are its first three |
-| `stable_case_ids` | `list[int]` | — | Cases whose score did not move beyond the tolerance, in id order |
-| `worsened_case_ids` | `list[int]` | — | Cases the candidate scored lower on, **biggest regression first**. Read these when an average went up and you want to know what it cost |
-| `improvement` | `ChangeMagnitude` | — | Size of the moves behind `improved_case_ids`, all positive |
-| `worsening` | `ChangeMagnitude` | — | Size of the moves behind `worsened_case_ids`, all negative |
-| `improved_case_count` | `int` | `>= 0` | Length of `improved_case_ids`. Derived, so list and count cannot disagree |
-| `stable_case_count` | `int` | `>= 0` | Length of `stable_case_ids` |
-| `worsened_case_count` | `int` | `>= 0` | Length of `worsened_case_ids` |
+| `improved_case_ids` | `list[int]` | ≤ `total_cases` entries | Cases the candidate scored higher on, **biggest improvement first**. Complete, not capped — the top three are its first three |
+| `stable_case_ids` | `list[int]` | ≤ `total_cases` entries | Cases whose score did not move beyond the tolerance, in id order |
+| `worsened_case_ids` | `list[int]` | ≤ `total_cases` entries | Cases the candidate scored lower on, **biggest regression first**. Read these when an average went up and you want to know what it cost |
+| `improvement` | `ChangeMagnitude` | — | Size of the moves behind `improved_case_ids`, all positive. All three fields `null` when nothing improved |
+| `worsening` | `ChangeMagnitude` | — | Size of the moves behind `worsened_case_ids`, all negative. All three fields `null` when nothing got worse |
+| `improved_case_count` | `int` | `0 … total_cases` | Length of `improved_case_ids`. Derived, so list and count cannot disagree |
+| `stable_case_count` | `int` | `0 … total_cases` | Length of `stable_case_ids` |
+| `worsened_case_count` | `int` | `0 … total_cases` | Length of `worsened_case_ids` |
 | `improvement_rate` | `float` | `0 … 1` | Share of cases that improved |
 | `stability_rate` | `float` | `0 … 1` | Share that did not move |
 | `worsening_rate` | `float` | `0 … 1` | Share that got worse. Every case lands in exactly one list, so the three **counts** always add up to the run; the three rates are three separate divisions and sum to `1.0` only to within float rounding |
 
-#### `ComparisonResult` — one whole comparison
+#### `RunComparisonResult` — one whole comparison
 
-| Field | Type | Meaning |
-|---|---|---|
-| `metrics_delta` | `RunMetricsDelta` | Whether the run got better |
-| `summary` | `ChangeSummary` | How that is distributed over the cases |
-| `label_metrics_deltas` | `list[LabelMetricsDelta]` | Which *kind* of case moved, **in alphabetical label order**. `[]` when neither run carries labels |
-| `case_comparison_results` | `list[CaseComparisonResult]` | Which criterion is responsible. **Ordered by `case_id`** — both runs cover the same cases, so neither one's storage order is canonical |
+| Field | Type | Range | Meaning |
+|---|---|---|---|
+| `metrics_delta` | `RunMetricsDelta` | — | Whether the run got better |
+| `summary` | `ChangeSummary` | — | How that is distributed over the cases |
+| `label_metrics_deltas` | `list[LabelMetricsDelta]` | 0 … one per label carried | Which *kind* of case moved, **in alphabetical label order**. `[]` when neither run carries labels |
+| `case_comparison_results` | `list[CaseComparisonResult]` | ≥ 1 entry | Which criterion is responsible. **Ordered by `case_id`** — both runs cover the same cases, so neither one's storage order is canonical |
 
 ### Functions
 
 ```python
 async def evaluate_case(judge: Judge, case: Case) -> CaseResult
 ```
-Judges one case. Fans out over the criteria concurrently, contains judge failures
-(see [Failure and load](#failure-and-load)), folds the verdicts into one score.
+Judges one case. Fans out over the criteria concurrently and folds the results into one
+score — or raises `JudgeUnavailableError` and returns nothing at all, see
+[Failure and load](#failure-and-load).
 
 ```python
-async def evaluate_batch(judge: Judge, batch: Batch) -> BatchResult
+async def evaluate_run(judge: Judge, run: Run) -> RunResult
 ```
 Judges every case concurrently and adds `RunMetrics`, plus one `LabelMetrics` per label the
 cases carry. A fan-out over `evaluate_case` and nothing else, so the two paths cannot drift
-apart. Which cases run is the batch's own business: it judges `batch.selected_cases`, so a
+apart. Which cases run is the `Run`'s own business: it judges `run.selected_cases`, so a
 whole catalog plus a `label_filter` runs the subset and records what picked it.
 
 ```python
-def filter_cases_by_labels(cases: list[Case], selection: list[list[str]]) -> list[Case]
+def filter_cases_by_labels(cases: list[Case], label_filter: list[list[str]]) -> list[Case]
 ```
-The cases a selection covers — any group, every label of it. The same rule
-`Batch.selected_cases` runs by and the buckets bucket by, so "the run selected by `table`"
+The cases a label filter covers — any group, every label of it. The same rule
+`Run.selected_cases` runs by and the buckets bucket by, so "the run selected by `table`"
 and "the `table` bucket of the full run" are the same cases. You rarely need it to *run* a
-subset; reach for it to see what a selection would pick first. No match is an empty list,
-never an exception — `Batch` is what refuses to run one. The selection itself is held to the
-same rules as `Batch.label_filter`, so a preview and the run it previews can never pick
-different cases. Raises `TypeError` for a flat `["table"]`, which would otherwise compare
-characters and quietly return the wrong cases.
+subset; reach for it to see what a label filter would pick first. No match is an empty list,
+never an exception — `Run` is what refuses to run one. The label filter itself is held to the
+same rules as `Run.label_filter`. Raises `TypeError` for a flat `["table"]`, which would
+otherwise compare characters and quietly return the wrong cases.
 
 ```python
-def run_metrics(results: list[CaseResult]) -> RunMetrics
+def run_metrics(case_results: list[CaseResult]) -> RunMetrics
 ```
 The aggregate on its own — use it when you already have case results (loaded from disk,
 say) and only want the numbers. Raises `ValueError` on an empty list, or on cases judged on
@@ -589,17 +848,17 @@ different scales: `average_criterion_score` averages raw grades, and grades in t
 not average.
 
 ```python
-def label_metrics(results: list[CaseResult]) -> list[LabelMetrics]
+def label_metrics(case_results: list[CaseResult]) -> list[LabelMetrics]
 ```
 The per-label breakdown on its own, alphabetical. Public for the same reason `run_metrics`
 is: a run read back from disk months later can still be sliced. `[]` when no case carries a
-label.
+label. Raises `ValueError` on cases judged on different scales.
 
 ```python
-def case_score(results: list[CriterionResult], scale: Scale) -> float
+def case_score(criterion_results: list[CriterionResult], scale: Scale) -> float
 ```
 The weighted formula alone, `→ [0, 1]`. Dividing by `scale.maximum` is what makes the result
-scale-free. Raises `ValueError` on an empty list, or when a verdict is graded above the scale.
+scale-free. Raises `ValueError` on an empty list, or when a result is graded above the scale.
 
 ```python
 def judge_prompt(scale: Scale, examples: str = "") -> str
@@ -609,7 +868,17 @@ level, and the reply format down to the grades the model may answer with. `examp
 appended verbatim. Raises `ValueError` for a scale with no `level_descriptions`.
 
 ```python
-def compare_runs(run_pair: RunPair) -> ComparisonResult
+def parse_judge_reply(reply: str, scale: Scale) -> JudgeReply
+```
+Pulls the score and the argument out of one raw judge reply: the **last** `{"score": …}`
+object in it wins, and everything before it is the reasoning. `OpenAIJudge` calls it for you;
+reach for it to check what your own judge's endpoint replies, or to reuse the parsing in a
+judge of your own. Raises `UnusableReplyError` — a `ValueError` — for a reply with no score
+object, unparseable JSON, or a grade off `scale`. **That message is the corrective prompt**
+the retry loop sends back to the model, not a report for a human.
+
+```python
+def compare_runs(run_comparison: RunComparison) -> RunComparisonResult
 ```
 Holds two finished runs against each other at three grains — run, case, criterion — plus
 one delta per label. Pure computation: no judge, no network, no cost. Raises
@@ -617,32 +886,94 @@ one delta per label. Pure computation: no judge, no network, no cost. Raises
 do not describe the same catalog.
 
 ```python
+@classmethod
+def CriterionResult.judged(criterion: Criterion, score: float,
+                           reasoning: str | None, scale: Scale) -> CriterionResult
+```
+The only constructor for a criterion result: it copies `id` and `weight` off the criterion
+and derives `is_present` from `scale`, so the two can never contradict the grade. `scale` is
+the judge's own, never a guess. Raises `pydantic.ValidationError` for a negative or
+non-finite `score`; whether the score fits the scale is checked by the `CaseResult` it goes
+into, which is the object that knows.
+
+```python
+@property
+def Run.selected_cases -> list[Case]
+```
+The cases this run actually judges: the entries of `cases` matching `label_filter`, in their
+original order, all of them when it is empty. Never empty — a label filter matching nothing
+is refused when the `Run` is built.
+
+```python
+@property
+def RunResult.scale -> Scale
+```
+The one `Scale` every case of the run was judged on. Raises `ValueError` if the cases name
+more than one — which `RunResult` already refuses at validation, so a run you are holding
+always answers.
+
+```python
+class Judge(Protocol):
+    scale: Scale
+    async def score(self, question: str, answer: str,
+                    criterion: Criterion) -> JudgeReply
+```
+The extension point. Implement those two members and `evaluate_case()` and `evaluate_run()`
+take your object unchanged — no base class, no registration. `score()` judges exactly one
+criterion and must either return a valid `JudgeReply` or raise: `JudgeUnavailableError` for
+anything the endpoint did, anything else for a bug. Throttling belongs here too, because only
+the implementation knows what its backend tolerates. See
+[Your own judge](#your-own-judge).
+
+```python
 class OpenAIJudge:
-    def __init__(self, config: JudgeConfig, prompt: str | None = None,
-                 scale: Scale = DEFAULT_SCALE)
-    async def score(self, question: str, answer: str, criterion: Criterion) -> Verdict
+    def __init__(self, config: JudgeConfig, system_prompt: str | None = None,
+                 scale: Scale = DEFAULT_SCALE, client: AsyncOpenAI | None = None)
+    async def score(self, question: str, answer: str, criterion: Criterion) -> JudgeReply
+
+    scale: Scale            # what it grades on
+    system_prompt: str      # the system message it sends, generated unless you passed one
+    config: JudgeConfig
+    client: AsyncOpenAI
 ```
-The bundled judge. `prompt` replaces the system prompt and `scale` is what it grades on —
-a described scale writes its own prompt, so passing both is only for your own instructions
-on your own scale, see [Another scale](#another-scale). `score()` judges a single criterion
-with no fan-out and no failure handling — handy for a quick experiment. Raises `ValueError`
-for a `scale` with no `level_descriptions` and no `prompt` to go with it.
+The bundled judge. `system_prompt` replaces the system prompt and `scale` is what it grades
+on — a described scale writes its own prompt, so passing both is only for your own
+instructions on your own scale, see [Another scale](#another-scale). `client` is an
+already-built `openai.AsyncOpenAI` to talk through — a shared connection pool, an Azure
+client, a test double; left out, one is built from `config` with `max_retries=0` so
+`max_attempts` stays the only retry budget. A client you pass keeps its own `max_retries`,
+and the two budgets multiply: build yours with `max_retries=0` unless you mean that.
+`score()` judges a single criterion with no fan-out and no failure handling above its own
+retries — handy for a quick experiment. Raises `ValueError` for a `scale` with no
+`level_descriptions` and no `system_prompt` to go with it.
 
 ```python
-class JudgeConfig:
-    model: str; endpoint: str; api_key: str          # required
-    temperature: float = 0.0; max_tokens: int = 768  # optional
-    max_attempts: int = 3; max_concurrent: int = 8
-
-    @classmethod
-    def from_env(cls) -> JudgeConfig
+@classmethod
+def JudgeConfig.from_env() -> JudgeConfig
+@classmethod
+def JudgeConfig.from_mapping(environment: Mapping[str, str]) -> JudgeConfig
 ```
-`from_env()` reads the variables from [Configure](#configure). Build it by hand in tests or
-when your settings come from elsewhere:
+`from_env()` reads the variables from [Configure](#configure) out of `os.environ`;
+`from_mapping()` applies the same rules to any mapping you hand it — settings loaded from a
+file, or a plain dict in a test. Both raise `RuntimeError` naming **every** missing or empty
+variable at once, and `pydantic.ValidationError` when a numeric variable does not parse.
+Fields and defaults are in [`JudgeConfig`](#judgeconfig--how-to-reach-the-judge-model-and-how-hard-to-try).
 
 ```python
-JudgeConfig(model="qwen3:8b", endpoint="http://localhost:11434/v1", api_key="ollama")
+@lru_cache
+def get_judge() -> Judge
 ```
+The FastAPI dependency every endpoint takes its judge from, and the one place the HTTP
+service builds an `OpenAIJudge(JudgeConfig.from_env())`. Cached for the whole process, so one
+`max_concurrent` budget is shared by every request rather than handed out per request. Two
+things to know when you plug in a judge of your own:
+
+```python
+app.dependency_overrides[get_judge] = lambda: my_own_judge   # grade differently
+get_judge.cache_clear()   # after changing RUBRIC_EVAL_JUDGE_* inside this process
+```
+
+Raises `RuntimeError` when the judge cannot be configured, which surfaces as a `500`.
 
 Constants, if you need to compute against them: `DEFAULT_SCALE` (`maximum=2`,
 `presence_threshold=0.5`, **plus** the three level descriptions the bundled prompt is written
@@ -657,195 +988,226 @@ different order, far below the smallest difference a rubric can actually produce
 | Method | Path | Body | Returns |
 |---|---|---|---|
 | `POST` | `/evaluate` | a `Case` | a `CaseResult` |
-| `POST` | `/evaluate/batch` | a `Batch` | a `BatchResult` |
-| `POST` | `/compare` | a `RunPair` | a `ComparisonResult` |
+| `POST` | `/evaluate/run` | a `Run` | a `RunResult` |
+| `POST` | `/compare` | a `RunComparison` | a `RunComparisonResult` |
 | `GET` | `/health` | — | `{"status": "ok"}` |
 
-The JSON shapes are exactly the models above. `POST /evaluate/batch`:
+The JSON shapes are exactly the models above.
+
+#### `POST /evaluate`
+
+The request is the `curl` body from [As an HTTP service](#as-an-http-service). This is the
+complete response for it, from a judge grading that rubric `2` and `0`:
+
+```json
+{
+  "case_id": 1,
+  "score": 0.75,
+  "scale": {
+    "maximum": 2,
+    "presence_threshold": 0.5,
+    "level_descriptions": {
+      "2": "Fully covered. Every essential part of the criterion is clearly recognizable in the answer, even if the wording, terminology or structure differs.",
+      "1": "Partially covered. Some essential information is missing, but the basic idea is still derivable from the answer.",
+      "0": "Not covered. The criterion is absent, or the answer has no recognizable connection to it."
+    }
+  },
+  "criterion_results": [
+    {
+      "criterion_id": 1,
+      "weight": 3.0,
+      "score": 2.0,
+      "is_present": true,
+      "reasoning": "The answer instructs the reader to email hr@example.com before 10:00 on the first day, which is exactly what the criterion asks for."
+    },
+    {
+      "criterion_id": 2,
+      "weight": 1.0,
+      "score": 0.0,
+      "is_present": false,
+      "reasoning": "Neither the expected last day nor any duration is mentioned."
+    }
+  ],
+  "labels": []
+}
+```
+
+Note `"level_descriptions"` keyed by `"2"`, `"1"`, `"0"` as strings: JSON has no integer keys,
+and Pydantic reads them back as integers.
+
+#### `POST /evaluate/run`
+
+The request is a list of exactly those case bodies, plus optional `labels` and an optional
+`label_filter`:
 
 ```json
 {
   "cases": [
-    { "id": 1, "question": "How do I report sick leave?", "answer": "Send an email …",
-      "criteria": [ { "id": 1, "content": "Report by email before 10:00", "weight": 3 } ],
-      "labels": ["table"] },
-    { "id": 2, "question": "How do I request vacation?", "answer": "Ask your team lead.",
-      "criteria": [ { "id": 1, "content": "Submit the request in the HR tool", "weight": 1 } ],
-      "labels": ["table", "links"] }
+    { "id": 1, "question": "How do I report sick leave?",
+      "answer": "Send an email to hr@example.com before 10:00 on your first day.",
+      "criteria": [
+        { "id": 1, "content": "Report by email before 10:00 on the first day", "weight": 3 },
+        { "id": 2, "content": "State the expected last day of absence", "weight": 1 }
+      ],
+      "labels": ["policy"] },
+    { "id": 2, "question": "How do I request vacation?",
+      "answer": "Submit the request in the HR tool.",
+      "criteria": [
+        { "id": 21, "content": "Submit the request in the HR tool", "weight": 1 }
+      ],
+      "labels": ["policy", "tool"] },
+    { "id": 3, "question": "Who approves overtime?",
+      "answer": "Your line manager approves it.",
+      "criteria": [
+        { "id": 31, "content": "The line manager approves it", "weight": 1 }
+      ],
+      "labels": ["tool"] }
   ]
 }
 ```
+
+The whole response is **[examples/run_result_baseline.json](examples/run_result_baseline.json)** —
+real output, not an illustration. Its `metrics` object:
 
 ```json
 {
-  "metrics": {
-    "total_cases": 2,
-    "average_score": 0.5, "median_score": 0.5,
-    "variance": 0.5, "standard_deviation": 0.7071067811865476,
-    "average_criterion_score": 1.0,
-    "criteria_fulfillment_rate": 0.5,
-    "cases_with_score_zero": [2], "cases_with_score_zero_count": 1,
-    "weakest_cases_above_zero": [1],
-    "failed_criteria_count": 0
-  },
-  "label_metrics": [
-    { "label": "links",
-      "metrics": { "total_cases": 1, "average_score": 0.0, "median_score": 0.0,
-                   "variance": 0.0, "standard_deviation": 0.0,
-                   "average_criterion_score": 0.0, "criteria_fulfillment_rate": 0.0,
-                   "cases_with_score_zero": [2], "cases_with_score_zero_count": 1,
-                   "weakest_cases_above_zero": [], "failed_criteria_count": 0 } },
-    { "label": "table",
-      "metrics": { "total_cases": 2, "average_score": 0.5, "…": "the whole table again" } }
-  ],
-  "label_filter": [],
-  "case_results": [
-    { "case_id": 1, "score": 1.0,
-      "scale": { "maximum": 2, "presence_threshold": 0.5,
-                 "level_descriptions": { "2": "Fully covered. …", "1": "Partially covered. …",
-                                         "0": "Not covered. …" } },
-      "criterion_results": [
-        { "criterion_id": 1, "weight": 3.0, "score": 2.0, "is_present": true,
-          "spread": 0.0, "failed": false, "reasoning": "The answer instructs …" } ],
-      "labels": ["table"] },
-    { "case_id": 2, "score": 0.0, "scale": { … }, "criterion_results": [ … ],
-      "labels": ["table", "links"] }
-  ]
+  "total_cases": 3,
+  "average_score": 0.6666666666666666,
+  "median_score": 1.0,
+  "variance": 0.3333333333333333,
+  "standard_deviation": 0.5773502691896257,
+  "average_criterion_score": 1.0,
+  "criteria_fulfillment_rate": 0.6666666666666666,
+  "cases_with_score_zero": [1],
+  "weakest_cases_above_zero": [2, 3],
+  "cases_with_score_zero_count": 1
 }
 ```
 
-Case 1 carries one label and case 2 carries two, so case 2 counts in **both** buckets — which
-is why `links` reports one case and `table` reports two, over a run of two.
+`label_metrics` repeats that whole object once per label, alphabetically, over only the cases
+carrying it — `policy` reports two cases and `tool` reports two, over a run of three, because
+case 2 carries both. `case_results[i]` is **the same document** `POST /evaluate` returns for
+that case — the same type, not a similar one.
+
+`scale` is required on every `case_results` entry, here and when posting a stored run back to
+`/compare`. Were it read as `DEFAULT_SCALE` instead, a `0–10` run that lost the field would
+match a genuine `0–2` run's scale exactly and come back as deltas in a unit neither run was
+judged in, with a `200`.
 
 To run only part of the catalog, add a `label_filter` to the body — there is no query
-parameter, so the library and the API take the selection in exactly one place and in exactly
-one form. It is an **OR of ANDs**: a case runs when it carries every label of at least one
-group.
+parameter, so the library and the API take it in exactly one place and one form:
 
 ```json
-{ "cases": [ … ],
-  "label_filter": [["table", "links"], ["agentic"]] }
+{ "label_filter": [["policy", "tool"], ["agentic"]] }
 ```
 
-Against the batch above that runs case 2 — it carries both `table` and `links` — plus any
-case carrying `agentic`. One group is a plain AND, several one-label groups are a plain OR, and an absent
-`label_filter` runs everything. It comes back on the response, and `metrics`, `label_metrics`
-and `case_results` all describe the **selected** cases only — a narrowed run never reports
-numbers for cases it did not judge.
+Against the catalog above that runs case 2 — it carries both `policy` and `tool` — plus any
+case carrying `agentic`, of which there are none. It comes back as `applied_label_filter`.
 
-Filtering here does not save you the upload: the whole batch travels either way, so for a
-large catalog prefer posting only the cases you want. A selection matching no case is a `422`
-naming the labels your batch does carry, with counts, because that is nearly always a typo:
+#### `POST /compare`
+
+The body is two `RunResult` documents back verbatim, no reshaping:
 
 ```json
-{ "detail": [ { "loc": ["body"],
-                "msg": "Value error, label_filter [['tabel']] matches no case; labels present in this batch: links (1), table (2)",
-                "type": "value_error" } ] }
+{ "baseline": { "metrics": {}, "case_results": [] },
+  "candidate": { "metrics": {}, "case_results": [] } }
 ```
 
-Every `case_results` entry carries its own `scale` — the cases of one run are all judged by
-one judge, so they all repeat the same one. It is a field you may *omit when posting* a
-stored run back to `/compare`, where it then reads as `DEFAULT_SCALE`; it is never absent
-from a response.
-
-A `case_results[i]` entry is **the same document** `POST /evaluate` returns for that case —
-the same type, not a similar one — so the two endpoints cannot disagree.
-
-`POST /compare` takes two of those `BatchResult` documents back verbatim, no reshaping:
-
-```json
-{ "baseline":  { "metrics": { … }, "case_results": [ … ] },
-  "candidate": { "metrics": { … }, "case_results": [ … ] } }
-```
-
-The response adds `label_metrics_deltas` — the same `metrics_delta` once per label — whenever
-the runs carry labels. It is what tells an average that rose by fixing one kind of case from
-one that rose across the board.
-
-For a three-case catalog where case 1 went `0.0 → 0.875`, case 2 held at `1.0` and case 3
-fell `1.0 → 0.5` — the response, printed verbatim:
+[examples/run_result_baseline.json](examples/run_result_baseline.json) and
+[examples/run_result_candidate.json](examples/run_result_candidate.json) are two such
+documents over one catalog: case 1 went `0.0 → 0.875`, case 2 held at `1.0` and case 3 fell
+`1.0 → 0.5`. The whole response for that pair is
+**[examples/run_comparison_result.json](examples/run_comparison_result.json)**. Its
+`metrics_delta` and `summary`:
 
 ```json
 {
   "metrics_delta": {
     "average_score_delta": 0.1250000000000001,
     "median_score_delta": -0.12499999999999989,
-    "variance_delta": -0.265625, "standard_deviation_delta": -0.3171420192563591,
+    "variance_delta": -0.265625,
+    "standard_deviation_delta": -0.3171420192563591,
     "average_criterion_score_delta": 0.5,
     "criteria_fulfillment_rate_delta": 0.33333333333333337,
-    "cases_with_score_zero_count_delta": -1,
-    "failed_criteria_count_delta": 0
+    "cases_with_score_zero_count_delta": -1
   },
   "summary": {
-    "improved_case_ids": [1], "stable_case_ids": [2], "worsened_case_ids": [3],
-    "improvement": { "largest": 0.8750000000000001, "mean": 0.8750000000000001,
+    "improved_case_ids": [1],
+    "stable_case_ids": [2],
+    "worsened_case_ids": [3],
+    "improvement": { "largest": 0.8750000000000001,
+                     "mean": 0.8750000000000001,
                      "median": 0.8750000000000001 },
-    "worsening":   { "largest": -0.5,  "mean": -0.5,  "median": -0.5 },
-    "improved_case_count": 1, "stable_case_count": 1, "worsened_case_count": 1,
+    "worsening": { "largest": -0.5, "mean": -0.5, "median": -0.5 },
+    "improved_case_count": 1,
+    "stable_case_count": 1,
+    "worsened_case_count": 1,
     "improvement_rate": 0.3333333333333333,
     "stability_rate": 0.3333333333333333,
     "worsening_rate": 0.3333333333333333
-  },
-  "case_comparison_results": [
-    { "case_id": 1, "baseline_score": 0.0, "candidate_score": 0.8750000000000001,
-      "score_delta": 0.8750000000000001, "status": "improved",
-      "criterion_comparison_results": [
-        { "criterion_id": 1, "weight": 3.0, "baseline_score": 0.0, "candidate_score": 2.0,
-          "score_delta": 2.0, "status": "improved" },
-        { "criterion_id": 2, "weight": 1.0, "baseline_score": 0.0, "candidate_score": 1.0,
-          "score_delta": 1.0, "status": "improved" } ] },
-    { "case_id": 2, "…": "stable" },
-    { "case_id": 3, "…": "worsened" }
-  ]
+  }
 }
 ```
 
 The mean rose while the median *fell* — one case carried the whole win, and
 `worsened_case_ids` says which one paid for it. That pair of numbers is the reason both are
-reported.
+reported. Those trailing digits are real: `0.8750000000000001` is what summing weights `3`
+and `1` in that order produces, which is also why "stable" is a tolerance and not an `==`.
 
-Those trailing digits are real, printed verbatim from a run: `0.8750000000000001` is what
-summing weights `3` and `1` in that order actually produces. It is also why "stable" is a
-tolerance and not an `==` — see `SCORE_EQUALITY_TOLERANCE` under
-[Functions](#functions).
+The response adds `label_metrics_deltas` — the same `metrics_delta` once per label — whenever
+the runs carry labels.
 
-`GET /health` answers even when the judge is unconfigured, so a missing key never takes the
-container down. `POST /evaluate` is what fails then, loudly, with a `500`. `POST /compare`
-needs no judge at all and answers correctly with no API key configured.
+#### `GET /health`
+
+Answers `{"status": "ok"}` even when the judge is unconfigured, so a missing key never takes
+the container down. `POST /evaluate` is what fails then, loudly, with a `500` — and with a
+`503` when the judge is configured but its endpoint cannot answer. `POST /compare` needs no
+judge at all and answers correctly with no API key configured.
 
 ### Errors
 
-Everything is validated **before** the first LLM call, so a malformed request costs nothing.
-
-| Situation | Library | HTTP |
-|---|---|---|
-| `criteria`, `cases`, `criterion_results` or `case_results` empty; duplicate ids in any of them; `content` blank; `weight` `0`, negative, `Infinity` or `NaN`; missing field | `pydantic.ValidationError` | `422` |
-| A run posted to `/compare` whose numbers leave the ranges the [output tables](#outputs) give — a score above its own `scale.maximum` or off `0 … 1`, a non-positive weight, any `Infinity` or `NaN` | `pydantic.ValidationError` | `422` |
-| A run whose cases name more than one `scale`; a verdict whose `is_present` contradicts its own score | `pydantic.ValidationError` | `422` |
-| A blank label, or the same label twice — on one case, or in one group of a selection | `pydantic.ValidationError` | `422` |
-| The same group twice in a selection, in any order — in a `label_filter` or in `filter_cases_by_labels()` | `pydantic.ValidationError` | `422` |
-| A `Batch` whose `label_filter` matches no case at all | `pydantic.ValidationError` naming the labels the batch does carry, with counts | `422` |
-| A stored `BatchResult` whose `label_filter` does not describe the cases it holds | `pydantic.ValidationError` naming the offending case ids | `422` |
-| A flat `["table"]` where a selection is expected — to `filter_cases_by_labels()`, or in a request body | `TypeError` naming both readings you may have meant | `422` (schema) |
-| A stored run whose `label_metrics` does not describe exactly the labels its cases carry | `pydantic.ValidationError` | `422` |
-| A `Scale` describing only some of its grades, or a grade it does not have | `pydantic.ValidationError` | `422` |
-| Two runs not comparable: a different grading scale, different case ids, different criteria within a case, different weights, or a case whose **labels** changed between the runs | `RunsNotComparableError` (a `ValueError`) naming **every** difference at once | `422` |
-| A judge returning a score above the `scale` it declares | `ValueError` out of `evaluate_case()` naming the criterion — a bug in the judge, not an outage | `500` |
-| Judge not configured (missing env vars) | `RuntimeError` naming every missing variable | `500` |
-| Judge endpoint refused / timed out / out of quota | **contained** — that criterion gets `failed: true`, `score: 0`, cause in `reasoning` | `200` |
-| Judge reply unparseable after `MAX_ATTEMPTS` | **contained**, same way | `200` |
-| A bug in the program (`TypeError`, `AttributeError`, `NameError`, `ImportError`, `RuntimeError`) | re-raised | `500` |
-| Request cancelled (client disconnect, shutdown) | `asyncio.CancelledError` propagates | — |
-
-The `422` body carries only `loc`, `msg` and `type`. Pydantic's own `input` is dropped, so
-the body always stays serializable — `Infinity` and `NaN` are literals the JSON parser accepts
-but the writer refuses, and echoing a rejected `"weight": Infinity` back would turn a clean
-client error into a `500`:
+Request bodies are validated **before** the first LLM call, so a malformed request costs
+nothing. The `422` body carries only `loc`, `msg` and `type`; the rejected value is never
+echoed back:
 
 ```json
 { "detail": [ { "loc": ["body", "criteria", 0, "weight"],
                 "msg": "Input should be greater than 0", "type": "greater_than" } ] }
 ```
+
+| Situation | Library | HTTP |
+|---|---|---|
+| `criteria`, `cases`, `criterion_results` or `case_results` empty; duplicate ids in any of them; `content` blank; `weight` `0`, negative, `Infinity` or `NaN`; missing field | `pydantic.ValidationError` | `422` |
+| A run posted to `/compare` whose numbers leave the ranges the [output tables](#outputs) give — a score above its own `scale.maximum` or off `0 … 1`, a non-positive weight, any `Infinity` or `NaN`, a `variance` or `standard_deviation` no distribution of case scores could produce, or `RunMetrics` id lists naming more cases than `total_cases` | `pydantic.ValidationError` | `422` |
+| A `CaseResult` posted without its `scale` — no default stands in, because one would decide the unit of every score under it | `pydantic.ValidationError` | `422` |
+| A run whose cases name more than one `scale`; a result whose `is_present` contradicts its own score | `pydantic.ValidationError` | `422` |
+| A `Scale` whose `presence_threshold` is above its `maximum`, so no criterion could ever count as covered | `pydantic.ValidationError` | `422` |
+| A `Scale` describing only some of its grades, or a grade it does not have | `pydantic.ValidationError` | `422` |
+| A blank label, or the same label twice — on one case, or in one group of a label filter | `pydantic.ValidationError` | `422` |
+| The same group twice in a label filter, in any order — in a `label_filter` or in `filter_cases_by_labels()` | `pydantic.ValidationError` | `422` |
+| A `Run` whose `label_filter` matches no case at all | `pydantic.ValidationError` naming the labels the run does carry, with counts | `422` |
+| A stored `RunResult` whose `applied_label_filter` does not describe the cases it holds | `pydantic.ValidationError` naming the offending case ids | `422` |
+| A stored run whose `label_metrics` does not describe exactly the labels its cases carry | `pydantic.ValidationError` | `422` |
+| A flat `["table"]` where a label filter is expected — to `filter_cases_by_labels()`, or in a request body | `TypeError` showing the label filter to write instead | `422` (schema) |
+| Two runs not comparable: a different grading scale, different case ids, different criteria within a case, different weights, or a case whose **labels** changed between the runs | `RunsNotComparableError` (a `ValueError`) naming **every** difference at once | `422` |
+| `run_metrics([])`, or `case_score([], scale)` — an empty list has no distribution and no score, and `0.0` would be indistinguishable from a completely missed answer | `ValueError` | — (unreachable: the models refuse an empty run or rubric first) |
+| `run_metrics()` or `label_metrics()` over cases judged on **different scales** — raw grades in two units do not average | `ValueError` naming every scale found | — (unreachable: `RunResult` refuses such a run first) |
+| `judge_prompt(scale)` for a scale with no `level_descriptions`, or `OpenAIJudge(config, scale=…)` with such a scale and no `system_prompt` | `ValueError` naming the scale | — (construction time, not per request) |
+| A judge returning a score above the `scale` it declares | `ValueError` out of `evaluate_case()` naming the criterion — a bug in the judge, not an outage | `500` |
+| Judge not configured: a required `RUBRIC_EVAL_JUDGE_*` variable missing, or any of them — required or optional — exported empty | `RuntimeError` naming every offending variable and which of the two it is | `500` |
+| A numeric `RUBRIC_EVAL_JUDGE_*` variable that does not parse or is out of range | `pydantic.ValidationError` naming the setting | `500` |
+| Judge endpoint unreachable, timed out, rate limited or answering `5xx` | retried up to `MAX_ATTEMPTS` times with a doubling wait, then `JudgeUnavailableError` — **the whole run is dropped** | `503` |
+| Judge reply unparseable after `MAX_ATTEMPTS` — no JSON, broken JSON, or a grade off the scale | `UnusableReplyError` (a `ValueError`) per attempt, then `JudgeUnavailableError` naming the last complaint | `503` |
+| Judge reply carrying no content at all, or a response with no choice — truncation, a content filter, a tool-call path | `JudgeUnavailableError` naming the endpoint's `finish_reason`, **not retried** | `503` |
+| Judge endpoint rejecting the key, the model or the request | the `openai` SDK's own exception, unretried — repeating it would not help | `500` |
+| A bug in the program | propagates as itself | `500` |
+| Request cancelled (client disconnect, shutdown) | `asyncio.CancelledError` propagates | — |
+
+One exception to the `422` rows above: while the judge is **unconfigured**, `POST /evaluate`
+and `POST /evaluate/run` answer `500` even for an invalid body. FastAPI resolves the
+`get_judge` dependency before it validates the body, so the server fault is reported rather
+than the client's — which is the right way round, but it does mean the body was never read.
+`POST /compare` takes no judge and validates its body either way.
 
 ---
 
@@ -895,15 +1257,17 @@ Worked example — three criteria, weights 3 / 2 / 1, scored 2 / 1 / 0 on the de
 | 3 | 1 | 0 | 0.0 |
 | | **6** | | **4.0** |
 
-`4.0 / 6 = 0.667`. Only the ratios matter, so weights `30 / 20 / 10` give the same `0.667`.
+`4.0 / 6 = 0.6666666666666666`, which is what `case_score()` returns for it. Only the ratios
+matter, so weights `30 / 20 / 10` give the same number.
 
-A criterion the judge never answered for stays in the denominator with `score = 0` — an
-outage lowers the score **visibly** rather than silently shrinking the rubric.
+Every `s` in that sum is a grade the judge really gave. A criterion it could not answer for
+has no score and gets none: the run is dropped instead, see
+[A dead judge invalidates the run](#a-dead-judge-invalidates-the-run).
 
 ### One run
 
 `RunMetrics` aggregates the case scores; every field is defined in
-[the reference table](#runmetrics--the-aggregate-over-a-batch). Two of them are easy to
+[the reference table](#runmetrics--the-aggregate-over-a-run). Two of them are easy to
 misread, so in short:
 
 - **`average_criterion_score` is not `average_score` on a different scale.** It ignores
@@ -926,7 +1290,7 @@ replaced without asking you.
 What that looks like in practice is narrower than "the numbers move". Four consecutive runs of
 one three-case catalog against a hosted endpoint at temperature `0.0`, 18 criterion judgements
 per run: **every clear-cut criterion returned the same grade every time, and exactly one wavered**
-— the one whose verdict is genuinely arguable.
+— the one whose grade is genuinely arguable.
 
 The criterion was *"State the expected last day of absence"*, against an answer reading *"Send an
 email to hr@example.com before 10:00 on your first day of absence."* It names a day, but not that
@@ -937,7 +1301,17 @@ day. A human reviewer would hesitate too:
 | `0–2` | `0`, `0`, `0`, `1` | `0.750` three times, `0.875` once |
 | `0–3` | `0`, `1`, `1`, `0` | `0.750` twice, `0.833` twice |
 
-Note which explanation that rules out: it is **not** a matter of scale granularity. The same
+That is a measurement taken against a live endpoint, not something this repository can
+reproduce on demand — which is exactly the point, and the reason the examples elsewhere in
+this README are graded from a table.
+
+A fifth run of the same case, recorded here so the table-graded headline can be checked
+against a real judge at least once: on **2026-09-18** against **`gpt-5.4-mini-2026-03-17`**
+it returned `0.75` with grades `[2.0, 0.0]` — the same numbers the
+[headline example](#rubric-judge) produces from its table. One sample agreeing is not a
+promise that yours will: the row above is what to expect.
+
+Note which explanation it rules out: it is **not** a matter of scale granularity. The same
 criterion wavered on both scales, while the sharp criteria stayed put on both.
 
 **What it costs a comparison.** That one grade decided whether the run's headline number read
@@ -946,12 +1320,13 @@ reported by, with nothing about the system under test changed. So:
 
 - **A borderline criterion is a measurement instrument with a loose needle.** Phrasing it as
   [one checkable fact](#criterion--one-requirement-a-good-answer-has-to-satisfy) is not only about
-  the judge picking a compromise score — it is what makes the verdict repeatable at all.
+  the judge picking a compromise score — it is what makes the grade repeatable at all.
 - **Read a one-grade criterion move against its `weight`** before calling it a regression.
 - **Re-run the baseline before you believe a small delta.** Two runs of an *unchanged* system
   measure your noise floor, and that is the cheapest way to learn which deltas mean anything.
-- `CriterionResult.spread` is the field that would carry this and is `0.0` today, because each
-  criterion is judged exactly once — so **a run does not tell you how steady its own numbers are.**
+- **Nothing in a result measures this for you.** Each criterion is judged exactly once and no
+  field reports how much that grade would move on a re-run — so **a run does not tell you how
+  steady its own numbers are.**
 
 ### Unparseable replies heal themselves
 
@@ -960,16 +1335,30 @@ scale (`3`, `1.5`), the **concrete cause** is fed back to it together with its o
 reply, and the call is repeated up to `RUBRIC_EVAL_JUDGE_MAX_ATTEMPTS` times. Not a blind
 retry — the model is told what was wrong with what it wrote.
 
-### A dead judge costs one criterion, never the case
+A refused connection, a timeout, a `429` or a `5xx` costs an attempt from the same budget,
+and is waited out instead: `0.5s` after the first failure, doubling after each further one.
+There is nothing to correct in the conversation, so the criterion is simply asked again.
 
-A criterion the judge could not answer for is marked `failed: true`, counts as `score = 0`,
-keeps its weight, and reports the cause in its `reasoning`. The case and the run still
-finish. `RunMetrics.failed_criteria_count` is how you notice.
+One thing is never retried: a reply with **no content at all**. Truncation, a content filter
+or a tool-call path produce one, and no rewording of the question fixes any of them — so the
+run fails immediately, naming the endpoint's own `finish_reason`.
 
-Only *endpoint* failures are contained this way — refused connections, timeouts, quota
-errors, unparseable replies. Errors that mean the **program** is wrong are re-raised: a
-criterion scored `0` because of a bug is indistinguishable from a real result, which is far
-worse than a crash.
+### A dead judge invalidates the run
+
+A criterion the judge could not answer for gets **no result, and neither does anything
+around it**: `POST /evaluate` answers `503`, `POST /evaluate/run` drops the whole run
+including the cases that were judged, and the library functions raise
+`JudgeUnavailableError`.
+
+That is a deliberate reversal of the obvious alternative — scoring the criterion `0` and
+carrying on. A `0` nobody judged is indistinguishable from an answer that really missed the
+criterion, so the run comes back looking like a finished measurement and reading like a bad
+system. The metrics average the cases against each other, so a single fabricated `0` moves
+every figure in the document. Nothing is stored server-side, so a retry costs only judge
+calls.
+
+A **bug** in the program ends the run too, but as itself, with a `500`: "your endpoint is
+down, try again" and "this program is broken" are different messages to get.
 
 ### Concurrency
 
@@ -983,170 +1372,16 @@ process, so the budget is shared by everything using it:
 | Situation | Coroutines | Connections in flight |
 |---|---|---|
 | one case, 200 criteria | 200 | 8 |
-| 50 cases × 10 criteria in one batch | 500 | 8 |
-| five concurrent batches | thousands | 8 |
+| 50 cases × 10 criteria in one run | 500 | 8 |
+| five concurrent runs | thousands | 8 |
 | ten parallel `POST /evaluate` | — | 8 total, not 8 each |
 
 A slot is held for one HTTP call only, so a criterion waiting to be retried does not occupy
 one. And the run is still judged case-overlapping, not case after case.
 
-A batch deliberately gets **no second throttle**. Only the judge implementation knows what
+A run deliberately gets **no second throttle**. Only the judge implementation knows what
 its backend tolerates, so that is the single place the limit lives: raise
-`RUBRIC_EVAL_JUDGE_MAX_CONCURRENT`, not the batch size.
-
----
-
-## Extending
-
-### Your own prompt
-
-```python
-from pathlib import Path
-
-judge = OpenAIJudge(JudgeConfig.from_env(), prompt=Path("my_prompt.txt").read_text())
-```
-
-`prompt=` replaces the **system prompt** only. Whatever you write has to keep two promises,
-or the parser will reject every reply: the model must argue first and end with a single
-`{"score": <grade>}` object, and the prose scale it describes must be the judge's `scale` —
-`0–2` unless you pass one.
-
-You usually do not need this. A scale that describes its levels writes the prompt itself —
-see [Another scale](#another-scale). Reach for `prompt=` when you want different *instructions*
-(another language, a stricter examiner, your own worked examples), not merely another scale.
-
-The user prompt and the retry complaints live in [prompt.py](src/rubric_eval/prompt.py).
-Every sentence the model ever reads is in that one file, as plain Python strings — a
-reviewer who does not read Python can still audit the whole evaluation.
-
-| In `prompt.py` | Sent as |
-|---|---|
-| `judge_prompt(scale, examples)` | the system message, written from the scale |
-| `JUDGE_EN` | what that returns for `DEFAULT_SCALE` plus `WORKED_EXAMPLES_EN` |
-| `criterion_prompt(question, answer, criterion)` | the user message |
-| `no_json_hint()`, `out_of_range_hint()`, `malformed_json_hint()` | the follow-up on a retry |
-
-Every one of them takes the judge's `Scale` and lists its grades out, so a judge on a
-ten-point scale is never corrected into answering `0`, `1` or `2`. Nothing writes a scale out
-by hand any more: `JUDGE_EN` is generated, and
-[tests/judge_prompt_en.txt](tests/judge_prompt_en.txt) holds the hand-written original that a
-test pins it to, byte for byte — so a change to a level description shows up as a diff.
-
-The complaints are worded as instructions on purpose: the parser raises them as `ValueError`
-messages and the retry loop hands that text straight back to the model. The exception
-message *is* the corrective prompt — rewording one means changing the prompt.
-
-### Another scale
-
-A judge is not tied to `0–2`. Describe the grades you want, and the judge writes its own
-prompt from them — no prompt to rewrite, no text to keep in sync:
-
-```python
-from rubric_eval import JudgeConfig, OpenAIJudge, Scale
-
-judge = OpenAIJudge(JudgeConfig.from_env(), scale=Scale(
-    maximum=3,
-    presence_threshold=2,
-    level_descriptions={
-        3: "Fully covered, with the specifics the criterion names.",
-        2: "Covered in substance, but a detail is missing or imprecise.",
-        1: "Touched on only. The reader could not act on what is there.",
-        0: "Not covered. Absent, or no recognizable connection to the criterion.",
-    },
-))
-```
-
-That produces a system prompt whose scale block, header and reply format all come from the
-scale, so the model can never be instructed on a scale the parser does not enforce:
-
-```
-Use this 0-3 scale:
-
-3 = Fully covered, with the specifics the criterion names.
-2 = Covered in substance, but a detail is missing or imprecise.
-...
-[Two or three sentences arguing which score the scale calls for.]
-{"score": 0, 1, 2 or 3}
-```
-
-**Describe every grade or none.** A half-described scale is refused, because a prompt that
-explains four of ten levels is worse than one that explains none:
-
-```python
-Scale(maximum=2, presence_threshold=0.5, level_descriptions={2: "Yes.", 0: "No."})
-# ValidationError: level descriptions must describe every grade of the scale 0..2 …
-```
-
-A scale with **no** descriptions is arithmetic only — legal, but then you owe the judge a
-prompt:
-
-```python
-OpenAIJudge(config, scale=Scale(maximum=10, presence_threshold=5))
-# ValueError: the scale 0..10 (covered from 5.0) describes no levels, so no prompt can be
-#             written from it: give it a level_descriptions entry per grade, or pass a
-#             prompt of your own
-```
-
-**Worked examples are not generated.** The three bundled ones close on grades of `0`, `1` and
-`2`, so they belong to `DEFAULT_SCALE` alone — a judge on another scale gets the instructions
-without them. To add your own:
-
-```python
-from rubric_eval import judge_prompt
-
-OpenAIJudge(config, prompt=judge_prompt(my_scale, my_examples), scale=my_scale)
-```
-
-What changes with the scale, and what does not:
-
-| | Follows the scale | Stays the same |
-|---|---|---|
-| grades | `CriterionResult.score`, `RunMetrics.average_criterion_score`, every criterion-level delta | |
-| coverage | `is_present`, via `presence_threshold` | |
-| the prompt | the scale block, the header, the list of allowed grades, every retry complaint | the instructions and examples around them |
-| normalized | | `CaseResult.score`, `average_score`, `median_score`, `criteria_fulfillment_rate` — all still `0 … 1` |
-
-Two runs judged on different scales are **not comparable**: `compare_runs()` refuses them the
-same way it refuses different weights, because a `2` out of `2` and a `2` out of `10` are not
-the same verdict. **The descriptions count as part of the scale**, so rewording what a grade
-means — even fixing a typo in it — makes new runs incomparable with old ones. That is on
-purpose: telling the judge something else about a `1` changes the grades it gives, and a
-comparison that ignored that would report a prompt edit as a change in your system.
-
-### Your own judge
-
-`Judge` is a `Protocol`. Anything with this attribute and this method plugs into
-`evaluate_case()` and `evaluate_batch()` unchanged — a different SDK, a local model, a cached
-judge, a stub:
-
-```python
-from rubric_eval import DEFAULT_SCALE, Criterion, Scale, Verdict
-
-class MyJudge:
-    scale: Scale = DEFAULT_SCALE
-
-    async def score(self, question: str, answer: str, criterion: Criterion) -> Verdict:
-        ...
-        return Verdict(score=2, reasoning="…")
-```
-
-Three responsibilities come with it:
-
-- **Declaring a scale, and staying on it.** `scale` is what `case_score()` normalizes by and
-  what `is_present` cuts at, so a judge without it is a broken program: the `AttributeError`
-  is re-raised rather than scored `0`. `Verdict.score` must be an integer in
-  `0..scale.maximum` — `Verdict` itself only checks that it is an `int`, but the verdicts are
-  held against the scale, so a judge that declares `0–2` and returns `5` raises
-  `ValueError: criteria [1] scored above the scale 0..2 …` out of `evaluate_case()` rather than
-  folding into a case score above `1.0`. It fails loudly on purpose: an out-of-scale verdict
-  is a bug in the judge, and a bug must never come back as a plausible number (see
-  [Failure and load](#failure-and-load)). It is not contained as an outage — only what
-  `judge.score()` *raises* is.
-- **Throttling.** `evaluate_case()` hands out one task per criterion whatever the rubric's
-  size, because only your implementation knows what your backend tolerates. `OpenAIJudge`
-  bounds itself with `max_concurrent`; yours needs its own bound.
-- **Raising on failure.** Return a valid `Verdict` or raise. Anything you raise that is not
-  a programming error becomes one `failed` criterion.
+`RUBRIC_EVAL_JUDGE_MAX_CONCURRENT`, not the run size.
 
 ---
 
@@ -1156,13 +1391,13 @@ Seven modules, each with one job. A request walks straight down through them:
 
 | Step | File | Responsibility |
 |---|---|---|
-| 1 | [api.py](src/rubric_eval/api.py) | FastAPI endpoints: validate the body, inject the judge, hand back JSON. No domain logic |
-| 2 | [evaluation.py](src/rubric_eval/evaluation.py) | `evaluate_case()` and `evaluate_batch()` — fan out, contain failures, fold the verdicts |
-| 3 | [judge.py](src/rubric_eval/judge.py) | `Judge` protocol, OpenAI-compatible client, reply parsing, retries, throttle, env config |
-| 4 | [prompt.py](src/rubric_eval/prompt.py) | every word the judge is told, written from the scale |
-| — | [models.py](src/rubric_eval/models.py) | the types below, `Scale` and `DEFAULT_SCALE`, `CriterionResult.judged()` / `.unjudged()` |
-| — | [metrics.py](src/rubric_eval/metrics.py) | `case_score()` and `run_metrics()` — the formulas, nothing else |
-| — | [comparison.py](src/rubric_eval/comparison.py) | `compare_runs()` — two finished runs into their differences. Reads no judge and no config |
+| 1 | [api.py](src/rubric_judge/api.py) | FastAPI endpoints: validate the body, inject the judge, hand back JSON. No domain logic |
+| 2 | [evaluation.py](src/rubric_judge/evaluation.py) | `evaluate_case()` and `evaluate_run()` — fan out over the rubric and fold the results |
+| 3 | [judge.py](src/rubric_judge/judge.py) | `Judge` protocol, OpenAI-compatible client, reply parsing, retries, throttle, env config |
+| 4 | [prompt.py](src/rubric_judge/prompt.py) | every word the judge is told, written from the scale |
+| — | [models.py](src/rubric_judge/models.py) | the types above, `Scale` and `DEFAULT_SCALE`, `CriterionResult.judged()` |
+| — | [metrics.py](src/rubric_judge/metrics.py) | `case_score()` and `run_metrics()` — the formulas, nothing else |
+| — | [comparison.py](src/rubric_judge/comparison.py) | `compare_runs()` — two finished runs into their differences. Reads no judge and no config |
 
 ### The vocabulary
 
@@ -1172,28 +1407,33 @@ Three grains, each a pair of *what goes in* and *what comes back*:
 |---|---|---|
 | one requirement | `Criterion` | `CriterionResult` |
 | one answer | `Case` | `CaseResult` |
-| a whole catalog | `Batch` | `BatchResult` |
-| two whole runs | `RunPair` | `ComparisonResult` |
+| a whole catalog | `Run` | `RunResult` |
+| two whole runs | `RunComparison` | `RunComparisonResult` |
 
-Plus `RunMetrics`, which is `BatchResult.metrics` and nothing else, `Scale`, which every
-verdict carries, and `Verdict`, which never leaves `judge.py`.
+Plus `RunMetrics`, which is `RunResult.metrics` and nothing else, `Scale`, which every case
+result carries, and `JudgeReply`, which only a judge produces.
 
 Labels add no grain — they cut *across* one. `LabelMetrics` and `LabelMetricsDelta` are each
 a label plus the aggregate of the grain above, composed rather than copied, so the pair
-`RunMetrics`/`RunMetricsDelta` stays the single definition of what a run's numbers are.
+`RunMetrics`/`RunMetricsDelta` stays the single definition of what a run's numbers are. A
+twin that redeclared every field would have to be edited in step with it forever, and the
+half that got forgotten would go on serializing a stale number under a familiar name.
 
 ("Grain", not "scale" — `Scale` is the grading scale and one word must not mean two things.)
 
 Comparing repeats the same three grains one level up, and the names say so: a
 `CriterionComparisonResult` sits inside a `CaseComparisonResult` exactly as a
 `CriterionResult` sits inside a `CaseResult`. **Only a produced type carries `Result`** —
-`RunPair` is what you hand in, everything ending in `Result` is what comes back.
+`RunComparison` is what you hand in, everything ending in `Result` is what comes back. That
+naming is also why `compare_runs()` takes one named pair rather than two arguments: both
+sides have the same type, so a swap would be undetectable and would invert every sign.
 
 Two rules hold the naming together — worth knowing before adding a field:
 
 - **A result never reuses the name of its input.** `CaseResult.criterion_results` holds
-  verdicts, so it is not called `criteria`.
-- **Exactly one type per grain.** A case evaluated alone and a case inside a batch are the
+  results, so it is not called `criteria`: `Case.criteria` is the rubric, and one name must
+  not mean two things.
+- **Exactly one type per grain.** A case evaluated alone and a case inside a run are the
   same `Case`, and both come back as the same `CaseResult`. That is why `Case.id` is
   mandatory rather than optional: an id that is sometimes there would have meant two
   near-identical types, two result shapes, and a `null` to check for.
@@ -1203,19 +1443,19 @@ Two rules hold the naming together — worth knowing before adding a field:
 The result types draw the layer boundary and answer the question by themselves:
 
 ```python
-Verdict:          score, reasoning                            # what the model replied
+JudgeReply:       score, reasoning                            # what the model replied
 CriterionResult:  criterion_id, weight, score, is_present,     # what the system concluded
-                  spread, failed, reasoning
+                  reasoning
 CaseResult:       case_id, score, scale, criterion_results,    # one whole case
                   labels
 RunMetrics:       the aggregate over many case results
 LabelMetrics:     that aggregate again, per label
 ```
 
-`judge.py` speaks `Verdict` — prompts, parsing and retries are *its* business, and another
+`judge.py` speaks `JudgeReply` — prompts, parsing and retries are *its* business, and another
 implementation may do all three differently. Everything that has to hold no matter who
 judges — how a grade becomes a share of the reachable points, the weighting, "a dead judge
-costs one criterion" — lives outside it, or two judges would produce incomparable scores.
+invalidates the run" — lives outside it, or two judges would produce incomparable scores.
 
 The grading scale is the one setting that belongs to the judge *and* has to be known outside
 it: a judge owns it, every `CaseResult` carries a copy, so `metrics.py` and `comparison.py`
@@ -1229,18 +1469,18 @@ weight is, and `evaluation.py` is the only module that speaks both languages.
 ### How the code documents itself
 
 Every public function states its inputs, its return value and what it raises, in Google
-style — `help(evaluate_batch)` in a REPL is the same reference as this README. Sections
+style — `help(evaluate_run)` in a REPL is the same reference as this README. Sections
 always appear in this order, the example last:
 
 ```
 Args:
-    judge: As for `evaluate_case`. The same instance serves every case of the batch …
+    judge: As for `evaluate_case`. The same instance serves every case of the run …
 Returns:
-    A `BatchResult`: `case_results` in request order, and `metrics` aggregated over them …
+    A `RunResult`: `case_results` in request order, and `metrics` aggregated over them …
 Raises:
-    As `evaluate_case`. A programming error in any single case aborts the whole batch …
+    As `evaluate_case`. A programming error in any single case aborts the whole run …
 Example:
-    run = await evaluate_batch(judge, Batch(cases=[case_a, case_b]))
+    run_result = await evaluate_run(judge, Run(cases=[case_a, case_b]))
 ```
 
 Private helpers deliberately do **not** get that treatment. They are two or three lines
@@ -1272,19 +1512,20 @@ field tables in [Reference](#reference). One text, never three — they cannot d
 .venv/bin/python -m pytest
 ```
 
-308 tests, no real LLM ever called. Mocked at two levels:
+346 tests, no real LLM ever called. Mocked at two levels:
 
 - **`FakeJudge`** ([conftest.py](tests/conftest.py)) replaces the `Judge` protocol and scores
-  from a lookup table — `{1: 2, 2: ValueError("down")}` scores criterion 1 with a `2` and
-  lets the judge die on criterion 2. `CASE` and `BATCH` live in the same file, so the domain
-  tests and the HTTP tests describe literally the same input. `BATCH` is deliberately uneven
+  from a lookup table — `{1: 2, 2: JudgeUnavailableError("down")}` scores criterion 1 with a
+  `2` and lets the judge fail on criterion 2. `CASE` and `RUN` live in the same file, so the domain
+  tests and the HTTP tests describe literally the same input. `RUN` is deliberately uneven
   (`0.75`, `0.5`, `0.0`) because uniform scores make most run metrics indistinguishable.
-- **`StubJudgeEndpoint`** ([test_api.py](tests/test_api.py)) is a stdlib HTTP server speaking
-  the OpenAI chat-completions format on a free port, scripted per criterion. The end-to-end
-  tests point `RUBRIC_EVAL_JUDGE_ENDPOINT` at it and drive the whole chain — HTTP request,
-  `JudgeConfig.from_env()`, the real `openai` SDK, a real socket, reply parsing, the weighted
-  fold. That is what proves the wire format and the self-healing retry.
-- **`run_of`** ([conftest.py](tests/conftest.py)) builds a finished `BatchResult` straight
+- **`StubJudgeEndpoint`** ([test_api.py](tests/test_api.py)) answers the OpenAI
+  chat-completions format from a script, one queue per criterion. The end-to-end tests hand a
+  real `OpenAIJudge` an `AsyncOpenAI` client whose transport is that stub (`client=`, see
+  [Reference](#reference)) and drive the whole chain — HTTP request, the real `openai` SDK
+  writing the call and reading the reply, parsing, the weighted fold. That is what proves the
+  wire format and the self-healing retry, without a socket or an environment variable.
+- **`run_of`** ([conftest.py](tests/conftest.py)) builds a finished `RunResult` straight
   from judge scores — `run_of({1: 2, 2: 0}, {21: 1})` is a two-case run, and
   `labels_by_case_id={1: ["table"]}` tags one. Comparison tests are about the *difference*
   between two runs, so going through a judge and an event loop would only stand between the
@@ -1293,22 +1534,25 @@ field tables in [Reference](#reference). One text, never three — they cannot d
 | File | Covers |
 |---|---|
 | [test_metrics.py](tests/test_metrics.py) | the scoring formula, float extremes, every run metric |
-| [test_evaluation.py](tests/test_evaluation.py) | fan-out, ordering, failure policy, batch aggregation |
-| [test_judge.py](tests/test_judge.py) | the parser reply by reply, the retry loop, the concurrency limit |
-| [test_comparison.py](tests/test_comparison.py) | deltas and their direction, the three statuses, ordering, and every refusal |
+| [test_evaluation.py](tests/test_evaluation.py) | fan-out, ordering, failure policy, run aggregation |
+| [test_judge.py](tests/test_judge.py) | the parser reply by reply, both retry loops, what is not retried, the concurrency limit |
+| [test_comparison.py](tests/test_comparison.py) | deltas and their direction, the three statuses, ordering, every refusal, and the documents in [examples/](examples) against the numbers quoted from them here |
 | [test_prompt.py](tests/test_prompt.py) | the prompt a scale generates, held against the hand-written original |
-| [test_scale.py](tests/test_scale.py) | what a valid scale is, and what it does to a verdict, a run and a comparison |
+| [test_scale.py](tests/test_scale.py) | what a valid scale is, and what it does to a grade, a run and a comparison |
 | [test_labels.py](tests/test_labels.py) | what a valid label is, which cases a filter and a bucket select, and what a relabelled case does to a comparison |
 | [test_api.py](tests/test_api.py) | validation, wiring, serialization, and the end-to-end chain |
 
+The documents in [examples/](examples) are real responses of this app driven by a judge that
+grades from a table, which is what makes every number quoted in this README reproducible.
+
 ## Scope
 
-**Implemented** — evaluating one case or a whole batch with run metrics, slicing a run by
+**Implemented** — evaluating one case or a whole catalog with run metrics, slicing a run by
 label, and comparing two finished runs against each other, as a library or over HTTP.
 
 **Not implemented** — rubric catalog files, a CLI, negation in a `label_filter` ("table but
-not images" cannot be written), streaming progress for long batches, and self-consistency
-(judging each criterion several times and reporting the `spread`).
+not images" cannot be written), streaming progress for long runs, and self-consistency
+(judging each criterion several times and reporting how far the grades spread).
 
 ## License
 

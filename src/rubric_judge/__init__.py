@@ -1,69 +1,80 @@
-"""rubric-eval — judge LLM answers against weighted reference criteria."""
+"""rubric-judge — judge LLM answers against weighted reference criteria."""
 
-from rubric_eval.comparison import RunsNotComparableError, compare_runs
-from rubric_eval.evaluation import evaluate_batch, evaluate_case, filter_cases_by_labels
-from rubric_eval.judge import Judge, JudgeConfig, OpenAIJudge, Verdict
-from rubric_eval.metrics import case_score, label_metrics, run_metrics
-from rubric_eval.models import (
+from rubric_judge.comparison import RunsNotComparableError, compare_runs
+from rubric_judge.evaluation import evaluate_case, evaluate_run, filter_cases_by_labels
+from rubric_judge.judge import (
+    Judge,
+    JudgeConfig,
+    JudgeReply,
+    JudgeUnavailableError,
+    OpenAIJudge,
+    UnusableReplyError,
+    parse_judge_reply,
+)
+from rubric_judge.metrics import case_score, label_metrics, run_metrics
+from rubric_judge.models import (
     DEFAULT_SCALE,
     SCORE_EQUALITY_TOLERANCE,
     WEAKEST_CASES_REPORTED,
-    Batch,
-    BatchResult,
     Case,
     CaseComparisonResult,
     CaseResult,
     ChangeMagnitude,
     ChangeStatus,
     ChangeSummary,
-    ComparisonResult,
     Criterion,
     CriterionComparisonResult,
     CriterionResult,
+    LabelFilter,
     LabelMetrics,
     LabelMetricsDelta,
-    LabelSelection,
+    Run,
+    RunComparison,
+    RunComparisonResult,
     RunMetrics,
     RunMetricsDelta,
-    RunPair,
+    RunResult,
     Scale,
 )
-from rubric_eval.prompt import judge_prompt
+from rubric_judge.prompt import judge_prompt
 
 __all__ = [
     "DEFAULT_SCALE",
     "SCORE_EQUALITY_TOLERANCE",
     "WEAKEST_CASES_REPORTED",
-    "Batch",
-    "BatchResult",
     "Case",
     "CaseComparisonResult",
     "CaseResult",
     "ChangeMagnitude",
     "ChangeStatus",
     "ChangeSummary",
-    "ComparisonResult",
     "Criterion",
     "CriterionComparisonResult",
     "CriterionResult",
     "Judge",
     "JudgeConfig",
+    "JudgeReply",
+    "JudgeUnavailableError",
+    "LabelFilter",
     "LabelMetrics",
     "LabelMetricsDelta",
-    "LabelSelection",
     "OpenAIJudge",
+    "Run",
+    "RunComparison",
+    "RunComparisonResult",
     "RunMetrics",
     "RunMetricsDelta",
-    "RunPair",
+    "RunResult",
     "RunsNotComparableError",
     "Scale",
-    "Verdict",
+    "UnusableReplyError",
     "case_score",
     "compare_runs",
-    "evaluate_batch",
     "evaluate_case",
+    "evaluate_run",
     "filter_cases_by_labels",
     "judge_prompt",
     "label_metrics",
+    "parse_judge_reply",
     "run_metrics",
 ]

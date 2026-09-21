@@ -1,0 +1,406 @@
+"""Holding two finished runs against each other: did the change help, where, and what did it cost.
+
+Pure computation over two `RunResult` documents — no judge, no network, no cost. Runs
+saved to disk months apart compare exactly like runs produced a second ago.
+
+One entry point, `compare_runs`, and one hard rule underneath it: two runs are comparable
+only if they were judged on the same scale and cover the same cases with the same rubric, the
+same weights and the same labels. Different weights make the case scores non-commensurable, a
+different scale makes the raw criterion scores so, changed labels make the per-label buckets
+hold different cases on each side, and a delta between any of them would look like a result
+while meaning nothing.
+"""
+
+import statistics
+from operator import attrgetter
+
+from rubric_judge.models import (
+    CaseComparisonResult,
+    CaseResult,
+    ChangeMagnitude,
+    ChangeStatus,
+    ChangeSummary,
+    LabelMetrics,
+    LabelMetricsDelta,
+    RunComparison,
+    RunComparisonResult,
+    RunMetrics,
+    RunMetricsDelta,
+    RunResult,
+    reworded_grades_clause,
+)
+
+
+_METRIC_DELTA_SUFFIX = "_delta"
+"""What every field of `RunMetricsDelta` is called after the `RunMetrics` field it reports the
+change in — `average_score` becomes `average_score_delta`. Read back rather than merely
+followed, so the deltas are subtracted from the model instead of listed a second time here."""
+
+
+class RunsNotComparableError(ValueError):
+    """The two runs do not describe the same catalog, so their scores do not subtract.
+
+    A `ValueError`, because that is what it is and what a caller would catch anyway — but a
+    named one, so the HTTP layer can tell a refused comparison apart from a `ValidationError`
+    or a `StatisticsError`. Both of those are `ValueError` subclasses too, and reporting one
+    of them as "your runs are not comparable" would dress a bug up as the caller's mistake.
+
+    Example:
+        try:
+            compare_runs(RunComparison(baseline=two_case_run, candidate=three_case_run))
+        except RunsNotComparableError as refusal:
+            str(refusal)
+        # "the runs are not comparable: cases only in the candidate: [3]"
+    """
+
+
+def compare_runs(run_comparison: RunComparison) -> RunComparisonResult:
+    """Compare two finished runs of the same catalog at three grains: run, case, criterion.
+
+    Every delta is `candidate - baseline`, so a positive number always means the candidate
+    did better — with the two counting fields of `RunMetricsDelta` as the documented
+    exception, where fewer is better.
+
+    Takes a `RunComparison` rather than two arguments because both sides have the same type:
+    a swapped pair would be undetectable and would silently invert the whole document.
+
+    Args:
+        run_comparison: The `baseline` run to compare against and the `candidate` run under
+            test. Both must have been judged on the same scale and must cover the same case
+            ids, the same criterion ids per case, the same weights and the same labels per
+            case — see Raises. Nothing else is required of them: results loaded back from
+            stored JSON compare exactly like results just computed.
+
+    Returns:
+        A `RunComparisonResult`. `metrics_delta` says whether the run got better, `summary` how
+        that is distributed over the cases, `label_metrics_deltas` which *kind* of case moved,
+        and `case_comparison_results` — ordered by `case_id` — which criterion is responsible.
+        Both runs are complete by construction: a run whose judge failed anywhere was never
+        handed back, so no delta here is an artefact of an outage on one side.
+
+        A side of `summary` that nobody moved to comes back empty rather than zeroed: its id
+        list is `[]` and all three magnitudes are `None`, so "nothing got worse" is never
+        read as "everything got worse by 0.0".
+
+        `applied_label_filter` is deliberately *not* compared: two runs covering the same case
+        ids are comparable however each of them was selected, and two different filters can
+        legitimately arrive at the same cases.
+
+    Raises:
+        RunsNotComparableError: A `ValueError`. The runs do not describe the same catalog,
+            or were not judged on the same scale. The message names every difference found —
+            a differing scale, cases present on only one side, criteria that differ within a
+            shared case, weights that changed, and labels that changed — rather than only the
+            first, so one fix can address all of them.
+
+    Example:
+        result = compare_runs(RunComparison(baseline=baseline_run, candidate=candidate_run))
+        result.metrics_delta.average_score_delta   # 0.5
+        result.label_metrics_deltas[0].label       # "table"
+        result.summary.worsened_case_ids           # []  — the win cost nothing
+        result.summary.improvement.largest         # 1.0
+    """
+    baseline, candidate = run_comparison.baseline, run_comparison.candidate
+    _reject_incomparable_runs(baseline, candidate)
+    case_comparison_results = _compare_cases(baseline, candidate)
+    return RunComparisonResult(
+        metrics_delta=_metrics_delta(baseline.metrics, candidate.metrics),
+        summary=_summarize(case_comparison_results),
+        label_metrics_deltas=_label_metrics_deltas(baseline, candidate),
+        case_comparison_results=case_comparison_results,
+    )
+
+
+def _compare_cases(baseline: RunResult, candidate: RunResult) -> list[CaseComparisonResult]:
+    """One comparison per case, ordered by id.
+
+    Neither run's storage order is canonical, so sorting by id gives a document that does
+    not depend on either.
+    """
+    baseline_by_id = _case_results_by_id(baseline)
+    candidate_by_id = _case_results_by_id(candidate)
+    return [
+        CaseComparisonResult.between(baseline_by_id[case_id], candidate_by_id[case_id])
+        for case_id in sorted(candidate_by_id)
+    ]
+
+
+def _case_results_by_id(run: RunResult) -> dict[int, CaseResult]:
+    """Cases are matched by id, never by position.
+
+    Two runs of the same catalog may well be stored in different orders, and zipping those
+    would compare unrelated answers.
+    """
+    return {case_result.case_id: case_result for case_result in run.case_results}
+
+
+def _metrics_delta(baseline: RunMetrics, candidate: RunMetrics) -> RunMetricsDelta:
+    """Candidate minus baseline, one subtraction per delta `RunMetricsDelta` declares.
+
+    Derived from the model rather than written out, so a metric that gains a delta field
+    gains its subtraction with it: the alternative is a new metric that reports 0.0 in every
+    comparison forever because one of three places was not edited.
+
+    `total_cases` and the two id lists of `RunMetrics` are never reached, because they have
+    no delta field — the case count is guaranteed equal by the comparability check, and a set
+    of ids does not subtract.
+    """
+    return RunMetricsDelta.model_validate(
+        {
+            delta_field: _metric_difference(delta_field, baseline, candidate)
+            for delta_field in RunMetricsDelta.model_fields
+        }
+    )
+
+
+def _metric_difference(
+    delta_field: str, baseline: RunMetrics, candidate: RunMetrics
+) -> float:
+    """How far one metric moved, found by the name of the delta field reporting it.
+
+    Args:
+        delta_field: A field name of `RunMetricsDelta`, `<metric>` plus
+            `_METRIC_DELTA_SUFFIX`.
+        baseline: The metrics of the run compared against.
+        candidate: The metrics of the run under test.
+
+    Returns:
+        `candidate` minus `baseline` for that metric, positive when the candidate scored
+        higher — including for the counting fields, where higher is the worse direction.
+
+    Raises:
+        AttributeError: The delta field names no `RunMetrics` field. A delta nobody can
+            subtract must stop the comparison rather than be skipped, because a delta left
+            out reads as "this metric did not move".
+        TypeError: The metric is not a number — an id list, or a magnitude left as `None`
+            because there was nothing to measure. Same reason.
+
+    Example:
+        _metric_difference("average_score_delta", baseline.metrics, candidate.metrics)
+    """
+    metric_name = delta_field.removesuffix(_METRIC_DELTA_SUFFIX)
+    return _subtractable_metric(candidate, metric_name) - _subtractable_metric(
+        baseline, metric_name
+    )
+
+
+def _subtractable_metric(metrics: RunMetrics, metric_name: str) -> float:
+    """One metric read back by name, refused unless it is a number two runs can differ in."""
+    value = getattr(metrics, metric_name)
+    if not isinstance(value, int | float):
+        raise TypeError(
+            f"RunMetrics.{metric_name} does not subtract: {value!r} is no number, so "
+            f"{metric_name}{_METRIC_DELTA_SUFFIX} cannot be computed"
+        )
+    return value
+
+
+def _label_metrics_deltas(
+    baseline: RunResult, candidate: RunResult
+) -> list[LabelMetricsDelta]:
+    """One delta per label, in the alphabetical order both breakdowns already carry.
+
+    Pairing by label needs no intersection: the comparability check has guaranteed that every
+    case carries the same labels in both runs, and `RunResult` has guaranteed that each
+    breakdown covers exactly the labels its cases carry — so the two label sets are equal, and
+    zipping them pairs like with like.
+    """
+    return [
+        LabelMetricsDelta(
+            label=baseline_bucket.label,
+            metrics_delta=_metrics_delta(baseline_bucket.metrics, candidate_bucket.metrics),
+        )
+        for baseline_bucket, candidate_bucket in zip(
+            _buckets_by_label(baseline), _buckets_by_label(candidate), strict=True
+        )
+    ]
+
+
+def _buckets_by_label(run: RunResult) -> list[LabelMetrics]:
+    """Sorted here as well as at the source, so the zip above pairs by label.
+
+    Trusting the storage order of a run that was read back from JSON would pair two
+    different labels' buckets and subtract them.
+    """
+    return sorted(run.label_metrics, key=attrgetter("label"))
+
+
+def _summarize(case_comparison_results: list[CaseComparisonResult]) -> ChangeSummary:
+    """The case movements folded into the distribution they form.
+
+    Who moved which way, in order of how much, and how large those moves were on each side.
+    """
+    improved = _ranked_by_movement(case_comparison_results, ChangeStatus.IMPROVED)
+    worsened = _ranked_by_movement(case_comparison_results, ChangeStatus.WORSENED)
+    stable = _with_status(case_comparison_results, ChangeStatus.STABLE)
+    return ChangeSummary(
+        improved_case_ids=[case_comparison.case_id for case_comparison in improved],
+        stable_case_ids=[case_comparison.case_id for case_comparison in stable],
+        worsened_case_ids=[case_comparison.case_id for case_comparison in worsened],
+        improvement=_magnitude_of(improved),
+        worsening=_magnitude_of(worsened),
+    )
+
+
+def _with_status(
+    case_comparison_results: list[CaseComparisonResult], status: ChangeStatus
+) -> list[CaseComparisonResult]:
+    """One place to pick a side out, so the three lists of a summary are cut the same way."""
+    return [
+        case_comparison
+        for case_comparison in case_comparison_results
+        if case_comparison.status is status
+    ]
+
+
+def _ranked_by_movement(
+    case_comparison_results: list[CaseComparisonResult], status: ChangeStatus
+) -> list[CaseComparisonResult]:
+    """One side of the comparison, biggest move first.
+
+    For improvements that is the largest positive delta, for regressions the most negative
+    one. Ordering the complete list this way is what makes a separate "top five" field
+    unnecessary: the top five are its first five.
+    """
+    moved = _with_status(case_comparison_results, status)
+    return sorted(
+        moved, key=attrgetter("score_delta"), reverse=status is ChangeStatus.IMPROVED
+    )
+
+
+def _magnitude_of(moved_case_comparisons: list[CaseComparisonResult]) -> ChangeMagnitude:
+    """How large the moves on one side were, or three `None`s when nothing moved that way.
+
+    A side with no moves has no largest, mean or median, and a 0.0 in their place is a move
+    of exactly zero to every reader who does not also check the id list.
+
+    Reads `largest` off the front of the list because both sides arrive ordered biggest-move
+    first, so the extreme is the first entry either way.
+    """
+    if not moved_case_comparisons:
+        return ChangeMagnitude(largest=None, mean=None, median=None)
+    deltas = [
+        case_comparison.score_delta for case_comparison in moved_case_comparisons
+    ]
+    return ChangeMagnitude(
+        largest=deltas[0],
+        mean=statistics.mean(deltas),
+        median=statistics.median(deltas),
+    )
+
+
+def _reject_incomparable_runs(baseline: RunResult, candidate: RunResult) -> None:
+    """Refuse before computing anything, naming every difference at once.
+
+    Fixing them one error message at a time would mean one full re-run per difference.
+    """
+    if differences := _differences_between(baseline, candidate):
+        raise RunsNotComparableError(
+            "the runs are not comparable: " + "; ".join(differences)
+        )
+
+
+def _differences_between(baseline: RunResult, candidate: RunResult) -> list[str]:
+    """Everything that stops these two runs from being compared, in reading order.
+
+    First the scale, which invalidates everything under it, then the cases that are missing
+    on one side, then the rubric and label changes inside the shared ones.
+    """
+    baseline_by_id = _case_results_by_id(baseline)
+    candidate_by_id = _case_results_by_id(candidate)
+    differences = _scale_differences(baseline, candidate)
+    differences += _only_on_one_side("cases", set(baseline_by_id), set(candidate_by_id))
+    for case_id in sorted(set(baseline_by_id) & set(candidate_by_id)):
+        differences += _rubric_differences(
+            case_id, baseline_by_id[case_id], candidate_by_id[case_id]
+        )
+        differences += _label_differences(
+            case_id, baseline_by_id[case_id], candidate_by_id[case_id]
+        )
+    return differences
+
+
+def _label_differences(case_id: int, baseline: CaseResult, candidate: CaseResult) -> list[str]:
+    """A case re-labelled between two runs makes their per-label buckets hold different cases.
+
+    Every delta in `label_metrics_deltas` would then silently compare two populations.
+    Compared as sets: labels are read as a set everywhere, so a reordered list is the same
+    labelling and must not be reported as a change.
+    """
+    if set(baseline.labels) == set(candidate.labels):
+        return []
+    return [
+        f"case {case_id}: labels {sorted(baseline.labels)} vs {sorted(candidate.labels)}"
+    ]
+
+
+def _scale_differences(baseline: RunResult, candidate: RunResult) -> list[str]:
+    """Reported first, because it is the difference that makes every other number meaningless.
+
+    A 2 out of 2 and a 2 out of 10 are not the same grade, so subtracting them would turn a
+    change of judge into a collapse of the system under test.
+    """
+    if baseline.scale == candidate.scale:
+        return []
+    return [
+        f"the runs were judged on different scales: baseline {baseline.scale}, "
+        f"candidate {candidate.scale}{reworded_grades_clause([baseline.scale, candidate.scale])}"
+    ]
+
+
+def _only_on_one_side(subject: str, baseline_ids: set[int], candidate_ids: set[int]) -> list[str]:
+    """Ids one run carries and the other does not, in one sentence for cases and criteria.
+
+    Written out twice, the two would eventually drift into two phrasings. Both directions
+    are reported, because a catalog that grew and one that shrank need different fixes.
+    """
+    return [
+        f"{subject} only in the {run}: {sorted(only_here)}"
+        for run, only_here in (
+            ("baseline", baseline_ids - candidate_ids),
+            ("candidate", candidate_ids - baseline_ids),
+        )
+        if only_here
+    ]
+
+
+def _rubric_differences(case_id: int, baseline: CaseResult, candidate: CaseResult) -> list[str]:
+    """The two rubric rules for one shared case: the same criteria, on the same weights.
+
+    A changed criterion set makes the two case scores answer different questions; a changed
+    weight makes them non-commensurable.
+    """
+    baseline_weights = _weights_by_criterion_id(baseline)
+    candidate_weights = _weights_by_criterion_id(candidate)
+    return _only_on_one_side(
+        f"case {case_id}: criteria", set(baseline_weights), set(candidate_weights)
+    ) + _weight_differences(case_id, baseline_weights, candidate_weights)
+
+
+def _weight_differences(
+    case_id: int, baseline_weights: dict[int, float], candidate_weights: dict[int, float]
+) -> list[str]:
+    """Compared exactly rather than with a tolerance, because a weight is never computed.
+
+    Weights are copied verbatim from the rubric, so two runs of the same catalog carry
+    bit-identical ones. One that merely *nearly* matches means the rubric was edited — and
+    the weights are the denominator every case score is normalized by.
+    """
+    return [
+        f"case {case_id}, criterion {criterion_id}: weight "
+        f"{baseline_weights[criterion_id]} vs {candidate_weights[criterion_id]}"
+        for criterion_id in sorted(set(baseline_weights) & set(candidate_weights))
+        if baseline_weights[criterion_id] != candidate_weights[criterion_id]
+    ]
+
+
+def _weights_by_criterion_id(case_result: CaseResult) -> dict[int, float]:
+    """Keyed by id because the two runs are checked criterion by criterion.
+
+    Not position by position: the criteria of a stored result come in whatever order it was
+    saved in.
+    """
+    return {
+        criterion_result.criterion_id: criterion_result.weight
+        for criterion_result in case_result.criterion_results
+    }

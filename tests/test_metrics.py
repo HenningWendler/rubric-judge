@@ -1,16 +1,19 @@
 import itertools
 import math
 import statistics
+from typing import Any
 
 import pytest
+from pydantic import ValidationError
 
-from rubric_eval.metrics import case_score, run_metrics
-from rubric_eval.models import (
+from rubric_judge.metrics import case_score, run_metrics
+from rubric_judge.models import (
     DEFAULT_SCALE,
     WEAKEST_CASES_REPORTED,
     CaseResult,
     Criterion,
     CriterionResult,
+    RunMetrics,
 )
 
 
@@ -18,7 +21,7 @@ _NEXT_CRITERION_ID = itertools.count(1)
 
 
 def _result(weight: float, score: float) -> CriterionResult:
-    """A verdict written as weight and score alone — the only two things the formulas read.
+    """A criterion result written as weight and score alone — all the formulas read.
     The id is handed out fresh each call, because a `CaseResult` rejects a repeated one."""
     criterion = Criterion(id=next(_NEXT_CRITERION_ID), content="x", weight=weight)
     return CriterionResult.judged(criterion, score, None, DEFAULT_SCALE)
@@ -33,11 +36,6 @@ def test_a_partial_score_counts_half():
     assert case_score([_result(1, 1)], DEFAULT_SCALE) == pytest.approx(0.5)
 
 
-def test_an_unjudged_criterion_scores_zero_but_keeps_its_weight():
-    unjudged = CriterionResult.unjudged(Criterion(id=2, content="x", weight=1), "judge down")
-    assert case_score([_result(1, 2), unjudged], DEFAULT_SCALE) == pytest.approx(0.5)
-
-
 def test_presence_is_derived_from_the_score():
     assert _result(1, 1).is_present is True
     assert _result(1, 0).is_present is False
@@ -48,13 +46,10 @@ def test_an_empty_rubric_is_a_clear_error_not_a_division_by_zero():
         case_score([], DEFAULT_SCALE)
 
 
-def test_all_criteria_failing_scores_zero_rather_than_erroring():
-    """A total judge outage is a 0, not an exception — the caller still gets a result."""
-    dead = [
-        CriterionResult.unjudged(Criterion(id=1, content="x", weight=3), "judge down"),
-        CriterionResult.unjudged(Criterion(id=2, content="y", weight=1), "judge down"),
-    ]
-    assert case_score(dead, DEFAULT_SCALE) == 0.0
+def test_a_rubric_missed_completely_scores_zero_rather_than_erroring():
+    """An answer that covers nothing is a 0, not an exception — and a real one, because a run
+    that lost a grade to an outage never reaches the formulas at all."""
+    assert case_score([_result(3, 0), _result(1, 0)], DEFAULT_SCALE) == 0.0
 
 
 def test_a_perfect_rubric_scores_exactly_one():
@@ -83,13 +78,16 @@ def test_huge_weights_do_not_overflow_the_weight_sum():
     assert score == pytest.approx(0.5)
 
 
-# --- run metrics: one batch folded into the numbers a run is judged by ---------------------
+# --- run metrics: one run folded into the numbers a run is judged by ---------------------
 
 
-def _case(case_id: int, *verdicts: CriterionResult) -> CaseResult:
-    results = list(verdicts)
+def _case(case_id: int, *judged_criteria: CriterionResult) -> CaseResult:
+    criterion_results = list(judged_criteria)
     return CaseResult(
-        case_id=case_id, score=case_score(results, DEFAULT_SCALE), criterion_results=results
+        case_id=case_id,
+        score=case_score(criterion_results, DEFAULT_SCALE),
+        scale=DEFAULT_SCALE,
+        criterion_results=criterion_results,
     )
 
 
@@ -164,40 +162,33 @@ def test_the_weakest_case_list_is_capped():
     assert len(run_metrics(many).weakest_cases_above_zero) == WEAKEST_CASES_REPORTED
 
 
-def test_failed_criteria_are_counted_across_the_whole_run():
-    """The number to read before the average: it says how much of a bad run is the judge."""
-    outage = CriterionResult.unjudged(Criterion(id=9, content="x", weight=1), "judge down")
-    run = [_case(1, _result(1, 2), outage), _case(2, outage)]
-
-    assert run_metrics(run).failed_criteria_count == 2
-
-
 def test_an_empty_run_is_a_clear_error_not_a_division_by_zero():
     with pytest.raises(ValueError, match="at least one case"):
         run_metrics([])
 
 
-def test_a_case_result_always_carries_at_least_one_verdict():
-    """`Case.criteria` rejects an empty rubric, so "one verdict per criterion" means at least
-    one verdict — and the fulfillment rate divides by exactly that count. Without the rule on
+def test_a_case_result_always_carries_at_least_one_criterion_result():
+    """`Case.criteria` rejects an empty rubric, so "one result per criterion" means at least
+    one result — and the fulfillment rate divides by exactly that count. Without the rule on
     the *result* type, a run loaded back from disk reaches `run_metrics` as a division by
     zero instead of a clean rejection."""
     with pytest.raises(ValueError):
-        CaseResult(case_id=1, score=0.0, criterion_results=[])
+        CaseResult(case_id=1, score=0.0, scale=DEFAULT_SCALE, criterion_results=[])
 
 
 def test_a_run_loaded_back_from_stored_rows_is_aggregated_like_a_fresh_one():
     """The documented use of `run_metrics`: case results read from a file, not from a judge.
     They arrive as plain dicts, so the model is the only thing standing between a malformed
     row and the formulas."""
+    stored_scale = DEFAULT_SCALE.model_dump(mode="json")
     rows = [
-        {"case_id": 1, "score": 0.75, "criterion_results": [
+        {"case_id": 1, "score": 0.75, "scale": stored_scale, "criterion_results": [
             {"criterion_id": 1, "weight": 3.0, "score": 2.0, "is_present": True}]},
-        {"case_id": 2, "score": 0.0, "criterion_results": [
+        {"case_id": 2, "score": 0.0, "scale": stored_scale, "criterion_results": [
             {"criterion_id": 1, "weight": 1.0, "score": 0.0, "is_present": False}]},
     ]
 
-    metrics = run_metrics([CaseResult(**row) for row in rows])
+    metrics = run_metrics([CaseResult.model_validate(row) for row in rows])
 
     assert metrics.average_score == pytest.approx(0.375)
     assert metrics.cases_with_score_zero == [2]
@@ -245,9 +236,9 @@ def test_the_weakest_cases_are_the_weakest_of_the_run_not_the_first_five_found()
     assert metrics.weakest_cases_above_zero == [90, 91, 92, 93, 94]
 
 
-def test_the_readme_batch_example_reports_exactly_the_documented_numbers():
+def test_the_readme_run_example_reports_exactly_the_documented_numbers():
     """Every number in the README is claimed to be reproducible verbatim. This is the run of
-    the documented two-case batch — one perfect answer, one total miss."""
+    the documented two-case run — one perfect answer, one total miss."""
     metrics = run_metrics([_case(1, _result(3, 2)), _case(2, _result(1, 0))])
 
     assert metrics.model_dump() == {
@@ -261,5 +252,63 @@ def test_the_readme_batch_example_reports_exactly_the_documented_numbers():
         "cases_with_score_zero": [2],
         "cases_with_score_zero_count": 1,
         "weakest_cases_above_zero": [1],
-        "failed_criteria_count": 0,
     }
+
+
+# ------------------------------------------- the ranges the reference table states are enforced
+
+
+def _stored_metrics(**overrides: object) -> dict[str, Any]:
+    """A real run's metrics as JSON, with one field edited — the shape `/compare` takes in."""
+    widest = run_metrics([_case(1, _result(1, 2)), _case(2, _result(1, 0))])
+    return {**widest.model_dump(), **overrides}
+
+
+def test_the_widest_run_there_can_be_lands_exactly_on_the_documented_bounds():
+    """The bounds are only defensible if a legitimate run can reach them. Half the cases at 0
+    and half at 1 is as far apart as case scores in [0, 1] get, and two such cases produce
+    exactly the 0.5 and the sqrt(0.5) the reference table names."""
+    metrics = run_metrics([_case(1, _result(1, 2)), _case(2, _result(1, 0))])
+
+    assert metrics.variance == 0.5
+    assert metrics.standard_deviation == math.sqrt(0.5)
+    assert RunMetrics.model_validate(metrics.model_dump()) == metrics
+
+
+def test_a_stored_run_cannot_claim_a_variance_no_case_scores_could_produce():
+    """`variance` is documented as `0 … 0.5` because the case scores under it are bounded
+    0..1. A stored run is postable to `/compare`, where `variance_delta` subtracts it — so a
+    run claiming 9.0 would hand back a delta of 8.5 with a 200."""
+    with pytest.raises(ValidationError, match="less than or equal to 0.5"):
+        RunMetrics.model_validate(_stored_metrics(variance=9.0))
+
+
+def test_a_stored_run_cannot_claim_a_standard_deviation_off_the_same_bound():
+    """The root of a bounded variance is bounded too, and `standard_deviation_delta` inherits
+    it exactly as `variance_delta` does."""
+    with pytest.raises(ValidationError, match="less than or equal to 0.7071"):
+        RunMetrics.model_validate(_stored_metrics(standard_deviation=9.0))
+
+
+def test_the_weakest_case_shortlist_is_refused_rather_than_truncated_when_it_is_too_long():
+    """Documented as up to `WEAKEST_CASES_REPORTED` entries. Truncating a longer one read
+    back from JSON would quietly drop ids a reader is being pointed at."""
+    with pytest.raises(ValidationError, match="at most 5 items"):
+        RunMetrics.model_validate(_stored_metrics(weakest_cases_above_zero=[1, 2, 3, 4, 5, 6]))
+
+
+def test_a_stored_run_cannot_name_more_cases_than_it_says_it_holds():
+    """The two id lists describe disjoint sets — a case scored 0 or it did not — so together
+    they cannot name more cases than `total_cases`. `cases_with_score_zero_count` is derived
+    from the first of them, and `/compare` subtracts that count."""
+    with pytest.raises(ValidationError, match="2 cases name 5 of them"):
+        RunMetrics.model_validate(_stored_metrics(cases_with_score_zero=[2, 3, 4, 5]))
+
+
+def test_a_run_may_name_every_case_it_holds():
+    """The other side of that check: a run in which every answer missed its rubric completely
+    names all of its cases, and that is a real run and not an edited one."""
+    metrics = run_metrics([_case(number, _result(1, 0)) for number in range(1, 6)])
+
+    assert metrics.cases_with_score_zero == [1, 2, 3, 4, 5]
+    assert RunMetrics.model_validate(metrics.model_dump()) == metrics

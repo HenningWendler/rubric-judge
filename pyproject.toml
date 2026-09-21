@@ -1,5 +1,5 @@
 [project]
-name = "rubric-eval"
+name = "rubric-judge"
 version = "0.1.0"
 description = "Judge LLM answers against weighted reference criteria"
 readme = "README.md"
@@ -14,14 +14,47 @@ dependencies = [
 
 [project.optional-dependencies]
 test = ["pytest>=8", "pytest-asyncio>=0.23", "httpx>=0.27"]
+quality = ["ruff>=0.16", "mypy>=2.3", "pydoclint>=0.9"]
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/rubric_eval"]
+packages = ["src/rubric_judge"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+
+[tool.ruff.lint]
+select = ["D"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["D"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+
+# Tests name their intent in the function name, not in a return annotation;
+# the same reasoning as the ruff per-file-ignores above.
+[[tool.mypy.overrides]]
+module = "tests.*"
+disallow_untyped_defs = false
+disallow_incomplete_defs = false
+
+[tool.pydoclint]
+style = "google"
+arg-type-hints-in-docstring = false
+check-return-types = false
+check-yield-types = false
+check-class-attributes = false
+# Constructor arguments are documented on __init__ rather than on the class, because ruff's
+# google convention requires __init__ to carry a docstring (D107) and pydoclint refuses to
+# have the same arguments described in both places.
+allow-init-docstring = true
+skip-checking-raises = true
