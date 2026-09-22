@@ -319,16 +319,25 @@ def test_a_case_with_no_context_carries_no_context_block_to_the_judge(client, st
     """The `Context:` block is absent entirely for a context-free case, not present and
     blank — the user message must not claim background that was never given."""
     stub_endpoint.replies = {EMAIL_CRITERION: ['Covered.\n{"score": 2}']}
-    case_without_context = {
-        key: value for key, value in CASE.items() if key != "context"
-    }
+    case_without_context = {key: value for key, value in CASE.items() if key != "context"}
 
-    client.post(
-        "/evaluate", json={**case_without_context, "criteria": [CASE["criteria"][0]]}
-    )
+    client.post("/evaluate", json={**case_without_context, "criteria": [CASE["criteria"][0]]})
 
     asked = stub_endpoint.received[0]
     assert "Context:" not in asked["messages"][1]["content"]
+
+
+@pytest.mark.parametrize("blank", ["", "   ", "\t\n"])
+def test_a_blank_context_is_refused_at_the_boundary(client, blank):
+    """The error table maps a blank or whitespace-only `context` to 422. It has to be refused
+    where it arrives: scored as if the case had none, it would quietly become a second way of
+    saying something the manual says exactly one way."""
+    use_judge(FakeJudge({1: 2, 2: 2}))
+
+    response = client.post("/evaluate", json={**CASE, "context": blank})
+
+    assert response.status_code == 422
+    assert [item["loc"] for item in response.json()["detail"]] == [["body", "context"]]
 
 
 def test_a_broken_reply_is_healed_over_the_wire(client, stub_endpoint):

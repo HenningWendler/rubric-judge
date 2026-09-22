@@ -269,12 +269,43 @@ async def test_criterion_ids_may_repeat_across_the_cases_of_a_run():
     assert result.metrics.cases_with_score_zero == [2]
 
 
-async def test_a_blank_context_is_refused_rather_than_treated_as_no_context():
+@pytest.mark.parametrize("blank", ["", "   ", "\t\n"])
+async def test_a_blank_context_is_refused_rather_than_treated_as_no_context(blank):
     """A blank string and an absent context would otherwise mean the same thing under two
-    spellings — `None` is documented as the one way to say a case carries no context, so a
-    blank string is a validation error rather than being silently normalized to it."""
+    spellings — `None` is documented as the one way to say a case carries no context, so
+    anything blank once stripped is a validation error rather than being normalized to it."""
     with pytest.raises(ValidationError):
-        Case(**{**CASE, "context": ""})
+        Case(**{**CASE, "context": blank})
+
+
+async def test_a_context_is_stripped():
+    """Documented as stripped of surrounding whitespace, so padding the caller never meant to
+    send is not what the judge is shown as background."""
+    padded = Case(**{**CASE, "context": "  The question asked was: How do I report sick leave?  "})
+
+    assert padded.context == "The question asked was: How do I report sick leave?"
+
+
+async def test_an_omitted_context_and_an_explicit_none_are_the_same_case():
+    """The manual offers two spellings for an answer that stands on its own, omitting the
+    field or passing `None`, and promises they say the same thing."""
+    without_context = {key: value for key, value in CASE.items() if key != "context"}
+
+    assert Case(**without_context).context is None
+    assert Case(**{**without_context, "context": None}).context is None
+
+
+async def test_a_run_may_mix_cases_with_and_without_context():
+    """`context` is optional per case, not per run. A catalog that holds both a question and
+    its answer and a summary that stands on its own is one run, unlike `scale`, which every
+    case result in a run has to agree on."""
+    without_context = {key: value for key, value in CASE.items() if key != "context"}
+    mixed = Run.model_validate({"cases": [CASE, {**without_context, "id": 2}]})
+
+    result = await evaluate_run(FakeJudge({1: 2, 2: 2}), mixed)
+
+    assert [case.context is None for case in mixed.cases] == [False, True]
+    assert [case_result.score for case_result in result.case_results] == [1.0, 1.0]
 
 
 async def test_the_readme_case_without_a_context_reports_the_documented_number():
