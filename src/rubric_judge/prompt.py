@@ -109,9 +109,10 @@ belong to `DEFAULT_SCALE` and to no other — a judge on a ten-point scale shown
 shown four wrong answers, which is why `judge_prompt` leaves them out unless they are handed
 in.
 
-The fourth carries no context. Its job is the shape rather than the scale, which the first
-three already teach, so its grade is the unambiguous one: a judge that has only ever seen
-three labels would otherwise meet two for the first time in production."""
+The fourth carries no context, so a judge meets that shape here rather than for the first
+time in production. The first three already cover every grade, 2, 0 and 1, so the fourth
+reuses a clear-cut 2 instead of arguing a borderline case: what it has to teach is the
+missing `Context:` block, and a debatable grade beside it would only blur that."""
 
 
 def judge_prompt(scale: Scale, examples: str = "") -> str:
@@ -290,13 +291,14 @@ def malformed_json_hint(error: Exception, scale: Scale) -> str:
     )
 
 
-def criterion_prompt(answer: str, criterion: str, context: str | None = None) -> str:
+def criterion_prompt(answer: str, criterion_content: str, context: str | None = None) -> str:
     """Build the user message: what came back, one criterion to judge, and what framed it.
 
     Args:
         answer: The answer under test, inserted unmodified.
-        criterion: The text of a single criterion. Its weight is deliberately *not* passed:
-            a judge that knew how much a criterion counts could let that leak into the score.
+        criterion_content: The text of a single criterion, without the `Criterion` around it.
+            Its weight is deliberately *not* passed: a judge that knew how much a criterion
+            counts could let that leak into the score.
         context: What the answer was produced in response to, in the caller's own words, or
             `None` for an answer that stands on its own. Background only — the system prompt
             tells the model not to score it.
@@ -326,5 +328,7 @@ def criterion_prompt(answer: str, criterion: str, context: str | None = None) ->
         # Criterion:
         # - Report by email
     """
-    judged = f"Answer:\n{answer}\n\nCriterion:\n- {criterion}\n"
-    return judged if context is None else f"Context:\n{context}\n\n{judged}"
+    answer_and_criterion = f"Answer:\n{answer}\n\nCriterion:\n- {criterion_content}\n"
+    if context is None:
+        return answer_and_criterion
+    return f"Context:\n{context}\n\n{answer_and_criterion}"

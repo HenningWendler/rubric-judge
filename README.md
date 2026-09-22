@@ -70,7 +70,7 @@ The answer names the right person and the right deadline but never mentions the 
 note, so it loses the weight-1 criterion and keeps 5 of the 6 reachable points. That is
 0.83.
 
-### The same program without a question
+### The same program without a context
 
 Not every answer is a reply to something. A summary, a report or a drafted email is judged
 against its criteria and nothing else. Leave `context` out and the judge is shown the answer
@@ -106,8 +106,8 @@ same judge, the same scale, the same result type.
 
 ### About the output in this manual
 
-Every snippet below was really run, and every block of output under one is what came back,
-pasted unedited. They were judged by **`gpt-5.4-mini-2026-03-17`** on **2026-09-22** at
+Every snippet in this manual was really run, and every block of output under one is what came
+back, pasted unedited. They were judged by **`gpt-5.4-mini-2026-03-17`** on **2026-09-22** at
 temperature `0.0`, on the scale that ships with the package.
 
 An LLM judge is not a fixed function. Run the same snippet against the same model tomorrow

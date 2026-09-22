@@ -38,14 +38,14 @@ Then there is `RunMetrics`, which is `RunResult.metrics` and nothing else, `Scal
 every case result carries, and `JudgeReply`, which only a judge produces.
 
 `Case` carries `context`, not `question`, and it is optional. A criterion is often checked
-against a text that was never a reply to anything at all, a summary, a drafted email, a
-report, and requiring a question there forced a caller to either invent one or pass a blank
-that meant nothing. `context` is one free-form string that names itself in the caller's own
-words, `"The question asked was: ..."`, `"The source policy says: ..."`, rather than a
-structured type with a `kind` field and a `value` field. That costs the caller one clause to
-say what the text is, and it is what lets a source document or a task instruction reuse the
-same field later without a redesign of `Case` or of the judge's prompt, which renders exactly
-one label, `Context:`, whatever the caller put after it.
+against a text that was never a reply to anything, such as a summary, a drafted email or a
+report. Requiring a question there forced the caller to invent one or to pass a blank that
+meant nothing. `context` is one free-form string that names itself in the caller's own words,
+`"The question asked was: ..."` or `"The source policy says: ..."`, rather than a structured
+type with a `kind` field beside a `value` field. That costs the caller one clause to say what
+the text is. In return a source document or a task instruction reuses the same field without
+a redesign of `Case`, because the judge's prompt renders exactly one label, `Context:`,
+whatever the caller put after it.
 
 Labels add no grain, they cut across one. `LabelMetrics` and `LabelMetricsDelta` are each a
 label plus the aggregate of the grain above, composed rather than copied, so the pair
