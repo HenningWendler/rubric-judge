@@ -491,53 +491,69 @@ class TestPublishedExamples:
         assert recomputed == stored
 
     def test_the_readme_quotes_those_documents_verbatim(self):
-        """The numbers the README prints in its comparison quickstart, down to the trailing
-        digits it deliberately shows — they are what summing weights 3 and 1 really produces,
-        and rounding them in the prose would hide why "stable" is a tolerance and not an
-        `==`."""
+        """The numbers the README prints when it compares the candidate against the
+        baseline, at the precision it prints them. The stored deltas carry the float noise
+        of summing weights 3, 2 and 1, which is why "stable" is a tolerance and not an
+        equality."""
         result = compared(
             self._stored("run_result_baseline.json"),
             self._stored("run_result_candidate.json"),
         )
 
-        assert result.metrics_delta.average_score_delta == 0.1250000000000001
-        assert result.metrics_delta.median_score_delta == -0.12499999999999989
-        assert result.summary.improved_case_ids == [1]
-        assert result.summary.worsened_case_ids == [3]
-        assert result.summary.improvement.largest == 0.8750000000000001
-        assert result.summary.worsening.largest == -0.5
-        assert [
-            (bucket.label, bucket.metrics_delta.average_score_delta)
-            for bucket in result.label_metrics_deltas
-        ] == [("policy", 0.4375), ("tool", -0.25)]
+        assert result.metrics_delta.average_score_delta == 0.16666666666666663
+        assert result.metrics_delta.median_score_delta == 0.33333333333333337
+        assert result.metrics_delta.average_criterion_score_delta == 0.3999999999999999
+        assert result.metrics_delta.criteria_fulfillment_rate_delta == 0.125
+        assert result.summary.improved_case_ids == [3, 1]
+        assert result.summary.stable_case_ids == [2]
+        assert result.summary.worsened_case_ids == [4]
+        assert result.summary.improvement.largest == 0.8333333333333333
+        assert result.summary.worsening.largest == -0.3333333333333333
 
     def test_the_readme_drill_down_lands_on_the_criterion_it_names(self):
-        """The README follows one regression from the run down to the criterion that caused
-        it — the path the whole three-grain design exists for."""
+        """The README follows the one regression from the run down to the criterion that
+        caused it, which is the path the whole three-grain design exists for."""
         result = compared(
             self._stored("run_result_baseline.json"),
             self._stored("run_result_candidate.json"),
         )
-        regressed = result.case_comparison_results[2]
+        regressed = result.case_comparison_results[3]
 
-        assert regressed.case_id == 3
-        assert (regressed.baseline_score, regressed.candidate_score) == (1.0, 0.5)
-        assert regressed.criterion_comparison_results[0].score_delta == -1.0
-        assert regressed.criterion_comparison_results[0].status is ChangeStatus.WORSENED
+        assert regressed.case_id == 4
+        assert regressed.status is ChangeStatus.WORSENED
+        assert (regressed.baseline_score, regressed.candidate_score) == (
+            0.3333333333333333,
+            0.0,
+        )
+        assert [
+            (one.criterion_id, one.status) for one in regressed.criterion_comparison_results
+        ] == [(41, ChangeStatus.STABLE), (42, ChangeStatus.WORSENED)]
+
+    def test_both_runs_hide_one_zeroed_case_behind_an_unmoved_count(self):
+        """The README warns that `cases_with_score_zero_count_delta` counts cases without
+        identifying them. It reads 0 here while the case at zero changed from 3 to 4, and
+        that warning is only worth printing while it stays true of the stored documents."""
+        baseline = self._stored("run_result_baseline.json")
+        candidate = self._stored("run_result_candidate.json")
+
+        assert baseline.metrics.cases_with_score_zero == [3]
+        assert candidate.metrics.cases_with_score_zero == [4]
+        assert compared(baseline, candidate).metrics_delta.cases_with_score_zero_count_delta == 0
 
     def test_the_stored_baseline_reports_the_metrics_the_readme_prints_for_it(self):
-        """The README prints that `metrics` object as the response of `POST /evaluate/run`."""
+        """The README prints this metrics object twice, once from `evaluate_run` and once
+        as the response of `POST /evaluate/run`, so both sections quote one document."""
         assert self._stored("run_result_baseline.json").metrics.model_dump() == {
-            "total_cases": 3,
-            "average_score": 0.6666666666666666,
-            "median_score": 1.0,
-            "variance": 0.3333333333333333,
-            "standard_deviation": 0.5773502691896257,
+            "total_cases": 4,
+            "average_score": 0.5416666666666666,
+            "median_score": 0.5833333333333333,
+            "variance": 0.21064814814814814,
+            "standard_deviation": 0.4589642122738418,
             "average_criterion_score": 1.0,
-            "criteria_fulfillment_rate": 0.6666666666666666,
-            "cases_with_score_zero": [1],
+            "criteria_fulfillment_rate": 0.5416666666666666,
+            "cases_with_score_zero": [3],
             "cases_with_score_zero_count": 1,
-            "weakest_cases_above_zero": [2, 3],
+            "weakest_cases_above_zero": [4, 1, 2],
         }
 
 
