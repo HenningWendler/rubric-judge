@@ -22,7 +22,7 @@ from rubric_judge.models import (
 
 CASE: dict[str, Any] = {
     "id": 1,
-    "question": "How do I report sick leave?",
+    "context": "The question asked was: How do I report sick leave?",
     "answer": "Email hr@example.com before 10:00.",
     "criteria": [
         {"id": 1, "content": "Email before 10:00", "weight": 3},
@@ -38,13 +38,13 @@ RUN: dict[str, Any] = {
         CASE,
         {
             "id": 2,
-            "question": "How do I request vacation?",
+            "context": "The question asked was: How do I request vacation?",
             "answer": "Ask your team lead.",
             "criteria": [{"id": 21, "content": "Submit the request in the HR tool", "weight": 1}],
         },
         {
             "id": 3,
-            "question": "Who approves overtime?",
+            "context": "The question asked was: Who approves overtime?",
             "answer": "Nobody really knows.",
             "criteria": [{"id": 31, "content": "The line manager approves it", "weight": 1}],
         },
@@ -72,7 +72,9 @@ class FakeJudge:
         self.by_criterion = by_criterion
         self.scale = scale
 
-    async def score(self, question: str, answer: str, criterion: Criterion) -> JudgeReply:
+    async def score(
+        self, answer: str, criterion: Criterion, context: str | None = None
+    ) -> JudgeReply:
         outcome = self.by_criterion[criterion.id]
         if isinstance(outcome, Exception):
             raise outcome

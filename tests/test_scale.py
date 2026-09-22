@@ -324,7 +324,9 @@ async def test_a_judge_that_declares_no_scale_is_a_broken_program_not_an_outage(
     arrives as the `AttributeError` it is, so the HTTP layer answers 500 rather than 503."""
 
     class ScalelessJudge:
-        async def score(self, question: str, answer: str, criterion: Criterion) -> JudgeReply:
+        async def score(
+            self, answer: str, criterion: Criterion, context: str | None = None
+        ) -> JudgeReply:
             return JudgeReply(score=2, reasoning="")
 
     # Cast because it is not a `Judge` and that is the whole test: what reaches

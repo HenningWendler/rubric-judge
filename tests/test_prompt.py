@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 from rubric_judge import DEFAULT_SCALE, Scale
-from rubric_judge.prompt import JUDGE_EN, WORKED_EXAMPLES_EN, judge_prompt
+from rubric_judge.prompt import JUDGE_EN, WORKED_EXAMPLES_EN, criterion_prompt, judge_prompt
 
 GOLDEN = Path(__file__).with_name("judge_prompt_en.txt")
 """The prompt as it was written by hand, before the scale generated it. A plain text file so
@@ -83,3 +83,25 @@ def test_a_scale_that_describes_no_levels_cannot_generate_a_prompt():
     grade with no meanings attached is guessing."""
     with pytest.raises(ValueError, match="describes no levels"):
         judge_prompt(Scale(maximum=2, presence_threshold=0.5, level_descriptions={}))
+
+
+def test_a_case_with_context_gets_three_labels():
+    """With context, the user message carries a `Context:` block ahead of the `Answer:` and
+    `Criterion:` blocks every reply gets — three labels, in that order."""
+    message = criterion_prompt(
+        "Email hr@example.com.",
+        "Report by email",
+        "The question asked was: How do I report sick leave?",
+    )
+    assert message == (
+        "Context:\nThe question asked was: How do I report sick leave?\n\n"
+        "Answer:\nEmail hr@example.com.\n\n"
+        "Criterion:\n- Report by email\n"
+    )
+
+
+def test_a_case_without_context_gets_two():
+    """Without context the `Context:` block is absent entirely, not present and blank — only
+    the `Answer:` and `Criterion:` labels remain."""
+    message = criterion_prompt("Email hr@example.com.", "Report by email")
+    assert message == "Answer:\nEmail hr@example.com.\n\nCriterion:\n- Report by email\n"

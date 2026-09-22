@@ -6,17 +6,21 @@ You changed a prompt, swapped a model or reworked your retrieval, and now you wa
 whether the assistant actually got better. Asking a model "is this a good answer" gives you
 a number nobody can argue with or act on. rubric-judge asks something narrower instead.
 
-For each question you already know what a good answer has to contain. Write that down as a
-**rubric**, a handful of weighted criteria, one checkable requirement each. Hand over the
-answer your system produced, and an LLM judge is asked **once per criterion** whether that
-one requirement is covered. Back comes a grade and the judge's own reasoning for every
+You already know what a good answer has to contain. Write that down as a **rubric**, a
+handful of weighted criteria, one checkable requirement each. Hand over the answer your
+system produced, and an LLM judge is asked **once per criterion** whether that one
+requirement is covered. Back comes a grade and the judge's own reasoning for every
 criterion, so a score is never a verdict you have to take on faith. You can read why it
 came out that way and disagree with a single line of it.
 
-One question, its answer and its rubric make a **case**, and a case is worth one normalized
-score between 0 and 1. A catalog of cases makes a **run**, which is worth a set of metrics
-over all of them. Cases carry **labels**, so one run can be sliced into the kinds of
-question you care about, and the two slices often tell you something the average hides.
+An answer and its rubric make a **case**, and a case is worth one normalized score between
+0 and 1. When the answer was produced in response to something, put that in the case's
+**context** and say what it is, for example `"The question asked was: ..."`. The judge reads
+the context as background and never scores it. Leave it out and the answer is judged on its
+own terms, which is what a summary, a report or a drafted email needs. A catalog of cases
+makes a **run**, which is worth a set of metrics over all of them. Cases carry **labels**,
+so one run can be sliced into the kinds of case you care about, and the two slices often
+tell you something the average hides.
 Two finished runs can be **compared**, which is how you find out whether a change helped,
 and which single requirement it quietly broke.
 
@@ -34,7 +38,7 @@ from rubric_judge import Case, Criterion, JudgeConfig, OpenAIJudge, evaluate_cas
 
 case = Case(
     id=1,
-    question="How do I report sick leave?",
+    context="The question asked was: How do I report sick leave?",
     answer=(
         "Call your line manager as early as you can on the first day you are ill, "
         "at the latest before 9:00. If you cannot reach them, leave a voicemail and "
@@ -65,6 +69,40 @@ case 1 scored 0.83
 The answer names the right person and the right deadline but never mentions the doctor's
 note, so it loses the weight-1 criterion and keeps 5 of the 6 reachable points. That is
 0.83.
+
+### The same program without a question
+
+Not every answer is a reply to something. A summary, a report or a drafted email is judged
+against its criteria and nothing else. Leave `context` out and the judge is shown the answer
+and the criterion alone, with no `Context:` heading above them inviting it to wonder what is
+missing.
+
+```python
+case = Case(
+    id=2,
+    answer=(
+        "The Cologne office has an underground garage with 40 spots. Employees reserve "
+        "a spot through the facility portal, at the latest on the day before. Visitors "
+        "are registered at reception."
+    ),
+    criteria=[
+        Criterion(id=21, content="Says what a parking spot costs per month.", weight=3),
+        Criterion(id=22, content="Says how an employee reserves a spot.", weight=2),
+        Criterion(id=23, content="Names the deadline for a reservation.", weight=1),
+    ],
+)
+```
+
+```
+case 2 scored 0.50
+  criterion 21: 0.0 of 2  missing
+  criterion 22: 2.0 of 2  covered
+  criterion 23: 2.0 of 2  covered
+```
+
+The passage says how to reserve and by when, but nothing about a monthly price, so it loses
+the heaviest criterion and keeps 3 of the 6 points. Everything else is the same program: the
+same judge, the same scale, the same result type.
 
 ### About the output in this manual
 
@@ -146,12 +184,13 @@ the exception, because `uvicorn --env-file .env` does it for you.
 
 The four steps below build on each other. One answer, then a whole catalog, then that same
 catalog sliced by label, then two catalogs compared. They all run against the same four
-questions an employee might ask a company handbook assistant.
+questions an employee might ask a company handbook assistant, each one carried in the case's
+`context`.
 
 <details>
 <summary>The catalog these examples use, in full</summary>
 
-Two answers exist for each question. The baseline is the assistant in production, the
+Two answers exist for each case. The baseline is the assistant in production, the
 candidate is a newer one under test. Only the answers differ between the two, which is what
 makes them comparable. The labels split the catalog into `procedure`, meaning how to do
 something step by step, and `policy`, meaning what you are entitled to and what the rules
@@ -163,7 +202,7 @@ from rubric_judge import Case, Criterion, Run
 BASELINE_CASES = [
     Case(
         id=1,
-        question="How do I report sick leave?",
+        context="The question asked was: How do I report sick leave?",
         answer=(
             "Call your line manager as early as you can on the first day you are ill, "
             "at the latest before 9:00. If you cannot reach them, leave a voicemail and "
@@ -178,7 +217,7 @@ BASELINE_CASES = [
     ),
     Case(
         id=2,
-        question="How do I get the expenses for a business trip reimbursed?",
+        context="The question asked was: How do I get the expenses for a business trip reimbursed?",
         answer=(
             "File the claim in the expense tool with your receipts attached. It has to "
             "be in within 30 days of the day the trip ended."
@@ -191,7 +230,7 @@ BASELINE_CASES = [
     ),
     Case(
         id=3,
-        question="How many vacation days do I get per year?",
+        context="The question asked was: How many vacation days do I get per year?",
         answer=(
             "You get a generous amount of paid vacation, and most colleagues take theirs "
             "in summer. Your remaining balance is shown in the HR tool."
@@ -205,7 +244,7 @@ BASELINE_CASES = [
     ),
     Case(
         id=4,
-        question="Can I work from home?",
+        context="The question asked was: Can I work from home?",
         answer=(
             "Yes, working from home is possible. Agree the days with your line manager "
             "beforehand."
@@ -291,7 +330,7 @@ config = JudgeConfig(
 criteria you passed in.
 
 ```python
-print(f"question: {case.question}")
+print(f"context: {case.context}")
 print(f"score:    {case_result.score:.4f}   scale: {case_result.scale}")
 print()
 for criterion, criterion_result in zip(case.criteria, case_result.criterion_results):
@@ -302,20 +341,20 @@ for criterion, criterion_result in zip(case.criteria, case_result.criterion_resu
 ```
 
 ```
-question: How do I report sick leave?
+context: The question asked was: How do I report sick leave?
 score:    0.8333   scale: 0..2 (covered from 0.5)
 
 [weight 3] Tells the employee to inform their line manager.
     grade 2 of 2, is_present=True
-    reasoning: The answer explicitly instructs the employee to call their line manager, which directly matches the criterion. The timing and backup contact methods are extra details, but the core requirement is clearly present.
+    reasoning: The answer explicitly instructs the employee to call their line manager, which directly matches the criterion about informing the line manager. The additional timing and fallback instructions do not change that the core requirement is clearly present.
 
 [weight 2] Names the deadline: before 9:00 on the first day of absence.
     grade 2 of 2, is_present=True
-    reasoning: The answer explicitly states “at the latest before 9:00” and also says this should be done “on the first day you are ill,” which matches the deadline criterion closely. The essential timing requirement is clearly present, so it is fully covered.
+    reasoning: The answer explicitly states the deadline “at the latest before 9:00” and also anchors it to “the first day you are ill,” which matches the criterion closely. The required deadline is clearly named, with no essential part missing.
 
 [weight 1] Says a doctor's note is needed from the fourth day of absence.
     grade 0 of 2, is_present=False
-    reasoning: The answer explains how to notify a line manager about sick leave and gives a deadline, but it never mentions any doctor's note or a requirement starting from the fourth day of absence. Since the criterion is entirely absent, it is not covered.
+    reasoning: The answer explains how to notify the line manager about sick leave and gives a deadline, but it does not mention any doctor's note or when one is required. The specific requirement about needing a doctor's note from the fourth day is absent.
 ```
 
 The reasoning costs nothing extra. The judge writes its argument first and its grade last,
@@ -574,7 +613,7 @@ curl -sS -X POST http://localhost:8001/evaluate \
   --data @- <<'JSON'
 {
   "id": 1,
-  "question": "How do I report sick leave?",
+  "context": "The question asked was: How do I report sick leave?",
   "answer": "Call your line manager as early as you can on the first day you are ill, at the latest before 9:00. If you cannot reach them, leave a voicemail and send a short message as well.",
   "criteria": [
     {"id": 11, "content": "Tells the employee to inform their line manager.", "weight": 3},
@@ -606,11 +645,41 @@ curl … | jq '{score, grades: [.criterion_results[] | {criterion_id, score, is_
 
 Same `0.8333` the library gave for this case.
 
+`context` is optional here exactly as it is in Python. Leave the field out and the answer is
+judged against its criteria alone.
+
+```bash
+curl -sS -X POST http://localhost:8001/evaluate \
+  -H 'Content-Type: application/json' \
+  --data @- <<'JSON'
+{
+  "id": 2,
+  "answer": "The Cologne office has an underground garage with 40 spots. Employees reserve a spot through the facility portal, at the latest on the day before. Visitors are registered at reception.",
+  "criteria": [
+    {"id": 21, "content": "Says what a parking spot costs per month.", "weight": 3},
+    {"id": 22, "content": "Says how an employee reserves a spot.", "weight": 2},
+    {"id": 23, "content": "Names the deadline for a reservation.", "weight": 1}
+  ]
+}
+JSON
+```
+
+```json
+{
+  "score": 0.5,
+  "grades": [
+    { "criterion_id": 21, "score": 0.0, "is_present": false },
+    { "criterion_id": 22, "score": 2.0, "is_present": true },
+    { "criterion_id": 23, "score": 2.0, "is_present": true }
+  ]
+}
+```
+
 <details>
 <summary>The full response body</summary>
 
 ```json
-{"case_id":1,"score":0.8333333333333333,"scale":{"maximum":2,"presence_threshold":0.5,"level_descriptions":{"2":"Fully covered. Every essential part of the criterion is clearly recognizable in the answer, even if the wording, terminology or structure differs.","1":"Partially covered. Some essential information is missing, but the basic idea is still derivable from the answer.","0":"Not covered. The criterion is absent, or the answer has no recognizable connection to it."}},"criterion_results":[{"criterion_id":11,"weight":3.0,"score":2.0,"is_present":true,"reasoning":"The answer explicitly tells the employee to call their line manager on the first day they are ill, which directly matches the criterion. The additional timing and fallback instructions do not change that the core requirement is clearly present."},{"criterion_id":12,"weight":2.0,"score":2.0,"is_present":true,"reasoning":"The answer explicitly states the deadline “at the latest before 9:00” and also ties it to “on the first day you are ill,” which matches the criterion’s required timing. The essential deadline information is clearly present, so this is fully covered."},{"criterion_id":13,"weight":1.0,"score":0.0,"is_present":false,"reasoning":"The answer explains how and when to notify the line manager about being ill, but it says nothing about a doctor's note or any requirement starting on the fourth day of absence. The criterion is therefore absent from the answer."}],"labels":["procedure"]}
+{"case_id":1,"score":0.8333333333333333,"scale":{"maximum":2,"presence_threshold":0.5,"level_descriptions":{"2":"Fully covered. Every essential part of the criterion is clearly recognizable in the answer, even if the wording, terminology or structure differs.","1":"Partially covered. Some essential information is missing, but the basic idea is still derivable from the answer.","0":"Not covered. The criterion is absent, or the answer has no recognizable connection to it."}},"criterion_results":[{"criterion_id":11,"weight":3.0,"score":2.0,"is_present":true,"reasoning":"The answer explicitly instructs the employee to call their line manager, which directly matches the criterion. The timing and fallback instructions add detail, but the core requirement to inform the line manager is clearly present."},{"criterion_id":12,"weight":2.0,"score":2.0,"is_present":true,"reasoning":"The answer explicitly states the deadline “at the latest before 9:00” and also anchors it to “on the first day you are ill,” which matches the criterion closely. The required deadline is clearly present, with no essential part missing."},{"criterion_id":13,"weight":1.0,"score":0.0,"is_present":false,"reasoning":"The answer explains how to notify the line manager about sick leave and gives a deadline, but it does not mention any doctor's note requirement. The specific condition that a doctor's note is needed from the fourth day of absence is absent, so the criterion is not covered."}],"labels":["procedure"]}
 ```
 
 The `scale` travels with the result, which is what lets a stored document still say what its
@@ -634,7 +703,7 @@ curl -sS -X POST http://localhost:8001/evaluate/run \
   "cases": [
     {
       "id": 1,
-      "question": "How do I report sick leave?",
+      "context": "The question asked was: How do I report sick leave?",
       "answer": "Call your line manager as early as you can on the first day you are ill, at the latest before 9:00. If you cannot reach them, leave a voicemail and send a short message as well.",
       "criteria": [
         {"id": 11, "content": "Tells the employee to inform their line manager.", "weight": 3},
@@ -645,7 +714,7 @@ curl -sS -X POST http://localhost:8001/evaluate/run \
     },
     {
       "id": 2,
-      "question": "How do I get the expenses for a business trip reimbursed?",
+      "context": "The question asked was: How do I get the expenses for a business trip reimbursed?",
       "answer": "File the claim in the expense tool with your receipts attached. It has to be in within 30 days of the day the trip ended.",
       "criteria": [
         {"id": 21, "content": "Says the claim is filed in the expense tool.", "weight": 3},
@@ -655,7 +724,7 @@ curl -sS -X POST http://localhost:8001/evaluate/run \
     },
     {
       "id": 3,
-      "question": "How many vacation days do I get per year?",
+      "context": "The question asked was: How many vacation days do I get per year?",
       "answer": "You get a generous amount of paid vacation, and most colleagues take theirs in summer. Your remaining balance is shown in the HR tool.",
       "criteria": [
         {"id": 31, "content": "Gives the number of vacation days per year.", "weight": 3},
@@ -666,7 +735,7 @@ curl -sS -X POST http://localhost:8001/evaluate/run \
     },
     {
       "id": 4,
-      "question": "Can I work from home?",
+      "context": "The question asked was: Can I work from home?",
       "answer": "Yes, working from home is possible. Agree the days with your line manager beforehand.",
       "criteria": [
         {"id": 41, "content": "Gives the maximum number of home office days per week.", "weight": 2},
@@ -821,9 +890,10 @@ print(judge_prompt(DEFAULT_SCALE))
 ```
 You are a careful examiner.
 
-You will be given a question, an answer produced by some system, and a single
-criterion. Your task is to decide to what degree the criterion is covered by the
-answer.
+You will be given an answer produced by some system and a single criterion, and
+sometimes the context the answer was produced in. Your task is to decide to what
+degree the criterion is covered by the answer. When there is no context, judge the
+answer on its own terms rather than assuming something was left out.
 
 Use this 0-2 scale:
 
@@ -932,9 +1002,15 @@ The `Judge` protocol is one attribute and one method. No base class, no registra
 class MyJudge:
     scale: Scale
 
-    async def score(self, question: str, answer: str, criterion: Criterion) -> JudgeReply:
+    async def score(
+        self, answer: str, criterion: Criterion, context: str | None = None
+    ) -> JudgeReply:
         ...
 ```
+
+`context` is `None` whenever the case carries none, which is every answer that stands on its
+own. Read it as background and never score it, and judge the answer on its own terms when it
+is absent.
 
 Return a `JudgeReply` or raise. `JudgeUnavailableError` means the endpoint could not answer
 and invalidates the run. Anything else is read as a bug in the program.
@@ -964,7 +1040,9 @@ class RecordedJudge:
         """Record one grade per criterion id, on `DEFAULT_SCALE`."""
         self.grade_per_criterion_id = grade_per_criterion_id
 
-    async def score(self, question: str, answer: str, criterion: Criterion) -> JudgeReply:
+    async def score(
+        self, answer: str, criterion: Criterion, context: str | None = None
+    ) -> JudgeReply:
         """Hand back the recorded grade, or fail loudly when the rubric outgrew the table."""
         if criterion.id not in self.grade_per_criterion_id:
             raise LookupError(f"no grade recorded for criterion {criterion.id}")
@@ -1012,7 +1090,8 @@ endpoint.
 
 ### The scale
 
-The judge sees the question, the answer and **one** criterion, and returns one integer.
+The judge sees the answer, **one** criterion and the context if the case has one, and
+returns one integer.
 Out of the box that is `DEFAULT_SCALE`, which runs from 0 to 2.
 
 | Grade | Meaning |

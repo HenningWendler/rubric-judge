@@ -39,7 +39,6 @@ def case_with(case_id: int, labels: list[str]) -> Case:
     one and none of them cares about the rubric."""
     return Case(
         id=case_id,
-        question="q",
         answer="a",
         criteria=[Criterion(id=case_id, content="x", weight=1)],
         labels=labels,
@@ -398,15 +397,15 @@ async def test_a_label_never_reaches_the_judge():
     seen = []
 
     class RecordingJudge(FakeJudge):
-        async def score(self, question, answer, criterion):
-            seen.append((question, answer, criterion.content))
-            return await super().score(question, answer, criterion)
+        async def score(self, answer, criterion, context=None):
+            seen.append((answer, criterion.content, context))
+            return await super().score(answer, criterion, context)
 
     await evaluate_run(
         RecordingJudge({1: 2}), Run(cases=[case_with(1, ["secret_label"])])
     )
 
-    assert seen == [("q", "a", "x")]
+    assert seen == [("a", "x", None)]
 
 
 async def test_labelling_a_case_cannot_move_its_score():

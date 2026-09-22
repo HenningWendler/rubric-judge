@@ -173,14 +173,14 @@ CRITERION = Criterion(id=1, content="Send an email", weight=1)
 
 async def test_scores_a_criterion():
     judge, fake = _judge(['Covered literally.\n{"score": 2}'])
-    judge_reply = await judge.score("How?", "Send an email.", CRITERION)
+    judge_reply = await judge.score("Send an email.", CRITERION)
     assert judge_reply.score == 2
     assert len(fake.calls) == 1
 
 
 async def test_retries_with_the_concrete_error_appended():
     judge, fake = _judge(["no json at all", 'Now properly.\n{"score": 1}'])
-    judge_reply = await judge.score("How?", "Vaguely.", CRITERION)
+    judge_reply = await judge.score("Vaguely.", CRITERION)
     assert judge_reply.score == 1
     assert len(fake.calls) == 2
     assert fake.calls[1][-2] == {"role": "assistant", "content": "no json at all"}
@@ -193,7 +193,7 @@ async def test_gives_up_after_max_attempts():
     apart from a bug and answer 503."""
     judge, fake = _judge(["nope"] * 3, max_attempts=3)
     with pytest.raises(JudgeUnavailableError, match="no usable answer in 3 attempts"):
-        await judge.score("How?", "Vaguely.", CRITERION)
+        await judge.score("Vaguely.", CRITERION)
     assert len(fake.calls) == 3
 
 
@@ -323,7 +323,7 @@ def test_a_score_object_echoed_from_the_answer_wins_because_the_last_one_counts(
 async def test_a_single_attempt_budget_asks_exactly_once():
     judge, fake = _judge(["no json at all"], max_attempts=1)
     with pytest.raises(JudgeUnavailableError, match="no usable answer in 1 attempts"):
-        await judge.score("How?", "Vaguely.", CRITERION)
+        await judge.score("Vaguely.", CRITERION)
     assert len(fake.calls) == 1
 
 
@@ -331,7 +331,7 @@ async def test_replays_the_out_of_range_complaint_so_the_judge_can_correct_itsel
     """The other self-healing branch: the reply parsed fine but the grade was off the scale."""
     judge, fake = _judge(['Reasoning.\n{"score": 7}', 'Corrected.\n{"score": 2}'])
 
-    judge_reply = await judge.score("How?", "Send an email.", CRITERION)
+    judge_reply = await judge.score("Send an email.", CRITERION)
 
     assert judge_reply.score == 2
     assert "not on the scale" in fake.calls[1][-1]["content"]
@@ -342,7 +342,7 @@ async def test_every_attempt_keeps_the_whole_correction_transcript():
     full history to stop repeating a mistake it already made."""
     judge, fake = _judge(["nope", 'Reasoning.\n{"score": 9}', 'Fine.\n{"score": 1}'])
 
-    judge_reply = await judge.score("How?", "Vaguely.", CRITERION)
+    judge_reply = await judge.score("Vaguely.", CRITERION)
 
     assert judge_reply.score == 1
     assert [message["role"] for message in fake.calls[2]] == [
@@ -359,7 +359,7 @@ async def test_a_reply_without_content_names_the_finish_reason_instead_of_blamin
     judge, fake = _judge([None, 'Reasoning.\n{"score": 0}'])
 
     with pytest.raises(JudgeUnavailableError, match="no content, finish_reason 'stop'"):
-        await judge.score("How?", "Vaguely.", CRITERION)
+        await judge.score("Vaguely.", CRITERION)
 
     assert len(fake.calls) == 1  # not reprompted: no wording of the question would fix it
 
@@ -370,7 +370,7 @@ async def test_a_truncated_reply_says_so():
     judge = _judge_answering(_completion(None, finish_reason="length"))
 
     with pytest.raises(JudgeUnavailableError, match="finish_reason 'length'"):
-        await judge.score("How?", "Vaguely.", CRITERION)
+        await judge.score("Vaguely.", CRITERION)
 
 
 async def test_a_reply_without_a_single_choice_is_the_endpoints_fault_not_a_bug():
@@ -379,7 +379,7 @@ async def test_a_reply_without_a_single_choice_is_the_endpoints_fault_not_a_bug(
     judge = _judge_answering(type("Response", (), {"choices": []}))
 
     with pytest.raises(JudgeUnavailableError, match="without a single choice"):
-        await judge.score("How?", "Vaguely.", CRITERION)
+        await judge.score("Vaguely.", CRITERION)
 
 
 async def test_a_rate_limit_is_waited_out_rather_than_thrown_away():
@@ -388,7 +388,7 @@ async def test_a_rate_limit_is_waited_out_rather_than_thrown_away():
     criterion is simply asked again."""
     judge, fake = _judge([rate_limited(), 'Covered.\n{"score": 2}'], max_attempts=3)
 
-    judge_reply = await judge.score("How?", "Send an email.", CRITERION)
+    judge_reply = await judge.score("Send an email.", CRITERION)
 
     assert judge_reply.score == 2
     assert len(fake.calls) == 2
@@ -407,7 +407,7 @@ async def test_a_timeout_and_a_broken_gateway_are_retried_too():
         max_attempts=3,
     )
 
-    assert (await judge.score("How?", "Yes.", CRITERION)).score == 2
+    assert (await judge.score("Yes.", CRITERION)).score == 2
     assert len(fake.calls) == 3
 
 
@@ -427,7 +427,7 @@ async def test_an_endpoint_that_stays_down_invalidates_the_run():
     judge, fake = _judge([rate_limited("slow down")] * 3, max_attempts=3)
 
     with pytest.raises(JudgeUnavailableError, match="slow down") as given_up:
-        await judge.score("How?", "Vaguely.", CRITERION)
+        await judge.score("Vaguely.", CRITERION)
 
     assert len(fake.calls) == 3
     assert isinstance(given_up.value.__cause__, RateLimitError)
@@ -439,7 +439,7 @@ async def test_a_failure_without_a_message_still_names_its_cause():
     judge, _ = _judge([_ConnectionErrorWithoutMessage(request=_REQUEST)], max_attempts=1)
 
     with pytest.raises(JudgeUnavailableError, match="_ConnectionErrorWithoutMessage"):
-        await judge.score("How?", "Vaguely.", CRITERION)
+        await judge.score("Vaguely.", CRITERION)
 
 
 class _ConnectionErrorWithoutMessage(APIConnectionError):
@@ -462,7 +462,7 @@ async def test_an_unretryable_endpoint_error_is_not_asked_again():
     judge, fake = _judge([AuthenticationFailed("invalid api key")], max_attempts=3)
 
     with pytest.raises(AuthenticationFailed, match="invalid api key"):
-        await judge.score("How?", "Vaguely.", CRITERION)
+        await judge.score("Vaguely.", CRITERION)
 
     assert len(fake.calls) == 1
 
@@ -475,7 +475,7 @@ async def test_a_transport_failure_and_an_unusable_reply_spend_the_same_budget()
         [rate_limited(), "I think it is fine.", 'Covered.\n{"score": 2}'], max_attempts=3
     )
 
-    judge_reply = await judge.score("How?", "Vaguely.", CRITERION)
+    judge_reply = await judge.score("Vaguely.", CRITERION)
 
     assert judge_reply.score == 2
     assert len(fake.calls) == 3
@@ -489,7 +489,7 @@ async def test_the_shared_budget_runs_out_however_the_attempts_were_spent():
     )
 
     with pytest.raises(JudgeUnavailableError, match="no usable answer in 3 attempts"):
-        await judge.score("How?", "Vaguely.", CRITERION)
+        await judge.score("Vaguely.", CRITERION)
 
     assert len(fake.calls) == 3
 
@@ -500,7 +500,7 @@ async def test_the_last_attempt_names_whichever_failure_ended_it():
     judge, _ = _judge(["I think it is fine.", "Still no JSON.", rate_limited()], max_attempts=3)
 
     with pytest.raises(JudgeUnavailableError, match="3 attempts: rate limited") as given_up:
-        await judge.score("How?", "Vaguely.", CRITERION)
+        await judge.score("Vaguely.", CRITERION)
 
     assert isinstance(given_up.value.__cause__, RateLimitError)
 
@@ -515,7 +515,7 @@ async def test_a_reply_without_content_ends_the_run_even_with_attempts_left():
     )
 
     with pytest.raises(JudgeUnavailableError, match="no content, finish_reason 'length'"):
-        await judge.score("How?", "Vaguely.", CRITERION)
+        await judge.score("Vaguely.", CRITERION)
 
     assert len(fake.calls) == 2  # the third attempt was never paid for
 
@@ -528,7 +528,7 @@ async def test_a_response_without_choices_ends_the_run_even_with_attempts_left()
     )
 
     with pytest.raises(JudgeUnavailableError, match="without a single choice"):
-        await judge.score("How?", "Vaguely.", CRITERION)
+        await judge.score("Vaguely.", CRITERION)
 
     assert len(fake.calls) == 2
 
@@ -570,7 +570,7 @@ async def test_the_judge_is_asked_with_the_configured_sampling_settings():
         ),
         client=_client_answering(type("C", (), {"create": staticmethod(create)})),
     )
-    await judge.score("How?", "Send an email.", CRITERION)
+    await judge.score("Send an email.", CRITERION)
 
     assert sent["temperature"] == 0.0
     assert sent["max_completion_tokens"] == 64
@@ -620,7 +620,7 @@ async def test_never_puts_more_calls_in_flight_than_configured():
     asked at once must not become ten simultaneous connections."""
     judge, fake = _judge(['Covered.\n{"score": 2}'] * 10, max_concurrent=2)
 
-    await asyncio.gather(*(judge.score("How?", "Yes.", CRITERION) for _ in range(10)))
+    await asyncio.gather(*(judge.score("Yes.", CRITERION) for _ in range(10)))
 
     assert fake.peak_in_flight == 2
     assert len(fake.calls) == 10
@@ -631,7 +631,7 @@ async def test_throttling_does_not_serialize_the_calls():
     would be judged as slowly as a for-loop."""
     judge, fake = _judge(['Covered.\n{"score": 2}'] * 8, max_concurrent=4)
 
-    await asyncio.gather(*(judge.score("How?", "Yes.", CRITERION) for _ in range(8)))
+    await asyncio.gather(*(judge.score("Yes.", CRITERION) for _ in range(8)))
 
     assert fake.peak_in_flight == 4
 
@@ -641,7 +641,7 @@ async def test_a_single_slot_still_lets_a_criterion_retry():
     a judge limited to one call would wait for a slot it is holding itself — a deadlock."""
     judge, fake = _judge(["no json at all", 'Now properly.\n{"score": 1}'], max_concurrent=1)
 
-    judge_reply = await asyncio.wait_for(judge.score("How?", "Vaguely.", CRITERION), timeout=5)
+    judge_reply = await asyncio.wait_for(judge.score("Vaguely.", CRITERION), timeout=5)
 
     assert judge_reply.score == 1
     assert fake.peak_in_flight == 1
@@ -654,7 +654,7 @@ async def test_a_slot_is_released_even_when_the_call_fails():
         [rate_limited(), 'Covered.\n{"score": 2}'], max_concurrent=1, max_attempts=2
     )
 
-    judge_reply = await asyncio.wait_for(judge.score("How?", "Yes.", CRITERION), timeout=5)
+    judge_reply = await asyncio.wait_for(judge.score("Yes.", CRITERION), timeout=5)
 
     assert judge_reply.score == 2
     assert fake.peak_in_flight == 1
@@ -691,7 +691,7 @@ def test_a_judge_can_be_reused_from_a_second_event_loop():
     judge, fake = _judge(['Covered.\n{"score": 2}'] * 6, max_concurrent=2)
 
     async def score_three_at_once() -> list[JudgeReply]:
-        return await asyncio.gather(*(judge.score("How?", "Yes.", CRITERION) for _ in range(3)))
+        return await asyncio.gather(*(judge.score("Yes.", CRITERION) for _ in range(3)))
 
     judge_replies = asyncio.run(score_three_at_once()) + asyncio.run(score_three_at_once())
 
@@ -708,7 +708,7 @@ def test_the_throttle_of_a_finished_loop_is_not_kept_forever():
     judge, _ = _judge(['Covered.\n{"score": 2}'] * 9, max_concurrent=2)
 
     async def score_three_at_once() -> list[JudgeReply]:
-        return await asyncio.gather(*(judge.score("How?", "Yes.", CRITERION) for _ in range(3)))
+        return await asyncio.gather(*(judge.score("Yes.", CRITERION) for _ in range(3)))
 
     for _ in range(3):
         asyncio.run(score_three_at_once())
@@ -729,7 +729,7 @@ async def test_the_limit_holds_across_several_cases_judged_at_once():
         Case.model_validate(
             {
                 "id": first,
-                "question": "How do I report sick leave?",
+                "context": "The question asked was: How do I report sick leave?",
                 "answer": "Email hr@example.com before 10:00.",
                 "criteria": [
                     {"id": number, "content": f"criterion {number}", "weight": 1}
@@ -752,7 +752,7 @@ def _run_of(case_count: int, criteria_per_case: int) -> Run:
             "cases": [
                 {
                     "id": case_number,
-                    "question": "How do I report sick leave?",
+                    "context": "The question asked was: How do I report sick leave?",
                     "answer": "Email hr@example.com before 10:00.",
                     "criteria": [
                         {"id": number, "content": f"criterion {number}", "weight": 1}
@@ -811,7 +811,7 @@ async def test_the_criterion_weight_never_reaches_the_judge():
     judge, fake = _judge(['Covered.\n{"score": 2}'])
     weighted = Criterion(id=1, content="Send an email", weight=7)
 
-    await judge.score("How?", "Send an email.", weighted)
+    await judge.score("Send an email.", weighted)
 
     sent = " ".join(message["content"] for message in fake.calls[0])
     assert "Send an email" in sent
@@ -825,7 +825,7 @@ async def test_a_custom_prompt_replaces_the_system_message():
     fake = FakeCompletions(['Covered.\n{"score": 2}'])
     judge = OpenAIJudge(config, system_prompt="Judge in Klingon.", client=_client_answering(fake))
 
-    await judge.score("How?", "Send an email.", CRITERION)
+    await judge.score("Send an email.", CRITERION)
 
     system, user = fake.calls[0]
     assert system == {"role": "system", "content": "Judge in Klingon."}
@@ -965,7 +965,7 @@ async def test_the_judge_scores_and_self_heals_on_its_own_scale():
         config, system_prompt="Grade 0 to 10.", scale=TEN_POINT, client=_client_answering(fake)
     )
 
-    judge_reply = await judge.score("How?", "Send an email.", CRITERION)
+    judge_reply = await judge.score("Send an email.", CRITERION)
 
     assert judge_reply.score == 8
     assert "0, 1, 2, 3, 4, 5, 6, 7, 8, 9 or 10" in fake.calls[1][-1]["content"]

@@ -35,8 +35,8 @@ WORKED_EXAMPLES_EN = """\
 ---------------------------
 Example:
 
-Question:
-How do I request vacation?
+Context:
+The question asked was: How do I request vacation?
 
 Answer:
 Send an email to hr@example.com and state the reason for your absence.
@@ -53,8 +53,8 @@ deviation or omission.
 ---------------------------
 Example:
 
-Question:
-How do I request vacation?
+Context:
+The question asked was: How do I request vacation?
 
 Answer:
 Send an email to hr@example.com and state the reason for your absence.
@@ -71,8 +71,8 @@ Nothing in the answer lets the reader derive that requirement.
 ---------------------------
 Example:
 
-Question:
-How do I report sick leave?
+Context:
+The question asked was: How do I report sick leave?
 
 Answer:
 If you are ill, inform your line manager without delay about your incapacity to
@@ -85,14 +85,33 @@ The answer does cover the act of reporting the absence, which is part of the
 criterion. However, both the deadline (10:00) and the recipient (HR) are absent,
 so the essential specifics are missing while the basic idea remains derivable.
 {"score": 1}
-"""
-"""Three fully worked judgements, appended to the generated instructions by `JUDGE_EN`.
 
-Separate from the generator because they cannot come from a scale: each one is a real
-question, answer and criterion with a real argument, and each closes on a grade of 0, 1 or 2.
-They therefore belong to `DEFAULT_SCALE` and to no other — a judge on a ten-point scale shown
-these would be shown three wrong answers, which is why `judge_prompt` leaves them out unless
-they are handed in."""
+---------------------------
+Example:
+
+Answer:
+The Cologne office has an underground garage. Spots are reserved through the
+facility portal, at the latest on the day before.
+
+Criterion:
+- Names how a parking spot is reserved
+
+The answer names the facility portal as the place a spot is reserved through,
+which is exactly what the criterion asks for. That there is no context here
+changes nothing: the requirement is met by the answer alone.
+{"score": 2}
+"""
+"""Four fully worked judgements, appended to the generated instructions by `JUDGE_EN`.
+
+Separate from the generator because they cannot come from a scale: each one is a real answer
+and criterion with a real argument, and each closes on a grade of 0, 1 or 2. They therefore
+belong to `DEFAULT_SCALE` and to no other — a judge on a ten-point scale shown these would be
+shown four wrong answers, which is why `judge_prompt` leaves them out unless they are handed
+in.
+
+The fourth carries no context. Its job is the shape rather than the scale, which the first
+three already teach, so its grade is the unambiguous one: a judge that has only ever seen
+three labels would otherwise meet two for the first time in production."""
 
 
 def judge_prompt(scale: Scale, examples: str = "") -> str:
@@ -153,9 +172,10 @@ def _level_lines(scale: Scale) -> str:
 _INSTRUCTIONS = """\
 You are a careful examiner.
 
-You will be given a question, an answer produced by some system, and a single
-criterion. Your task is to decide to what degree the criterion is covered by the
-answer.
+You will be given an answer produced by some system and a single criterion, and
+sometimes the context the answer was produced in. Your task is to decide to what
+degree the criterion is covered by the answer. When there is no context, judge the
+answer on its own terms rather than assuming something was left out.
 
 Use this 0-{maximum} scale:
 
@@ -270,26 +290,35 @@ def malformed_json_hint(error: Exception, scale: Scale) -> str:
     )
 
 
-def criterion_prompt(question: str, answer: str, criterion: str) -> str:
-    """Build the user message: what was asked, what came back, one criterion to judge.
+def criterion_prompt(answer: str, criterion: str, context: str | None = None) -> str:
+    """Build the user message: what came back, one criterion to judge, and what framed it.
 
     Args:
-        question: Context only — the system prompt tells the model not to score it.
         answer: The answer under test, inserted unmodified.
         criterion: The text of a single criterion. Its weight is deliberately *not* passed:
             a judge that knew how much a criterion counts could let that leak into the score.
+        context: What the answer was produced in response to, in the caller's own words, or
+            `None` for an answer that stands on its own. Background only — the system prompt
+            tells the model not to score it.
 
     Returns:
-        The complete user message, never empty — the three labels are always there, even
-        for an empty `answer`. One criterion per call is the whole design; a model asked
-        about five at once trades attention between them.
+        The complete user message, never empty. The `Answer:` and `Criterion:` labels are
+        always there, even for an empty `answer`; the `Context:` block is absent entirely
+        when there is no context, rather than present and blank. One criterion per call is
+        the whole design; a model asked about five at once trades attention between them.
 
     Example:
-        print(criterion_prompt("How do I report sick leave?",
-                               "Email hr@example.com.",
-                               "Report by email"))
-        # Question:
-        # How do I report sick leave?
+        print(criterion_prompt("Email hr@example.com.", "Report by email"))
+        # Answer:
+        # Email hr@example.com.
+        #
+        # Criterion:
+        # - Report by email
+
+        print(criterion_prompt("Email hr@example.com.", "Report by email",
+                               "The question asked was: How do I report sick leave?"))
+        # Context:
+        # The question asked was: How do I report sick leave?
         #
         # Answer:
         # Email hr@example.com.
@@ -297,4 +326,5 @@ def criterion_prompt(question: str, answer: str, criterion: str) -> str:
         # Criterion:
         # - Report by email
     """
-    return f"Question:\n{question}\n\nAnswer:\n{answer}\n\nCriterion:\n- {criterion}\n"
+    judged = f"Answer:\n{answer}\n\nCriterion:\n- {criterion}\n"
+    return judged if context is None else f"Context:\n{context}\n\n{judged}"

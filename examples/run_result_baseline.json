@@ -76,21 +76,21 @@
           "weight": 3.0,
           "score": 2.0,
           "is_present": true,
-          "reasoning": "The answer explicitly tells the employee to call their line manager as early as possible on the first day they are ill. That directly matches the criterion about informing their line manager, so it is fully covered."
+          "reasoning": "The answer explicitly instructs the employee to call their line manager, which directly matches the criterion about informing the line manager. The additional timing and fallback instructions do not change that the core requirement is clearly present."
         },
         {
           "criterion_id": 12,
           "weight": 2.0,
           "score": 2.0,
           "is_present": true,
-          "reasoning": "The answer explicitly states the deadline as “at the latest before 9:00” and also ties it to “the first day you are ill,” which matches the criterion’s required timing. The essential deadline information is clearly present, even if phrased slightly differently."
+          "reasoning": "The answer explicitly states the deadline “at the latest before 9:00” and also anchors it to “the first day you are ill,” which matches the criterion closely. The required deadline is clearly named, with no essential part missing."
         },
         {
           "criterion_id": 13,
           "weight": 1.0,
           "score": 0.0,
           "is_present": false,
-          "reasoning": "The answer explains how to notify the line manager and what to do if they cannot be reached, but it says nothing about a doctor's note or any requirement starting on the fourth day of absence. The criterion is therefore absent from the answer."
+          "reasoning": "The answer explains how to notify the line manager about sick leave and gives a deadline, but it does not mention any doctor's note or when one is required. The specific requirement about needing a doctor's note from the fourth day is absent."
         }
       ],
       "labels": [
@@ -115,14 +115,14 @@
           "weight": 3.0,
           "score": 2.0,
           "is_present": true,
-          "reasoning": "The answer explicitly says to “File the claim in the expense tool,” which directly matches the criterion. The required detail is clearly present with no meaningful omission."
+          "reasoning": "The answer explicitly says to “file the claim in the expense tool,” which directly matches the criterion. The wording is slightly different, but the required information is clearly present."
         },
         {
           "criterion_id": 22,
           "weight": 1.0,
           "score": 2.0,
           "is_present": true,
-          "reasoning": "The answer explicitly states that the claim must be filed within 30 days of the day the trip ended. This matches the criterion directly and includes the deadline wording clearly."
+          "reasoning": "The answer explicitly states that the claim has to be submitted within 30 days of the day the trip ended. That directly matches the criterion’s deadline requirement, with no missing essential part."
         }
       ],
       "labels": [
@@ -147,21 +147,21 @@
           "weight": 3.0,
           "score": 0.0,
           "is_present": false,
-          "reasoning": "The answer mentions paid vacation and a remaining balance in the HR tool, but it does not state any actual number of vacation days per year. The essential requirement of giving the number is missing, so this is not covered."
+          "reasoning": "The answer mentions paid vacation and where to check the remaining balance, but it never states an actual number of vacation days per year. The essential quantity requested by the criterion is missing, so only the general topic is covered."
         },
         {
           "criterion_id": 32,
           "weight": 2.0,
           "score": 0.0,
           "is_present": false,
-          "reasoning": "The answer talks about vacation in general and mentions a remaining balance in the HR tool, but it does not say anything about unused days carrying over or the limit of up to 5 days. The specific carryover rule is absent, so the criterion is not covered."
+          "reasoning": "The answer talks about paid vacation in general and mentions the HR tool, but it does not say anything about unused days carrying over. The specific limit of up to 5 days is completely missing, so the criterion is not covered."
         },
         {
           "criterion_id": 33,
           "weight": 1.0,
           "score": 0.0,
           "is_present": false,
-          "reasoning": "The answer talks about vacation in general and mentions a remaining balance in the HR tool, but it does not say anything about carried-over days or an end-of-March expiration. The specific criterion is absent, so it is not covered."
+          "reasoning": "The answer talks about paid vacation, colleagues taking it in summer, and the remaining balance in the HR tool, but it never mentions carried-over days or any expiration date. The specific requirement about expiry at the end of March is absent, so the criterion is not covered."
         }
       ],
       "labels": [
@@ -186,14 +186,14 @@
           "weight": 2.0,
           "score": 0.0,
           "is_present": false,
-          "reasoning": "The answer says that working from home is possible and that the days must be agreed with the line manager, but it does not state any maximum number of home office days per week. The specific limit requested by the criterion is missing, so only the general topic is covered."
+          "reasoning": "The answer says that working from home is possible and that the days should be agreed with the line manager, but it does not state any maximum number of home office days per week. The key quantitative limit is missing, so the criterion is only indirectly related at best."
         },
         {
           "criterion_id": 42,
           "weight": 1.0,
           "score": 2.0,
           "is_present": true,
-          "reasoning": "The answer explicitly says to agree the days with your line manager beforehand, which matches the criterion directly. No essential part of the criterion is missing."
+          "reasoning": "The answer explicitly says to agree the days with your line manager beforehand, which matches the criterion directly. No essential part of the requirement is missing."
         }
       ],
       "labels": [

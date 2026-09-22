@@ -59,7 +59,7 @@ class JudgeUnavailableError(Exception):
         class MyJudge:
             scale = DEFAULT_SCALE
 
-            async def score(self, question, answer, criterion) -> JudgeReply:
+            async def score(self, answer, criterion, context=None) -> JudgeReply:
                 raise JudgeUnavailableError("my quota is used up")
     """
 
@@ -122,7 +122,7 @@ class Judge(Protocol):
         class AlwaysFullMarks:
             scale = DEFAULT_SCALE
 
-            async def score(self, question, answer, criterion) -> JudgeReply:
+            async def score(self, answer, criterion, context=None) -> JudgeReply:
                 return JudgeReply(score=2, reasoning="every criterion is covered")
 
         case_result = await evaluate_case(AlwaysFullMarks(), case)
@@ -135,16 +135,20 @@ class Judge(Protocol):
     maximum and `is_present` uses its threshold. A judge without it is a broken program, and
     the resulting `AttributeError` reaches the caller like any other bug."""
 
-    async def score(self, question: str, answer: str, criterion: Criterion) -> JudgeReply:
+    async def score(
+        self, answer: str, criterion: Criterion, context: str | None = None
+    ) -> JudgeReply:
         """Decide how well one criterion is covered by one answer.
 
         Args:
-            question: What was asked. Context only — an implementation must not score it.
             answer: The answer under test, exactly as the caller supplied it. May be empty:
                 a system that returned nothing is a valid case that scores 0.
             criterion: The single requirement to judge. Only `content` is meant to reach the
                 model; `weight` belongs to the scoring layer, and a judge that saw it could
                 let importance leak into the score.
+            context: What the answer was produced in response to, in the caller's own words,
+                or `None` when it stands on its own. Background only — an implementation must
+                not score it, and must judge the answer on its own terms when it is absent.
 
         Returns:
             A `JudgeReply` whose `score` is an integer in 0..`scale.maximum`. An implementation
@@ -162,9 +166,9 @@ class Judge(Protocol):
 
         Example:
             judge_reply = await AlwaysFullMarks().score(   # the class docstring's judge
-                "How do I report sick leave?",
                 "Email hr@example.com before 10:00.",
                 Criterion(id=1, content="Report by email before 10:00", weight=3),
+                "The question asked was: How do I report sick leave?",
             )
             judge_reply.score   # 2
         """
@@ -519,7 +523,9 @@ class OpenAIJudge:
             loop: slots for loop, slots in self._slots_per_loop.items() if not loop.is_closed()
         }
 
-    async def score(self, question: str, answer: str, criterion: Criterion) -> JudgeReply:
+    async def score(
+        self, answer: str, criterion: Criterion, context: str | None = None
+    ) -> JudgeReply:
         """Ask the model about one criterion until it answers usably, or give the run up.
 
         Two kinds of failure share the one attempt budget, because each of them costs a call.
@@ -529,9 +535,11 @@ class OpenAIJudge:
         limit must not throw away a whole catalog's worth of judging.
 
         Args:
-            question: Context for the model; never scored.
             answer: The answer under test.
             criterion: The single requirement to judge — only its `content` is sent.
+            context: What the answer was produced in response to, or `None`. Sent to the
+                model as background and never scored; when it is `None` the user message
+                carries no context block at all.
 
         Returns:
             A `JudgeReply` with a validated integer score and the model's argument for it.
@@ -568,14 +576,14 @@ class OpenAIJudge:
                 ),
             )
             judge_reply = await judge.score(
-                "How do I report sick leave?",
                 "Email hr@example.com before 10:00.",
                 Criterion(id=1, content="Report by email before 10:00", weight=3),
+                "The question asked was: How do I report sick leave?",
             )
             judge_reply.score       # 2
             judge_reply.reasoning   # "It says so."
         """
-        conversation = self._opening_messages(question, answer, criterion)
+        conversation = self._opening_messages(answer, criterion, context)
         last_failure: Exception | None = None
         for attempt in range(self.config.max_attempts):
             try:
@@ -614,7 +622,7 @@ class OpenAIJudge:
         return _FIRST_BACKOFF_SECONDS * 2.0**failed_attempt
 
     def _opening_messages(
-        self, question: str, answer: str, criterion: Criterion
+        self, answer: str, criterion: Criterion, context: str | None
     ) -> list[ChatMessage]:
         """The conversation every attempt starts from.
 
@@ -623,7 +631,7 @@ class OpenAIJudge:
         """
         return [
             {"role": "system", "content": self.system_prompt},
-            {"role": "user", "content": criterion_prompt(question, answer, criterion.content)},
+            {"role": "user", "content": criterion_prompt(answer, criterion.content, context)},
         ]
 
     async def _ask(self, conversation: list[ChatMessage]) -> str:
