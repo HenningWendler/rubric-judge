@@ -76,21 +76,21 @@
           "weight": 3.0,
           "score": 2.0,
           "is_present": true,
-          "reasoning": "The answer explicitly tells the employee to call their line manager, which directly matches the criterion about informing the line manager. The wording differs slightly, but the essential instruction is clearly present."
+          "reasoning": "The answer explicitly instructs the employee to call their line manager, which directly matches the criterion about informing the line manager. The wording differs slightly, but the essential requirement is clearly present."
         },
         {
           "criterion_id": 12,
           "weight": 2.0,
           "score": 2.0,
           "is_present": true,
-          "reasoning": "The answer explicitly states “before 9:00 on the first day you are ill,” which matches the criterion’s deadline requirement. The essential timing information is clearly present and unambiguous."
+          "reasoning": "The answer explicitly states that you must call your line manager before 9:00 on the first day you are ill, which matches the deadline criterion directly. The essential timing requirement is clearly present with no meaningful omission."
         },
         {
           "criterion_id": 13,
           "weight": 1.0,
           "score": 2.0,
           "is_present": true,
-          "reasoning": "The answer explicitly states that from the fourth day of absence you need a doctor's note for HR. This matches the criterion directly and includes the essential requirement without omission."
+          "reasoning": "The answer explicitly states that from the fourth day of absence you need a doctor's note for HR. This matches the criterion directly and includes the required timing."
         }
       ],
       "labels": [
@@ -122,7 +122,7 @@
           "weight": 1.0,
           "score": 2.0,
           "is_present": true,
-          "reasoning": "The answer explicitly states that the deadline is 30 days after the last day of the trip, which matches the criterion’s requirement to name the deadline within 30 days of the end of the trip. The essential information is fully present and clearly recognizable."
+          "reasoning": "The answer explicitly states that the deadline is 30 days after the last day of the trip, which matches the criterion’s deadline wording closely. The essential information is fully present, even if phrased slightly differently."
         }
       ],
       "labels": [
@@ -147,7 +147,7 @@
           "weight": 3.0,
           "score": 2.0,
           "is_present": true,
-          "reasoning": "The answer explicitly states that you get 30 vacation days per year, which matches the criterion exactly. The annual entitlement is clearly and directly covered with no missing essential detail."
+          "reasoning": "The answer explicitly states that you get 30 vacation days per year, which directly matches the criterion. The required information is fully present and unambiguous."
         },
         {
           "criterion_id": 32,
@@ -161,7 +161,7 @@
           "weight": 1.0,
           "score": 0.0,
           "is_present": false,
-          "reasoning": "The answer mentions that unused vacation days can carry over into the next year, but it does not say anything about them expiring at the end of March. The specific expiration timing is missing, so the criterion is not covered."
+          "reasoning": "The answer mentions that unused vacation days can carry over into the next year, but it does not say anything about them expiring at the end of March. The specific expiration timing required by the criterion is missing, so only a loose related idea is present."
         }
       ],
       "labels": [
@@ -186,14 +186,14 @@
           "weight": 2.0,
           "score": 0.0,
           "is_present": false,
-          "reasoning": "The answer says home working is flexible and that teams can work from home whenever it suits them, but it does not mention any specific limit. The criterion requires the explicit limit of up to 2 days per week, which is absent."
+          "reasoning": "The answer says that working from home is flexible and that teams can do it whenever it suits them, but it does not state any maximum number of home office days per week. The specific limit requested by the criterion is missing, so only the general topic is covered."
         },
         {
           "criterion_id": 42,
           "weight": 1.0,
           "score": 0.0,
           "is_present": false,
-          "reasoning": "The answer says remote work is flexible and that people should do what works for them, but it does not mention any requirement to agree the days with the line manager. The specific approval or agreement condition is missing, so the criterion is not covered."
+          "reasoning": "The answer says remote work is flexible and that you can do what works for you, but it does not mention any requirement to agree the days with a line manager. The specific approval/agreement condition is missing, so the criterion is not covered."
         }
       ],
       "labels": [
