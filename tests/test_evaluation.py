@@ -14,6 +14,7 @@ from tests.conftest import CASE, RUN, RUN_SCORES, FakeJudge
 from rubric_judge import (
     DEFAULT_SCALE,
     Case,
+    Criterion,
     JudgeReply,
     JudgeUnavailableError,
     Run,
@@ -79,7 +80,6 @@ async def test_duplicate_criterion_ids_are_rejected():
         Case.model_validate(
             {
                 "id": 1,
-                "question": "q",
                 "answer": "a",
                 "criteria": [
                     {"id": 7, "content": "first", "weight": 1},
@@ -95,7 +95,6 @@ async def test_a_large_rubric_is_judged_completely_and_in_order():
     many = Case.model_validate(
         {
             "id": 1,
-            "question": "q",
             "answer": "a",
             "criteria": [
                 {"id": i, "content": f"criterion {i}", "weight": 1} for i in range(200)
@@ -116,7 +115,7 @@ async def test_cancellation_aborts_the_case():
     class CancellingJudge:
         scale = DEFAULT_SCALE
 
-        async def score(self, question, answer, criterion):
+        async def score(self, answer, criterion, context=None):
             raise asyncio.CancelledError
 
     with pytest.raises(asyncio.CancelledError):
@@ -156,7 +155,7 @@ async def test_a_grade_off_the_scale_is_refused_rather_than_folded_into_the_scor
     class OffScaleJudge:
         scale = DEFAULT_SCALE
 
-        async def score(self, question, answer, criterion) -> JudgeReply:
+        async def score(self, answer, criterion, context=None) -> JudgeReply:
             return JudgeReply(score=5, reasoning="way past the top of the scale")
 
     with pytest.raises(ValueError, match=r"criteria \[1, 2\] scored above the scale 0\.\.2"):
@@ -246,7 +245,7 @@ class _JudgeByAnswer:
 
     scale = DEFAULT_SCALE
 
-    async def score(self, question, answer, criterion):
+    async def score(self, answer, criterion, context=None):
         return JudgeReply(score=2 if "HR tool" in answer else 0, reasoning=answer)
 
 
@@ -257,8 +256,8 @@ async def test_criterion_ids_may_repeat_across_the_cases_of_a_run():
     run = Run.model_validate(
         {
             "cases": [
-                {"id": 1, "question": "q", "answer": "In the HR tool.", "criteria": shared_rubric},
-                {"id": 2, "question": "q", "answer": "No idea.", "criteria": shared_rubric},
+                {"id": 1, "answer": "In the HR tool.", "criteria": shared_rubric},
+                {"id": 2, "answer": "No idea.", "criteria": shared_rubric},
             ]
         }
     )
@@ -270,9 +269,65 @@ async def test_criterion_ids_may_repeat_across_the_cases_of_a_run():
     assert result.metrics.cases_with_score_zero == [2]
 
 
-async def test_an_empty_question_is_accepted_because_it_is_never_scored():
-    """The question is context for the judge, not something the rubric holds against the
-    answer — so a case without one is valid rather than a 422."""
-    result = await evaluate_case(FakeJudge({1: 2, 2: 2}), Case(**{**CASE, "question": ""}))
+@pytest.mark.parametrize("blank", ["", "   ", "\t\n"])
+async def test_a_blank_context_is_refused_rather_than_treated_as_no_context(blank):
+    """A blank string and an absent context would otherwise mean the same thing under two
+    spellings — `None` is documented as the one way to say a case carries no context, so
+    anything blank once stripped is a validation error rather than being normalized to it."""
+    with pytest.raises(ValidationError):
+        Case(**{**CASE, "context": blank})
 
-    assert result.score == 1.0
+
+async def test_a_context_is_stripped():
+    """Documented as stripped of surrounding whitespace, so padding the caller never meant to
+    send is not what the judge is shown as background."""
+    padded = Case(**{**CASE, "context": "  The question asked was: How do I report sick leave?  "})
+
+    assert padded.context == "The question asked was: How do I report sick leave?"
+
+
+async def test_an_omitted_context_and_an_explicit_none_are_the_same_case():
+    """The manual offers two spellings for an answer that stands on its own, omitting the
+    field or passing `None`, and promises they say the same thing."""
+    without_context = {key: value for key, value in CASE.items() if key != "context"}
+
+    assert Case(**without_context).context is None
+    assert Case(**{**without_context, "context": None}).context is None
+
+
+async def test_a_run_may_mix_cases_with_and_without_context():
+    """`context` is optional per case, not per run. A catalog that holds both a question and
+    its answer and a summary that stands on its own is one run, unlike `scale`, which every
+    case result in a run has to agree on."""
+    without_context = {key: value for key, value in CASE.items() if key != "context"}
+    mixed = Run.model_validate({"cases": [CASE, {**without_context, "id": 2}]})
+
+    result = await evaluate_run(FakeJudge({1: 2, 2: 2}), mixed)
+
+    assert [case.context is None for case in mixed.cases] == [False, True]
+    assert [case_result.score for case_result in result.case_results] == [1.0, 1.0]
+
+
+async def test_the_readme_case_without_a_context_reports_the_documented_number():
+    """The manual shows a case with no context scoring 0.50 and claims the number is real.
+    Everything above the grades is arithmetic, so pinning them keeps that claim checkable
+    without a key: the heaviest criterion missed and the other two covered is 3 of 6."""
+    case_without_context = Case(
+        id=2,
+        answer=(
+            "The Cologne office has an underground garage with 40 spots. Employees reserve "
+            "a spot through the facility portal, at the latest on the day before. Visitors "
+            "are registered at reception."
+        ),
+        criteria=[
+            Criterion(id=21, content="Says what a parking spot costs per month.", weight=3),
+            Criterion(id=22, content="Says how an employee reserves a spot.", weight=2),
+            Criterion(id=23, content="Names the deadline for a reservation.", weight=1),
+        ],
+    )
+
+    result = await evaluate_case(FakeJudge({21: 0, 22: 2, 23: 2}), case_without_context)
+
+    assert result.case_id == 2
+    assert result.score == pytest.approx(0.5)  # (3*0/2 + 2*2/2 + 1*2/2) / 6
+    assert [one.is_present for one in result.criterion_results] == [False, True, True]

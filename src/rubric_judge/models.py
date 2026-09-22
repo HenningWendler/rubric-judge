@@ -635,16 +635,17 @@ class CriterionResult(DocumentedModel):
 
 
 class Case(DocumentedModel):
-    """One thing to evaluate: a question, an answer, and the rubric to hold it against.
+    """One thing to evaluate: an answer, the rubric to hold it against, and what framed it.
 
     The unit of work everywhere — `POST /evaluate` takes one, a run takes a list of them.
 
-    Stateless: the caller owns questions, answers and rubric; nothing here is stored.
+    Stateless: the caller owns the context, the answers and the rubric; nothing here is
+    stored.
 
     Example:
         Case(
             id=1,
-            question="How do I report sick leave?",
+            context="The question asked was: How do I report sick leave?",
             answer="Email hr@example.com before 10:00.",
             criteria=[Criterion(id=1, content="Report by email before 10:00", weight=3)],
             labels=["one_page_expected"],
@@ -656,8 +657,15 @@ class Case(DocumentedModel):
     to the cases they came from without relying on list order. Required even for a single
     evaluation, so one result shape serves both paths."""
 
-    question: str
-    """The question that was asked. Passed to the judge as context only; it is never scored."""
+    context: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)] | None = None
+    """What the answer was produced in response to, described in your own words: "The question
+    asked was: ...", "The source policy says: ...". The judge reads it as background and never
+    scores it, so naming what it is costs one clause and saves the judge from guessing.
+
+    Optional, because plenty of text stands on its own: a summary, a report, a drafted email
+    are judged against the criteria and nothing else. Leave it out and the judge is shown only
+    the answer. Blank is rejected rather than stored, so a case says there is no context in
+    exactly one way."""
 
     answer: str
     """The answer under test, produced by some other system. Judged exactly as it comes in."""
@@ -800,16 +808,15 @@ class Run(DocumentedModel):
             cases=[
                 Case(
                     id=1,
-                    question="How do I report sick leave?",
+                    context="The question asked was: How do I report sick leave?",
                     answer="Email hr@example.com before 10:00.",
                     criteria=[Criterion(id=1, content="Report by email", weight=3)],
                     labels=["table"],
                 ),
                 Case(
                     id=2,
-                    question="How do I request vacation?",
-                    answer="Ask your team lead.",
-                    criteria=[Criterion(id=21, content="Use the HR tool", weight=1)],
+                    answer="The Cologne office has an underground garage.",
+                    criteria=[Criterion(id=21, content="Names an office with a garage", weight=1)],
                 ),
             ],
             label_filter=[["table"]],

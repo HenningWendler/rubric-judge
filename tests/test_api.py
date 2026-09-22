@@ -62,7 +62,7 @@ def test_an_infinite_weight_is_rejected_instead_of_scoring_null(client):
     `score` violates the declared non-nullable float. Reject it at the boundary."""
     use_judge(FakeJudge({1: 2}))
     body = (
-        '{"question": "q", "answer": "a",'
+        '{"answer": "a",'
         ' "criteria": [{"id": 1, "content": "x", "weight": Infinity}]}'
     )
     json_body = {"content-type": "application/json"}
@@ -298,7 +298,7 @@ def test_evaluate_end_to_end_against_an_openai_compatible_endpoint(client, stub_
 
 def test_the_judge_is_asked_exactly_as_configured(client, stub_endpoint):
     """What actually goes on the wire: the configured model and sampling settings, the system
-    prompt, and one user message carrying question, answer and the single criterion."""
+    prompt, and one user message carrying context, answer and the single criterion."""
     stub_endpoint.replies = {EMAIL_CRITERION: ['Covered.\n{"score": 2}']}
 
     client.post("/evaluate", json={**CASE, "criteria": [CASE["criteria"][0]]})
@@ -309,10 +309,35 @@ def test_the_judge_is_asked_exactly_as_configured(client, stub_endpoint):
     assert asked["max_completion_tokens"] == 768
     assert [message["role"] for message in asked["messages"]] == ["system", "user"]
     assert "0-2 scale" in asked["messages"][0]["content"]
-    assert CASE["question"] in asked["messages"][1]["content"]
+    assert CASE["context"] in asked["messages"][1]["content"]
     assert CASE["answer"] in asked["messages"][1]["content"]
     assert EMAIL_CRITERION in asked["messages"][1]["content"]
     assert LAST_DAY_CRITERION not in asked["messages"][1]["content"]
+
+
+def test_a_case_with_no_context_carries_no_context_block_to_the_judge(client, stub_endpoint):
+    """The `Context:` block is absent entirely for a context-free case, not present and
+    blank — the user message must not claim background that was never given."""
+    stub_endpoint.replies = {EMAIL_CRITERION: ['Covered.\n{"score": 2}']}
+    case_without_context = {key: value for key, value in CASE.items() if key != "context"}
+
+    client.post("/evaluate", json={**case_without_context, "criteria": [CASE["criteria"][0]]})
+
+    asked = stub_endpoint.received[0]
+    assert "Context:" not in asked["messages"][1]["content"]
+
+
+@pytest.mark.parametrize("blank", ["", "   ", "\t\n"])
+def test_a_blank_context_is_refused_at_the_boundary(client, blank):
+    """The error table maps a blank or whitespace-only `context` to 422. It has to be refused
+    where it arrives: scored as if the case had none, it would quietly become a second way of
+    saying something the manual says exactly one way."""
+    use_judge(FakeJudge({1: 2, 2: 2}))
+
+    response = client.post("/evaluate", json={**CASE, "context": blank})
+
+    assert response.status_code == 422
+    assert [item["loc"] for item in response.json()["detail"]] == [["body", "context"]]
 
 
 def test_a_broken_reply_is_healed_over_the_wire(client, stub_endpoint):
@@ -464,7 +489,7 @@ def test_a_nan_weight_is_rejected_instead_of_scoring_null(client):
     error table names it, so the boundary has to reject it."""
     use_judge(FakeJudge({1: 2}))
     body = (
-        '{"id": 1, "question": "q", "answer": "a",'
+        '{"id": 1, "answer": "a",'
         ' "criteria": [{"id": 1, "content": "x", "weight": NaN}]}'
     )
 

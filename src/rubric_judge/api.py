@@ -77,7 +77,7 @@ async def report_invalid_request(_: Request, error: RequestValidationError) -> J
 
     Example:
         httpx.post("http://localhost:8000/evaluate", json={"id": 1}).json()["detail"][0]
-        # {"loc": ["body", "question"], "msg": "Field required", "type": "missing"}
+        # {"loc": ["body", "answer"], "msg": "Field required", "type": "missing"}
     """
     reportable = [
         {"loc": item["loc"], "msg": item["msg"], "type": item["type"]} for item in error.errors()
@@ -133,8 +133,12 @@ async def health() -> dict[str, str]:
 async def evaluate_case(case: Case, judge: Annotated[Judge, Depends(get_judge)]) -> CaseResult:
     """Score one answer against its rubric — one LLM call per criterion, run in parallel.
 
-    Send a `Case`: your `id`, the `question` that was asked, the `answer` your system
-    produced, and the `criteria` a good answer has to satisfy, each with a positive weight.
+    Send a `Case`: your `id`, the `answer` your system produced, and the `criteria` a good
+    answer has to satisfy, each with a positive weight. If the answer was produced in
+    response to something, put that in `context` and say what it is, for example
+    `"The question asked was: ..."`; the judge reads it as background and never scores it.
+    Leave `context` out for text that stands on its own, such as a summary or a report, and
+    the answer is judged against the criteria alone.
 
     Returns a `CaseResult`: your id echoed as `case_id`, one `criterion_results` entry per
     criterion, and `score` — the weighted fold of all of them, normalized to 0..1.
@@ -165,9 +169,10 @@ async def evaluate_case(case: Case, judge: Annotated[Judge, Depends(get_judge)])
     **500** if the judge is unconfigured or the program is broken.
 
     Args:
-        case: The case to score: `id`, `question`, `answer`, at least one `criteria` entry
-            with a unique `id` and a positive finite `weight`, and optional `labels`. A blank
-            criterion, a repeated criterion id and a weight of 0 are each a 422.
+        case: The case to score: `id`, `answer`, at least one `criteria` entry with a
+            unique `id` and a positive finite `weight`, and optional `context` and `labels`.
+            A blank criterion, a repeated criterion id, a weight of 0 and a blank `context`
+            are each a 422.
         judge: The process-wide judge, injected rather than sent — no request can choose the
             model it is graded by.
 
@@ -180,9 +185,15 @@ async def evaluate_case(case: Case, judge: Annotated[Judge, Depends(get_judge)])
     Example:
         httpx.post("http://localhost:8000/evaluate", json={
             "id": 1,
-            "question": "How do I report sick leave?",
+            "context": "The question asked was: How do I report sick leave?",
             "answer": "Email hr@example.com before 10:00.",
             "criteria": [{"id": 1, "content": "Report by email before 10:00", "weight": 3}],
+        }).json()["score"]   # 1.0
+
+        httpx.post("http://localhost:8000/evaluate", json={
+            "id": 2,
+            "answer": "The Cologne office has an underground garage.",
+            "criteria": [{"id": 1, "content": "Names an office with a garage", "weight": 1}],
         }).json()["score"]   # 1.0
     """
     return await evaluation.evaluate_case(judge, case)
@@ -246,7 +257,7 @@ async def evaluate_run(run: Run, judge: Annotated[Judge, Depends(get_judge)]) ->
             "cases": [
                 {
                     "id": 1,
-                    "question": "How do I report sick leave?",
+                    "context": "The question asked was: How do I report sick leave?",
                     "answer": "Email hr@example.com before 10:00.",
                     "criteria": [{"id": 1, "content": "Report by email", "weight": 3}],
                     "labels": ["table"],

@@ -65,12 +65,12 @@ async def evaluate_case(judge: Judge, case: Case) -> CaseResult:
         class AlwaysFullMarks:
             scale = DEFAULT_SCALE
 
-            async def score(self, question, answer, criterion) -> JudgeReply:
+            async def score(self, answer, criterion, context=None) -> JudgeReply:
                 return JudgeReply(score=2, reasoning="the answer says exactly that")
 
         case_result = await evaluate_case(AlwaysFullMarks(), Case(
             id=1,
-            question="How do I report sick leave?",
+            context="The question asked was: How do I report sick leave?",
             answer="Email hr@example.com before 10:00.",
             criteria=[Criterion(id=1, content="Report by email before 10:00", weight=3)],
         ))
@@ -136,7 +136,7 @@ async def evaluate_run(judge: Judge, run: Run) -> RunResult:
             scale = DEFAULT_SCALE
             grade_per_criterion_id = {1: 0, 21: 2}
 
-            async def score(self, question, answer, criterion) -> JudgeReply:
+            async def score(self, answer, criterion, context=None) -> JudgeReply:
                 return JudgeReply(
                     score=self.grade_per_criterion_id[criterion.id], reasoning="see above"
                 )
@@ -144,15 +144,14 @@ async def evaluate_run(judge: Judge, run: Run) -> RunResult:
         run = Run(cases=[
             Case(
                 id=1,
-                question="How do I report sick leave?",
+                context="The question asked was: How do I report sick leave?",
                 answer="Ask around.",
                 criteria=[Criterion(id=1, content="Report by email", weight=3)],
                 labels=["table"],
             ),
             Case(
                 id=2,
-                question="How do I request vacation?",
-                answer="Submit it in the HR tool.",
+                answer="The vacation request is submitted in the HR tool.",
                 criteria=[Criterion(id=21, content="Use the HR tool", weight=1)],
             ),
         ])
@@ -206,11 +205,11 @@ def filter_cases_by_labels(cases: list[Case], label_filter: list[list[str]]) -> 
 
     Example:
         catalog = [
-            Case(id=1, question="q", answer="a", labels=["table", "split_infos"],
+            Case(id=1, answer="a", labels=["table", "split_infos"],
                  criteria=[Criterion(id=1, content="Report by email", weight=1)]),
-            Case(id=2, question="q", answer="a", labels=["agentic"],
+            Case(id=2, answer="a", labels=["agentic"],
                  criteria=[Criterion(id=2, content="Use the HR tool", weight=1)]),
-            Case(id=3, question="q", answer="a", labels=["table"],
+            Case(id=3, answer="a", labels=["table"],
                  criteria=[Criterion(id=3, content="Name the deadline", weight=1)]),
         ]
         selected = filter_cases_by_labels(catalog, [["table", "split_infos"], ["agentic"]])
@@ -250,7 +249,7 @@ async def _judge_criterion(judge: Judge, case: Case, criterion: Criterion) -> Cr
     Args:
         judge: The judge to ask. Its `scale` is what `is_present` is cut at, so a judge
             grading 0..10 produces results a 0..10 `CaseResult` can carry.
-        case: The case the criterion belongs to; only `question` and `answer` are sent on.
+        case: The case the criterion belongs to; only `answer` and `context` are sent on.
         criterion: The single requirement to judge — only its `content` reaches the model.
 
     Returns:
@@ -264,7 +263,7 @@ async def _judge_criterion(judge: Judge, case: Case, criterion: Criterion) -> Cr
             up to the caller.
         Exception: Anything else the judge raises, unchanged and for the same reason.
     """
-    judge_reply = await judge.score(case.question, case.answer, criterion)
+    judge_reply = await judge.score(case.answer, criterion, case.context)
     return CriterionResult.judged(
         criterion, float(judge_reply.score), judge_reply.reasoning, judge.scale
     )

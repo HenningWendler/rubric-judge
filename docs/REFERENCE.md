@@ -39,7 +39,7 @@ One answer plus the rubric to hold it against.
 | Field | Type | Required | Rules |
 |---|---|---|---|
 | `id` | `int` | yes | Yours. Echoed back as `CaseResult.case_id`. Unique within its run |
-| `question` | `str` | yes | Context for the judge only, it is never scored. May be empty |
+| `context` | `str \| None` | no, default `None` | What the answer was produced in response to, in your own words, for example `"The question asked was: How do I report sick leave?"`. Stripped of surrounding whitespace, and blank after stripping is rejected rather than stored. Never scored. Omit it, or pass `None`, for an answer that stands on its own |
 | `answer` | `str` | yes | The answer under test, judged exactly as it comes in. May be empty, because a system that returned nothing is a valid case that scores `0` |
 | `criteria` | `list[Criterion]` | yes | At least one. Criterion ids must be unique |
 | `labels` | `Labels` | no, default `[]` | What kind of case this is, for example `["table", "images"]`. Your own vocabulary, never checked against a list. Rules under [the label types](#label-labels-and-labelfilter). Never shown to the judge |
@@ -76,7 +76,7 @@ Only `LabelFilter` is importable from `rubric_judge`.
 | `LabelFilter` | `list[Labels]` | Every group a `Labels`. The same group twice is rejected in any order, so `[["a","b"], ["b","a"]]` is refused. `[]` selects everything |
 
 ```python
-Case(id=1, question="q", answer="a", labels=["table", "table"],
+Case(id=1, answer="a", labels=["table", "table"],
      criteria=[Criterion(id=1, content="c", weight=1)])
 # ValidationError: labels must be unique, repeated: ['table']
 
@@ -456,8 +456,8 @@ which is how refusals quote a scale.
 ```python
 class Judge(Protocol):
     scale: Scale
-    async def score(self, question: str, answer: str,
-                    criterion: Criterion) -> JudgeReply
+    async def score(self, answer: str, criterion: Criterion,
+                    context: str | None = None) -> JudgeReply
 ```
 The extension point. Implement those two members and `evaluate_case` and `evaluate_run` take
 your object unchanged, with no base class and no registration. `score` judges exactly one
@@ -469,7 +469,7 @@ only the implementation knows what its backend tolerates.
 class OpenAIJudge:
     def __init__(self, config: JudgeConfig, system_prompt: str | None = None,
                  scale: Scale = DEFAULT_SCALE, client: AsyncOpenAI | None = None)
-    async def score(self, question: str, answer: str, criterion: Criterion) -> JudgeReply
+    async def score(self, answer: str, criterion: Criterion, context: str | None = None) -> JudgeReply
 
     scale: Scale            # what it grades on
     system_prompt: str      # the system message it sends, generated unless you passed one
@@ -591,20 +591,20 @@ The request is a list of exactly those case bodies, plus optional `labels` and a
 ```json
 {
   "cases": [
-    { "id": 1, "question": "How do I report sick leave?",
+    { "id": 1, "context": "The question asked was: How do I report sick leave?",
       "answer": "Send an email to hr@example.com before 10:00 on your first day.",
       "criteria": [
         { "id": 1, "content": "Report by email before 10:00 on the first day", "weight": 3 },
         { "id": 2, "content": "State the expected last day of absence", "weight": 1 }
       ],
       "labels": ["policy"] },
-    { "id": 2, "question": "How do I request vacation?",
+    { "id": 2, "context": "The question asked was: How do I request vacation?",
       "answer": "Submit the request in the HR tool.",
       "criteria": [
         { "id": 21, "content": "Submit the request in the HR tool", "weight": 1 }
       ],
       "labels": ["policy", "tool"] },
-    { "id": 3, "question": "Who approves overtime?",
+    { "id": 3, "context": "The question asked was: Who approves overtime?",
       "answer": "Your line manager approves it.",
       "criteria": [
         { "id": 31, "content": "The line manager approves it", "weight": 1 }
@@ -734,6 +734,7 @@ The `422` body carries only `loc`, `msg` and `type`. The rejected value is never
 | Situation | Library | HTTP |
 |---|---|---|
 | `criteria`, `cases`, `criterion_results` or `case_results` empty; duplicate ids in any of them; `content` blank; `weight` `0`, negative, `Infinity` or `NaN`; a missing field | `pydantic.ValidationError` | `422` |
+| A `Case.context` that is blank or whitespace-only. Omitting it, or passing `None`, is the one valid way to say a case has no context | `pydantic.ValidationError` | `422` |
 | A run posted to `/compare` whose numbers leave the ranges the [output tables](#outputs) give: a score above its own `scale.maximum` or off `0 … 1`, a non-positive weight, any `Infinity` or `NaN`, a `variance` or `standard_deviation` no distribution of case scores could produce, or `RunMetrics` id lists naming more cases than `total_cases` | `pydantic.ValidationError` | `422` |
 | A `CaseResult` posted without its `scale`. No default stands in, because one would decide the unit of every score under it | `pydantic.ValidationError` | `422` |
 | A run whose cases name more than one `scale`; a result whose `is_present` contradicts its own score | `pydantic.ValidationError` | `422` |
