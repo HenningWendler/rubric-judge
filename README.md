@@ -267,9 +267,11 @@ judge = OpenAIJudge(JudgeConfig.from_env())
 Call `asyncio.run()` once per program, on an `async def main()` that does all the
 awaiting. An `OpenAIJudge` binds its HTTP client to the first event loop it runs in, and a
 second `asyncio.run()` has closed that loop, so a judge reused across two of them dies with
-`RuntimeError: Event loop is closed`. A fresh judge per `asyncio.run()` does work and is
-still the wrong habit, because each loop then gets its own full set of `max_concurrent`
-slots and the limit your endpoint was configured with is silently multiplied.
+`RuntimeError: Event loop is closed`. Building a fresh judge inside each `asyncio.run()`
+works, and each one carries its own `max_concurrent` budget, because the limit belongs to
+the judge rather than to the process. Two judges are two budgets, which is what you are
+asking for when you build two. [Concurrency](#concurrency) is the same rule from the other
+side.
 
 Everything is configurable in code as well, which is what tests and notebooks usually want.
 `JudgeConfig` is an ordinary model, so you can build one without touching the environment,
