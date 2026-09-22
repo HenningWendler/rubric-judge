@@ -1,18 +1,19 @@
 {
   "metrics": {
-    "total_cases": 3,
-    "average_score": 0.6666666666666666,
-    "median_score": 1.0,
-    "variance": 0.3333333333333333,
-    "standard_deviation": 0.5773502691896257,
+    "total_cases": 4,
+    "average_score": 0.5416666666666666,
+    "median_score": 0.5833333333333333,
+    "variance": 0.21064814814814814,
+    "standard_deviation": 0.4589642122738418,
     "average_criterion_score": 1.0,
-    "criteria_fulfillment_rate": 0.6666666666666666,
+    "criteria_fulfillment_rate": 0.5416666666666666,
     "cases_with_score_zero": [
-      1
+      3
     ],
     "weakest_cases_above_zero": [
-      2,
-      3
+      4,
+      1,
+      2
     ],
     "cases_with_score_zero_count": 1
   },
@@ -21,35 +22,35 @@
       "label": "policy",
       "metrics": {
         "total_cases": 2,
-        "average_score": 0.5,
-        "median_score": 0.5,
-        "variance": 0.5,
-        "standard_deviation": 0.7071067811865476,
-        "average_criterion_score": 0.6666666666666666,
-        "criteria_fulfillment_rate": 0.5,
+        "average_score": 0.16666666666666666,
+        "median_score": 0.16666666666666666,
+        "variance": 0.05555555555555555,
+        "standard_deviation": 0.23570226039551584,
+        "average_criterion_score": 0.4,
+        "criteria_fulfillment_rate": 0.25,
         "cases_with_score_zero": [
-          1
+          3
         ],
         "weakest_cases_above_zero": [
-          2
+          4
         ],
         "cases_with_score_zero_count": 1
       }
     },
     {
-      "label": "tool",
+      "label": "procedure",
       "metrics": {
         "total_cases": 2,
-        "average_score": 1.0,
-        "median_score": 1.0,
-        "variance": 0.0,
-        "standard_deviation": 0.0,
-        "average_criterion_score": 2.0,
-        "criteria_fulfillment_rate": 1.0,
+        "average_score": 0.9166666666666666,
+        "median_score": 0.9166666666666666,
+        "variance": 0.013888888888888902,
+        "standard_deviation": 0.11785113019775798,
+        "average_criterion_score": 1.6,
+        "criteria_fulfillment_rate": 0.8333333333333333,
         "cases_with_score_zero": [],
         "weakest_cases_above_zero": [
-          2,
-          3
+          1,
+          2
         ],
         "cases_with_score_zero_count": 0
       }
@@ -59,7 +60,7 @@
   "case_results": [
     {
       "case_id": 1,
-      "score": 0.0,
+      "score": 0.8333333333333333,
       "scale": {
         "maximum": 2,
         "presence_threshold": 0.5,
@@ -71,22 +72,29 @@
       },
       "criterion_results": [
         {
-          "criterion_id": 1,
+          "criterion_id": 11,
           "weight": 3.0,
-          "score": 0.0,
-          "is_present": false,
-          "reasoning": "The answer names no recipient and no deadline."
+          "score": 2.0,
+          "is_present": true,
+          "reasoning": "The answer explicitly tells the employee to call their line manager as early as possible on the first day they are ill. That directly matches the criterion about informing their line manager, so it is fully covered."
         },
         {
-          "criterion_id": 2,
+          "criterion_id": 12,
+          "weight": 2.0,
+          "score": 2.0,
+          "is_present": true,
+          "reasoning": "The answer explicitly states the deadline as “at the latest before 9:00” and also ties it to “the first day you are ill,” which matches the criterion’s required timing. The essential deadline information is clearly present, even if phrased slightly differently."
+        },
+        {
+          "criterion_id": 13,
           "weight": 1.0,
           "score": 0.0,
           "is_present": false,
-          "reasoning": "Neither the expected last day nor any duration is mentioned."
+          "reasoning": "The answer explains how to notify the line manager and what to do if they cannot be reached, but it says nothing about a doctor's note or any requirement starting on the fourth day of absence. The criterion is therefore absent from the answer."
         }
       ],
       "labels": [
-        "policy"
+        "procedure"
       ]
     },
     {
@@ -104,20 +112,26 @@
       "criterion_results": [
         {
           "criterion_id": 21,
+          "weight": 3.0,
+          "score": 2.0,
+          "is_present": true,
+          "reasoning": "The answer explicitly says to “File the claim in the expense tool,” which directly matches the criterion. The required detail is clearly present with no meaningful omission."
+        },
+        {
+          "criterion_id": 22,
           "weight": 1.0,
           "score": 2.0,
           "is_present": true,
-          "reasoning": "The answer names the HR tool as the place to submit the request."
+          "reasoning": "The answer explicitly states that the claim must be filed within 30 days of the day the trip ended. This matches the criterion directly and includes the deadline wording clearly."
         }
       ],
       "labels": [
-        "policy",
-        "tool"
+        "procedure"
       ]
     },
     {
       "case_id": 3,
-      "score": 1.0,
+      "score": 0.0,
       "scale": {
         "maximum": 2,
         "presence_threshold": 0.5,
@@ -130,14 +144,60 @@
       "criterion_results": [
         {
           "criterion_id": 31,
+          "weight": 3.0,
+          "score": 0.0,
+          "is_present": false,
+          "reasoning": "The answer mentions paid vacation and a remaining balance in the HR tool, but it does not state any actual number of vacation days per year. The essential requirement of giving the number is missing, so this is not covered."
+        },
+        {
+          "criterion_id": 32,
+          "weight": 2.0,
+          "score": 0.0,
+          "is_present": false,
+          "reasoning": "The answer talks about vacation in general and mentions a remaining balance in the HR tool, but it does not say anything about unused days carrying over or the limit of up to 5 days. The specific carryover rule is absent, so the criterion is not covered."
+        },
+        {
+          "criterion_id": 33,
           "weight": 1.0,
-          "score": 2.0,
-          "is_present": true,
-          "reasoning": "The answer names the line manager as the approver."
+          "score": 0.0,
+          "is_present": false,
+          "reasoning": "The answer talks about vacation in general and mentions a remaining balance in the HR tool, but it does not say anything about carried-over days or an end-of-March expiration. The specific criterion is absent, so it is not covered."
         }
       ],
       "labels": [
-        "tool"
+        "policy"
+      ]
+    },
+    {
+      "case_id": 4,
+      "score": 0.3333333333333333,
+      "scale": {
+        "maximum": 2,
+        "presence_threshold": 0.5,
+        "level_descriptions": {
+          "2": "Fully covered. Every essential part of the criterion is clearly recognizable in the answer, even if the wording, terminology or structure differs.",
+          "1": "Partially covered. Some essential information is missing, but the basic idea is still derivable from the answer.",
+          "0": "Not covered. The criterion is absent, or the answer has no recognizable connection to it."
+        }
+      },
+      "criterion_results": [
+        {
+          "criterion_id": 41,
+          "weight": 2.0,
+          "score": 0.0,
+          "is_present": false,
+          "reasoning": "The answer says that working from home is possible and that the days must be agreed with the line manager, but it does not state any maximum number of home office days per week. The specific limit requested by the criterion is missing, so only the general topic is covered."
+        },
+        {
+          "criterion_id": 42,
+          "weight": 1.0,
+          "score": 2.0,
+          "is_present": true,
+          "reasoning": "The answer explicitly says to agree the days with your line manager beforehand, which matches the criterion directly. No essential part of the criterion is missing."
+        }
+      ],
+      "labels": [
+        "policy"
       ]
     }
   ]

@@ -219,7 +219,7 @@ class JudgeConfig(DocumentedModel):
 
     @classmethod
     def from_env(cls) -> "JudgeConfig":
-        """Build the config from the process's `RUBRIC_EVAL_JUDGE_*` environment variables.
+        """Build the config from the process's `RUBRIC_JUDGE_*` environment variables.
 
         The one place in the library that reads `os.environ`; everything it then decides is
         `from_mapping`, which is where the rules and the wording of the complaints live.
@@ -233,17 +233,17 @@ class JudgeConfig(DocumentedModel):
             ValidationError: A numeric variable does not parse or is out of range.
 
         Example:
-            JudgeConfig.from_env().model   # "gpt-4o-mini", with RUBRIC_EVAL_JUDGE_MODEL set
+            JudgeConfig.from_env().model   # "gpt-4o-mini", with RUBRIC_JUDGE_MODEL set
         """
         return cls.from_mapping(os.environ)
 
     @classmethod
     def from_mapping(cls, environment: Mapping[str, str]) -> "JudgeConfig":
-        """Build the config from a mapping of `RUBRIC_EVAL_JUDGE_*` variables to their values.
+        """Build the config from a mapping of `RUBRIC_JUDGE_*` variables to their values.
 
         Reads `ENDPOINT`, `API_KEY`, `MODEL` (all required) plus `TEMPERATURE`,
         `MAX_TOKENS`, `MAX_ATTEMPTS` and `MAX_CONCURRENT`, each prefixed
-        `RUBRIC_EVAL_JUDGE_`. An optional variable that is absent is not passed on, so the
+        `RUBRIC_JUDGE_`. An optional variable that is absent is not passed on, so the
         field defaults above stay the single source of truth for it.
 
         A variable set to the *empty* string is a half-finished configuration and is refused
@@ -252,7 +252,7 @@ class JudgeConfig(DocumentedModel):
 
         Args:
             environment: Variable name to value, `os.environ` in production and a plain dict
-                anywhere else. Names outside the `RUBRIC_EVAL_JUDGE_*` set above are ignored,
+                anywhere else. Names outside the `RUBRIC_JUDGE_*` set above are ignored,
                 so the whole process environment can be handed in. Values are the strings
                 they are exported as; an empty one is refused rather than read as "unset".
 
@@ -270,20 +270,20 @@ class JudgeConfig(DocumentedModel):
         Example:
             JudgeConfig.from_mapping(
                 {
-                    "RUBRIC_EVAL_JUDGE_ENDPOINT": "http://localhost:11434/v1",
-                    "RUBRIC_EVAL_JUDGE_API_KEY": "ollama",
-                    "RUBRIC_EVAL_JUDGE_MODEL": "qwen3:8b",
+                    "RUBRIC_JUDGE_ENDPOINT": "http://localhost:11434/v1",
+                    "RUBRIC_JUDGE_API_KEY": "ollama",
+                    "RUBRIC_JUDGE_MODEL": "qwen3:8b",
                 }
             ).max_attempts   # 3, the field default
         """
         variable_per_field = {
-            "endpoint": "RUBRIC_EVAL_JUDGE_ENDPOINT",
-            "api_key": "RUBRIC_EVAL_JUDGE_API_KEY",
-            "model": "RUBRIC_EVAL_JUDGE_MODEL",
-            "temperature": "RUBRIC_EVAL_JUDGE_TEMPERATURE",
-            "max_tokens": "RUBRIC_EVAL_JUDGE_MAX_TOKENS",
-            "max_attempts": "RUBRIC_EVAL_JUDGE_MAX_ATTEMPTS",
-            "max_concurrent": "RUBRIC_EVAL_JUDGE_MAX_CONCURRENT",
+            "endpoint": "RUBRIC_JUDGE_ENDPOINT",
+            "api_key": "RUBRIC_JUDGE_API_KEY",
+            "model": "RUBRIC_JUDGE_MODEL",
+            "temperature": "RUBRIC_JUDGE_TEMPERATURE",
+            "max_tokens": "RUBRIC_JUDGE_MAX_TOKENS",
+            "max_attempts": "RUBRIC_JUDGE_MAX_ATTEMPTS",
+            "max_concurrent": "RUBRIC_JUDGE_MAX_CONCURRENT",
         }
         required_fields = {"endpoint", "api_key", "model"}
         unusable = [
