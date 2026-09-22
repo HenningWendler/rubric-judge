@@ -1,52 +1,55 @@
 {
   "metrics": {
-    "total_cases": 3,
-    "average_score": 0.7916666666666667,
-    "median_score": 0.8750000000000001,
-    "variance": 0.06770833333333334,
-    "standard_deviation": 0.26020824993326663,
-    "average_criterion_score": 1.5,
-    "criteria_fulfillment_rate": 1.0,
-    "cases_with_score_zero": [],
+    "total_cases": 4,
+    "average_score": 0.7083333333333333,
+    "median_score": 0.9166666666666666,
+    "variance": 0.22916666666666666,
+    "standard_deviation": 0.47871355387816905,
+    "average_criterion_score": 1.4,
+    "criteria_fulfillment_rate": 0.6666666666666666,
+    "cases_with_score_zero": [
+      4
+    ],
     "weakest_cases_above_zero": [
       3,
       1,
       2
     ],
-    "cases_with_score_zero_count": 0
+    "cases_with_score_zero_count": 1
   },
   "label_metrics": [
     {
       "label": "policy",
       "metrics": {
         "total_cases": 2,
-        "average_score": 0.9375,
-        "median_score": 0.9375,
-        "variance": 0.007812499999999986,
-        "standard_deviation": 0.08838834764831836,
-        "average_criterion_score": 1.6666666666666667,
+        "average_score": 0.41666666666666663,
+        "median_score": 0.41666666666666663,
+        "variance": 0.34722222222222215,
+        "standard_deviation": 0.5892556509887895,
+        "average_criterion_score": 0.8,
+        "criteria_fulfillment_rate": 0.3333333333333333,
+        "cases_with_score_zero": [
+          4
+        ],
+        "weakest_cases_above_zero": [
+          3
+        ],
+        "cases_with_score_zero_count": 1
+      }
+    },
+    {
+      "label": "procedure",
+      "metrics": {
+        "total_cases": 2,
+        "average_score": 1.0,
+        "median_score": 1.0,
+        "variance": 0.0,
+        "standard_deviation": 0.0,
+        "average_criterion_score": 2.0,
         "criteria_fulfillment_rate": 1.0,
         "cases_with_score_zero": [],
         "weakest_cases_above_zero": [
           1,
-          2
-        ],
-        "cases_with_score_zero_count": 0
-      }
-    },
-    {
-      "label": "tool",
-      "metrics": {
-        "total_cases": 2,
-        "average_score": 0.75,
-        "median_score": 0.75,
-        "variance": 0.125,
-        "standard_deviation": 0.3535533905932738,
-        "average_criterion_score": 1.5,
-        "criteria_fulfillment_rate": 1.0,
-        "cases_with_score_zero": [],
-        "weakest_cases_above_zero": [
-          3,
           2
         ],
         "cases_with_score_zero_count": 0
@@ -57,7 +60,7 @@
   "case_results": [
     {
       "case_id": 1,
-      "score": 0.8750000000000001,
+      "score": 1.0,
       "scale": {
         "maximum": 2,
         "presence_threshold": 0.5,
@@ -69,22 +72,29 @@
       },
       "criterion_results": [
         {
-          "criterion_id": 1,
+          "criterion_id": 11,
           "weight": 3.0,
           "score": 2.0,
           "is_present": true,
-          "reasoning": "The answer instructs the reader to email hr@example.com before 10:00 on the first day, which is exactly what the criterion asks for."
+          "reasoning": "The answer explicitly tells the employee to call their line manager, which directly matches the criterion about informing the line manager. The wording differs slightly, but the essential instruction is clearly present."
         },
         {
-          "criterion_id": 2,
-          "weight": 1.0,
-          "score": 1.0,
+          "criterion_id": 12,
+          "weight": 2.0,
+          "score": 2.0,
           "is_present": true,
-          "reasoning": "A duration is implied by 'for as long as it lasts', but no last day is named."
+          "reasoning": "The answer explicitly states “before 9:00 on the first day you are ill,” which matches the criterion’s deadline requirement. The essential timing information is clearly present and unambiguous."
+        },
+        {
+          "criterion_id": 13,
+          "weight": 1.0,
+          "score": 2.0,
+          "is_present": true,
+          "reasoning": "The answer explicitly states that from the fourth day of absence you need a doctor's note for HR. This matches the criterion directly and includes the essential requirement without omission."
         }
       ],
       "labels": [
-        "policy"
+        "procedure"
       ]
     },
     {
@@ -102,20 +112,26 @@
       "criterion_results": [
         {
           "criterion_id": 21,
+          "weight": 3.0,
+          "score": 2.0,
+          "is_present": true,
+          "reasoning": "The answer explicitly states that you should \"file the claim in the expense tool,\" which matches the criterion directly. No essential part of the criterion is missing."
+        },
+        {
+          "criterion_id": 22,
           "weight": 1.0,
           "score": 2.0,
           "is_present": true,
-          "reasoning": "The answer names the HR tool as the place to submit the request."
+          "reasoning": "The answer explicitly states that the deadline is 30 days after the last day of the trip, which matches the criterion’s requirement to name the deadline within 30 days of the end of the trip. The essential information is fully present and clearly recognizable."
         }
       ],
       "labels": [
-        "policy",
-        "tool"
+        "procedure"
       ]
     },
     {
       "case_id": 3,
-      "score": 0.5,
+      "score": 0.8333333333333333,
       "scale": {
         "maximum": 2,
         "presence_threshold": 0.5,
@@ -128,14 +144,60 @@
       "criterion_results": [
         {
           "criterion_id": 31,
-          "weight": 1.0,
-          "score": 1.0,
+          "weight": 3.0,
+          "score": 2.0,
           "is_present": true,
-          "reasoning": "The answer says a manager approves it, without saying which one."
+          "reasoning": "The answer explicitly states that you get 30 vacation days per year, which matches the criterion exactly. The annual entitlement is clearly and directly covered with no missing essential detail."
+        },
+        {
+          "criterion_id": 32,
+          "weight": 2.0,
+          "score": 2.0,
+          "is_present": true,
+          "reasoning": "The answer explicitly states that up to 5 unused vacation days carry over into the next year. This matches the criterion directly and completely."
+        },
+        {
+          "criterion_id": 33,
+          "weight": 1.0,
+          "score": 0.0,
+          "is_present": false,
+          "reasoning": "The answer mentions that unused vacation days can carry over into the next year, but it does not say anything about them expiring at the end of March. The specific expiration timing is missing, so the criterion is not covered."
         }
       ],
       "labels": [
-        "tool"
+        "policy"
+      ]
+    },
+    {
+      "case_id": 4,
+      "score": 0.0,
+      "scale": {
+        "maximum": 2,
+        "presence_threshold": 0.5,
+        "level_descriptions": {
+          "2": "Fully covered. Every essential part of the criterion is clearly recognizable in the answer, even if the wording, terminology or structure differs.",
+          "1": "Partially covered. Some essential information is missing, but the basic idea is still derivable from the answer.",
+          "0": "Not covered. The criterion is absent, or the answer has no recognizable connection to it."
+        }
+      },
+      "criterion_results": [
+        {
+          "criterion_id": 41,
+          "weight": 2.0,
+          "score": 0.0,
+          "is_present": false,
+          "reasoning": "The answer says home working is flexible and that teams can work from home whenever it suits them, but it does not mention any specific limit. The criterion requires the explicit limit of up to 2 days per week, which is absent."
+        },
+        {
+          "criterion_id": 42,
+          "weight": 1.0,
+          "score": 0.0,
+          "is_present": false,
+          "reasoning": "The answer says remote work is flexible and that people should do what works for them, but it does not mention any requirement to agree the days with the line manager. The specific approval or agreement condition is missing, so the criterion is not covered."
+        }
+      ],
+      "labels": [
+        "policy"
       ]
     }
   ]

@@ -1,62 +1,63 @@
 {
   "metrics_delta": {
-    "average_score_delta": 0.1250000000000001,
-    "median_score_delta": -0.12499999999999989,
-    "variance_delta": -0.265625,
-    "standard_deviation_delta": -0.3171420192563591,
-    "average_criterion_score_delta": 0.5,
-    "criteria_fulfillment_rate_delta": 0.33333333333333337,
-    "cases_with_score_zero_count_delta": -1
+    "average_score_delta": 0.16666666666666663,
+    "median_score_delta": 0.33333333333333337,
+    "variance_delta": 0.018518518518518517,
+    "standard_deviation_delta": 0.01974934160432723,
+    "average_criterion_score_delta": 0.3999999999999999,
+    "criteria_fulfillment_rate_delta": 0.125,
+    "cases_with_score_zero_count_delta": 0
   },
   "summary": {
     "improved_case_ids": [
+      3,
       1
     ],
     "stable_case_ids": [
       2
     ],
     "worsened_case_ids": [
-      3
+      4
     ],
     "improvement": {
-      "largest": 0.8750000000000001,
-      "mean": 0.8750000000000001,
-      "median": 0.8750000000000001
+      "largest": 0.8333333333333333,
+      "mean": 0.5,
+      "median": 0.5
     },
     "worsening": {
-      "largest": -0.5,
-      "mean": -0.5,
-      "median": -0.5
+      "largest": -0.3333333333333333,
+      "mean": -0.3333333333333333,
+      "median": -0.3333333333333333
     },
-    "improved_case_count": 1,
+    "improved_case_count": 2,
     "stable_case_count": 1,
     "worsened_case_count": 1,
-    "improvement_rate": 0.3333333333333333,
-    "stability_rate": 0.3333333333333333,
-    "worsening_rate": 0.3333333333333333
+    "improvement_rate": 0.5,
+    "stability_rate": 0.25,
+    "worsening_rate": 0.25
   },
   "label_metrics_deltas": [
     {
       "label": "policy",
       "metrics_delta": {
-        "average_score_delta": 0.4375,
-        "median_score_delta": 0.4375,
-        "variance_delta": -0.4921875,
-        "standard_deviation_delta": -0.6187184335382292,
-        "average_criterion_score_delta": 1.0,
-        "criteria_fulfillment_rate_delta": 0.5,
-        "cases_with_score_zero_count_delta": -1
+        "average_score_delta": 0.24999999999999997,
+        "median_score_delta": 0.24999999999999997,
+        "variance_delta": 0.29166666666666663,
+        "standard_deviation_delta": 0.3535533905932737,
+        "average_criterion_score_delta": 0.4,
+        "criteria_fulfillment_rate_delta": 0.08333333333333331,
+        "cases_with_score_zero_count_delta": 0
       }
     },
     {
-      "label": "tool",
+      "label": "procedure",
       "metrics_delta": {
-        "average_score_delta": -0.25,
-        "median_score_delta": -0.25,
-        "variance_delta": 0.125,
-        "standard_deviation_delta": 0.3535533905932738,
-        "average_criterion_score_delta": -0.5,
-        "criteria_fulfillment_rate_delta": 0.0,
+        "average_score_delta": 0.08333333333333337,
+        "median_score_delta": 0.08333333333333337,
+        "variance_delta": -0.013888888888888902,
+        "standard_deviation_delta": -0.11785113019775798,
+        "average_criterion_score_delta": 0.3999999999999999,
+        "criteria_fulfillment_rate_delta": 0.16666666666666674,
         "cases_with_score_zero_count_delta": 0
       }
     }
@@ -64,25 +65,33 @@
   "case_comparison_results": [
     {
       "case_id": 1,
-      "baseline_score": 0.0,
-      "candidate_score": 0.8750000000000001,
-      "score_delta": 0.8750000000000001,
+      "baseline_score": 0.8333333333333333,
+      "candidate_score": 1.0,
+      "score_delta": 0.16666666666666674,
       "status": "improved",
       "criterion_comparison_results": [
         {
-          "criterion_id": 1,
+          "criterion_id": 11,
           "weight": 3.0,
+          "baseline_score": 2.0,
+          "candidate_score": 2.0,
+          "score_delta": 0.0,
+          "status": "stable"
+        },
+        {
+          "criterion_id": 12,
+          "weight": 2.0,
+          "baseline_score": 2.0,
+          "candidate_score": 2.0,
+          "score_delta": 0.0,
+          "status": "stable"
+        },
+        {
+          "criterion_id": 13,
+          "weight": 1.0,
           "baseline_score": 0.0,
           "candidate_score": 2.0,
           "score_delta": 2.0,
-          "status": "improved"
-        },
-        {
-          "criterion_id": 2,
-          "weight": 1.0,
-          "baseline_score": 0.0,
-          "candidate_score": 1.0,
-          "score_delta": 1.0,
           "status": "improved"
         }
       ]
@@ -96,6 +105,14 @@
       "criterion_comparison_results": [
         {
           "criterion_id": 21,
+          "weight": 3.0,
+          "baseline_score": 2.0,
+          "candidate_score": 2.0,
+          "score_delta": 0.0,
+          "status": "stable"
+        },
+        {
+          "criterion_id": 22,
           "weight": 1.0,
           "baseline_score": 2.0,
           "candidate_score": 2.0,
@@ -106,17 +123,58 @@
     },
     {
       "case_id": 3,
-      "baseline_score": 1.0,
-      "candidate_score": 0.5,
-      "score_delta": -0.5,
-      "status": "worsened",
+      "baseline_score": 0.0,
+      "candidate_score": 0.8333333333333333,
+      "score_delta": 0.8333333333333333,
+      "status": "improved",
       "criterion_comparison_results": [
         {
           "criterion_id": 31,
+          "weight": 3.0,
+          "baseline_score": 0.0,
+          "candidate_score": 2.0,
+          "score_delta": 2.0,
+          "status": "improved"
+        },
+        {
+          "criterion_id": 32,
+          "weight": 2.0,
+          "baseline_score": 0.0,
+          "candidate_score": 2.0,
+          "score_delta": 2.0,
+          "status": "improved"
+        },
+        {
+          "criterion_id": 33,
+          "weight": 1.0,
+          "baseline_score": 0.0,
+          "candidate_score": 0.0,
+          "score_delta": 0.0,
+          "status": "stable"
+        }
+      ]
+    },
+    {
+      "case_id": 4,
+      "baseline_score": 0.3333333333333333,
+      "candidate_score": 0.0,
+      "score_delta": -0.3333333333333333,
+      "status": "worsened",
+      "criterion_comparison_results": [
+        {
+          "criterion_id": 41,
+          "weight": 2.0,
+          "baseline_score": 0.0,
+          "candidate_score": 0.0,
+          "score_delta": 0.0,
+          "status": "stable"
+        },
+        {
+          "criterion_id": 42,
           "weight": 1.0,
           "baseline_score": 2.0,
-          "candidate_score": 1.0,
-          "score_delta": -1.0,
+          "candidate_score": 0.0,
+          "score_delta": -2.0,
           "status": "worsened"
         }
       ]
