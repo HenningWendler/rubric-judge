@@ -94,7 +94,7 @@ def unconfigured_client(monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]
     `raise_server_exceptions=False` makes the client behave like a real one and report the
     status code instead of re-raising the server-side error."""
     for variable in ("ENDPOINT", "API_KEY", "MODEL"):
-        monkeypatch.delenv(f"RUBRIC_EVAL_JUDGE_{variable}", raising=False)
+        monkeypatch.delenv(f"RUBRIC_JUDGE_{variable}", raising=False)
     get_judge.cache_clear()
     with TestClient(app, raise_server_exceptions=False) as client:
         yield client

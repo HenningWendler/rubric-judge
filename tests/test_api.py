@@ -191,9 +191,9 @@ def test_one_invalid_case_rejects_the_whole_run_before_any_call(client):
 # with an in-memory transport under the SDK where a socket used to be.
 
 JUDGE_ENVIRONMENT = {
-    "RUBRIC_EVAL_JUDGE_ENDPOINT": "http://stub/v1",
-    "RUBRIC_EVAL_JUDGE_API_KEY": "stub-key",
-    "RUBRIC_EVAL_JUDGE_MODEL": "stub-model",
+    "RUBRIC_JUDGE_ENDPOINT": "http://stub/v1",
+    "RUBRIC_JUDGE_API_KEY": "stub-key",
+    "RUBRIC_JUDGE_MODEL": "stub-model",
 }
 """Enough to let `get_judge` build a judge from the environment. It is never called, so the
 endpoint does not have to exist — only the wiring is under test."""

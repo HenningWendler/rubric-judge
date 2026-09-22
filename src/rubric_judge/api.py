@@ -49,7 +49,7 @@ def get_judge() -> Judge:
 
     Example:
         app.dependency_overrides[get_judge] = lambda: my_own_judge   # grade differently
-        get_judge.cache_clear()   # after changing RUBRIC_EVAL_JUDGE_* in this process
+        get_judge.cache_clear()   # after changing RUBRIC_JUDGE_* in this process
     """
     return OpenAIJudge(JudgeConfig.from_env())
 
@@ -157,7 +157,7 @@ async def evaluate_case(case: Case, judge: Annotated[Judge, Depends(get_judge)])
     first LLM call, so a rejected request costs nothing.
 
     **503** if the judge could not answer for a criterion — its endpoint refused, timed out,
-    ran out of quota, or never replied usably within `RUBRIC_EVAL_JUDGE_MAX_ATTEMPTS`
+    ran out of quota, or never replied usably within `RUBRIC_JUDGE_MAX_ATTEMPTS`
     attempts. You get no result at all then, on purpose: a criterion nobody graded would have
     to be scored `0`, and a run with one invented `0` in it is a plausible number you could
     not tell from a real one. Retry the request once the judge is reachable again.

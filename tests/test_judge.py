@@ -203,9 +203,9 @@ def test_rejects_a_fractional_score_off_the_integral_scale():
 
 
 REQUIRED_ENVIRONMENT = {
-    "RUBRIC_EVAL_JUDGE_ENDPOINT": "http://x/v1",
-    "RUBRIC_EVAL_JUDGE_API_KEY": "k",
-    "RUBRIC_EVAL_JUDGE_MODEL": "m",
+    "RUBRIC_JUDGE_ENDPOINT": "http://x/v1",
+    "RUBRIC_JUDGE_API_KEY": "k",
+    "RUBRIC_JUDGE_MODEL": "m",
 }
 """The three variables a config cannot be built without. Every policy test starts from these
 and breaks or adds exactly the one variable it is about — `from_mapping` takes the whole
@@ -224,7 +224,7 @@ def test_names_every_missing_environment_variable_at_once():
 
 def test_unset_optional_variables_keep_the_field_defaults():
     config = JudgeConfig.from_mapping(
-        {**REQUIRED_ENVIRONMENT, "RUBRIC_EVAL_JUDGE_MAX_ATTEMPTS": "5"}
+        {**REQUIRED_ENVIRONMENT, "RUBRIC_JUDGE_MAX_ATTEMPTS": "5"}
     )
     assert config.temperature == 0.0
     assert config.max_attempts == 5
@@ -583,7 +583,7 @@ async def test_the_judge_is_asked_with_the_configured_sampling_settings():
 def test_an_attempt_budget_below_one_is_rejected():
     """`max_attempts=0` would never ask the judge at all and report "no valid answer in 0
     attempts" — a rubric silently scoring 0 without a single LLM call. It comes straight from
-    RUBRIC_EVAL_JUDGE_MAX_ATTEMPTS, so it has to be caught at the boundary."""
+    RUBRIC_JUDGE_MAX_ATTEMPTS, so it has to be caught at the boundary."""
     with pytest.raises(ValueError):
         JudgeConfig(model="m", endpoint="http://x/v1", api_key="k", max_attempts=0)
 
@@ -599,16 +599,16 @@ def test_a_negative_temperature_is_rejected():
 
 
 def test_an_empty_required_environment_variable_is_refused():
-    """`export RUBRIC_EVAL_JUDGE_API_KEY=` is a typo, not a configuration — an empty key would
+    """`export RUBRIC_JUDGE_API_KEY=` is a typo, not a configuration — an empty key would
     otherwise reach the endpoint and fail there with an unrelated 401."""
-    with pytest.raises(RuntimeError, match="RUBRIC_EVAL_JUDGE_API_KEY"):
-        JudgeConfig.from_mapping({**REQUIRED_ENVIRONMENT, "RUBRIC_EVAL_JUDGE_API_KEY": ""})
+    with pytest.raises(RuntimeError, match="RUBRIC_JUDGE_API_KEY"):
+        JudgeConfig.from_mapping({**REQUIRED_ENVIRONMENT, "RUBRIC_JUDGE_API_KEY": ""})
 
 
 def test_a_non_numeric_environment_value_names_the_offending_setting():
     with pytest.raises(ValueError, match="temperature"):
         JudgeConfig.from_mapping(
-            {**REQUIRED_ENVIRONMENT, "RUBRIC_EVAL_JUDGE_TEMPERATURE": "warm"}
+            {**REQUIRED_ENVIRONMENT, "RUBRIC_JUDGE_TEMPERATURE": "warm"}
         )
 
 
@@ -670,7 +670,7 @@ def test_the_concurrency_limit_is_read_from_the_environment(monkeypatch):
     """The one test that goes through `from_env` and the real process environment: what the
     rules are is `from_mapping`'s business and is tested on plain dicts, but that the wrapper
     actually hands it `os.environ` is only visible here."""
-    exported = {**REQUIRED_ENVIRONMENT, "RUBRIC_EVAL_JUDGE_MAX_CONCURRENT": "16"}
+    exported = {**REQUIRED_ENVIRONMENT, "RUBRIC_JUDGE_MAX_CONCURRENT": "16"}
     for variable, value in exported.items():
         monkeypatch.setenv(variable, value)
 
@@ -841,13 +841,13 @@ def test_an_empty_optional_environment_variable_is_refused_like_an_empty_require
         JudgeConfig.from_mapping(
             {
                 **REQUIRED_ENVIRONMENT,
-                "RUBRIC_EVAL_JUDGE_MAX_CONCURRENT": "",
-                "RUBRIC_EVAL_JUDGE_TEMPERATURE": "",
+                "RUBRIC_JUDGE_MAX_CONCURRENT": "",
+                "RUBRIC_JUDGE_TEMPERATURE": "",
             }
         )
 
-    assert "RUBRIC_EVAL_JUDGE_MAX_CONCURRENT" in str(complaint.value)
-    assert "RUBRIC_EVAL_JUDGE_TEMPERATURE" in str(complaint.value)
+    assert "RUBRIC_JUDGE_MAX_CONCURRENT" in str(complaint.value)
+    assert "RUBRIC_JUDGE_TEMPERATURE" in str(complaint.value)
 
 
 # --- the scale the judge declares ----------------------------------------------------------
