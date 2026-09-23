@@ -300,6 +300,8 @@ variables serve both entry points.
 | `RUBRIC_JUDGE_MAX_ATTEMPTS` | int, 1 or more | no, `3` | Tries per criterion, counting the first. An unusable reply and a failed connection each cost one. Running out fails the whole run. Raise it for a small model that formats badly, or for a flaky endpoint |
 | `RUBRIC_JUDGE_MAX_CONCURRENT` | int, 1 or more | no, `8` | Judge calls in flight at once. Raise it for a local vLLM or Ollama, lower it for a small hosted tier |
 | `RUBRIC_JUDGE_HEALTH_INTERVAL` | int, `0` or 60 or more | no, `0` | Seconds a running service lets its judge go without an answered call before it proves it with one small call, for example `86400` for once a day. `0` never checks. See [A judge that stops working](#a-judge-that-stops-working) |
+| `RUBRIC_JUDGE_HEALTH_RETRIES` | int, 0 or more | no, `3` | How often that periodic check is repeated after an outage before the service reports unhealthy. `0` reports it after the first failed check |
+| `RUBRIC_JUDGE_HEALTH_FIRST_PAUSE` | int, 1 or more | no, `300` | Seconds before the first of those retries. Each further pause doubles, so the default waits 5, 10 and 20 minutes |
 
 Any OpenAI-compatible endpoint works, including OpenAI, Azure, vLLM, Ollama, Groq and
 OpenRouter, because the official `openai` SDK talks to whatever `base_url` it is given.
@@ -1471,11 +1473,18 @@ because one oversized case can earn it while the next case goes through.
 
 A quiet service gets no proof from traffic. Set `RUBRIC_JUDGE_HEALTH_INTERVAL` and it sends the
 same small call as at startup whenever its judge has gone that many seconds without an answered
-call, `86400` for once a day. The check waits out an outage for up to
-`RUBRIC_JUDGE_MAX_ATTEMPTS` attempts before it gives up. A check that fails turns the service
-unhealthy, and the next one runs one interval later rather than in a loop. Left unset, the
-service relies on its startup check and its traffic alone, and a key revoked while nobody
-calls goes unnoticed until the next request.
+call, `86400` for once a day. Each such call waits at most 60 seconds for its answer. A
+rejection turns the service unhealthy at once. An outage is retried instead, after 5, 10 and
+20 minutes by default (`RUBRIC_JUDGE_HEALTH_RETRIES`, `RUBRIC_JUDGE_HEALTH_FIRST_PAUSE`), and the
+service stays healthy while it waits. A judge call answered in the meantime ends the wait. Only
+when every attempt failed does the service report unhealthy, and the next check runs one
+interval later rather than in a loop. Left unset, the service relies on its startup check and
+its traffic alone, and a key revoked while nobody calls goes unnoticed until the next request.
+
+The longest an outage can take to show is therefore the interval, plus four attempts of 60
+seconds and 35 minutes of pauses, plus the 90 seconds Docker takes to see three failed probes
+in a row. The startup check does not wait like this. It retries within seconds and stops the
+service, so a container started during an outage exits and your restart policy tries again.
 
 ### Concurrency
 

@@ -109,7 +109,9 @@ somewhere else. Each field reads the environment variable named in the last colu
 | `max_tokens` | `int` | no, default `768` | `> 0`. Must fit the reasoning and the closing JSON object. `RUBRIC_JUDGE_MAX_TOKENS` |
 | `max_attempts` | `int` | no, default `3` | `>= 1`, the first try included. The only retry budget there is, since the SDK's own is switched off. `RUBRIC_JUDGE_MAX_ATTEMPTS` |
 | `max_concurrent` | `int` | no, default `8` | `>= 1`. Judge calls in flight at once, per judge *instance*. `RUBRIC_JUDGE_MAX_CONCURRENT` |
-| `health_interval_seconds` | `int` | no, default `0` | `0`, or `>= 60` (`MINIMUM_HEALTH_INTERVAL_SECONDS`). How long a running service lets its judge go without an answered call before it sends one `check()`. `0` never checks. `RUBRIC_JUDGE_HEALTH_INTERVAL` |
+| `health_interval_seconds` | `int` | no, default `0` | `0`, or `>= 60` (`MINIMUM_HEALTH_INTERVAL_SECONDS`). How long a running service lets its judge go without an answered call before it checks it. `0` never checks. `RUBRIC_JUDGE_HEALTH_INTERVAL` |
+| `health_check_retries` | `int` | no, default `3` | `>= 0`. Retries of a periodic check after an outage, before the judge counts as unhealthy. A rejection is never retried. `RUBRIC_JUDGE_HEALTH_RETRIES` |
+| `health_check_first_pause_seconds` | `int` | no, default `300` | `>= 1`. The pause before the first retry, doubled before each further one. `RUBRIC_JUDGE_HEALTH_FIRST_PAUSE` |
 
 ```python
 JudgeConfig(model="qwen3:8b", endpoint="http://localhost:11434/v1", api_key="ollama")
@@ -474,6 +476,7 @@ class OpenAIJudge:
                  scale: Scale = DEFAULT_SCALE, client: AsyncOpenAI | None = None)
     async def score(self, answer: str, criterion: Criterion, context: str | None = None) -> JudgeReply
     async def check(self) -> None
+    async def check_once(self) -> None
 
     scale: Scale            # what it grades on
     health: JudgeHealth     # whether the endpoint recently answered
@@ -498,12 +501,15 @@ request would hand each request its own full set of slots. `free_call_slots` ret
 semaphore of the event loop the call runs in, one per loop, and raises `RuntimeError` outside a
 running loop.
 
-`check` proves the endpoint accepts this judge's key, model and request shape with one call of
-at most 16 reply tokens, sent with the configured model and temperature. Any answer counts,
-even an empty one. Outages are waited out like in `score` and end in `JudgeUnavailableError`,
-and a rejection is raised unretried as the SDK's own exception. Every failure of `check` marks
-`health` unhealthy. During `score`, only a `401`, `403` or `404` does, and any answer marks it
-healthy again.
+`check_once` proves the endpoint accepts this judge's key, model and request shape with one
+call of at most 16 reply tokens, sent with the configured model and temperature, which waits at
+most 60 seconds for its answer. Any answer counts, even an empty one, and marks `health`
+healthy. An outage, a timeout included, raises `JudgeUnavailableError` and changes nothing, so
+the caller's own schedule decides when the judge is unhealthy. A rejection is raised as the
+SDK's own exception. `check` repeats `check_once` through outages with the quick backoff of
+`score` and marks `health` unhealthy on any failure, which is what the service's startup uses.
+During `score`, only a `401`, `403` or `404` marks it unhealthy, and any answer marks it
+healthy again. Judge calls keep the SDK's own timeout of 600 seconds.
 
 ```python
 class JudgeHealth:
@@ -566,13 +572,18 @@ app.dependency_overrides[get_judge] = lambda: my_own_judge   # before startup
 ```python
 def health_report(source: JudgeSource, judge_health: JudgeHealth | None,
                   monitor_alive: bool) -> HealthReport
+def retry_pauses_seconds(first_pause_seconds: float, retries: int) -> list[float]
 async def prove_the_judge_periodically(judge: OpenAIJudge,
                                        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep) -> None
 ```
 `health_report` decides the body of `GET /health`, and a periodic check that crashed counts as
-unhealthy. `prove_the_judge_periodically` is the background task the service runs when
-`health_interval_seconds` is positive. It checks whenever the evidence in `judge.health` is
-older than the interval, logs a failed check instead of raising it, and lets only a bug end it.
+unhealthy. `retry_pauses_seconds(300, 3)` is `[300, 600, 1200]`, the waits before each retry of
+a periodic check, and `[]` for no retries. `prove_the_judge_periodically` is the background task
+the service runs when `health_interval_seconds` is positive. It calls `check_once` whenever the
+evidence in `judge.health` is older than the interval, retries an outage after each of those
+pauses while the judge stays as it was, and records a failure only once every attempt failed. A
+rejection is recorded at once, and traffic answered or refused during a pause ends the schedule.
+It logs every failed attempt instead of raising it, and only a bug ends it.
 
 ## Exceptions
 
@@ -777,7 +788,8 @@ asks this endpoint.
 | `judge` | `str` | `ok`, `failing`, `custom`, `none` | `ok` or `failing` for a judge from the environment, `custom` for one installed in code, `none` in compare-only mode |
 
 The judge turns `failing` when the endpoint refuses a call with `401`, `403` or `404`, when a
-periodic check fails, or when the periodic check crashed. It turns `ok` again with the next
+periodic check fails on every attempt of its retry schedule or is rejected, or when the
+periodic check crashed. It turns `ok` again with the next
 answered call. An outage answered with `503` per request does not change it. The cause of a
 `failing` judge is in the server log and never in the body. `POST /compare` needs no judge at
 all and answers correctly in every one of these states.

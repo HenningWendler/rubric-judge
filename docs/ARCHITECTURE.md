@@ -145,9 +145,9 @@ field tables in [REFERENCE.md](REFERENCE.md). One text, never three, so they can
 ## Tests
 
 ```bash
-.venv/bin/python -m pytest              # 395 tests, no Docker needed
+.venv/bin/python -m pytest              # 407 tests, no Docker needed
 .venv/bin/python -m pytest -m docker    # the 5 tests that build and run the image
-.venv/bin/python -m pytest -m ""        # all 400
+.venv/bin/python -m pytest -m ""        # all 412
 ```
 
 No real LLM is ever called. The mocking happens at two levels, with a third helper for the
@@ -178,7 +178,7 @@ completion with a grade of 2, and its `status` makes it refuse like an endpoint 
 key. `clean_environment` removes every `RUBRIC_JUDGE_*` variable, so a test alone decides which
 of the three judge sources the service starts with. `FakeTime` in
 [../tests/test_api.py](../tests/test_api.py) replaces the health clock and the monitor's sleep,
-so a periodic check a day apart runs at once.
+so a periodic check a day apart, and a retry schedule of 35 minutes, run at once.
 
 [../tests/test_deployment.py](../tests/test_deployment.py) starts the service the two ways it
 really runs. Uvicorn runs as a subprocess in the default run. The image is built and run only
