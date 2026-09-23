@@ -27,7 +27,7 @@ BUILD_TIMEOUT_SECONDS = 600
 
 
 def test_uvicorn_refuses_to_start_without_a_configured_judge():
-    finished = subprocess.run(
+    refused_start = subprocess.run(
         _uvicorn_command(_free_port()),
         env=_environment_without_judge(),
         capture_output=True,
@@ -35,9 +35,8 @@ def test_uvicorn_refuses_to_start_without_a_configured_judge():
         timeout=STARTUP_TIMEOUT_SECONDS,
     )
 
-    assert finished.returncode != 0
-    for variable in JUDGE_ENVIRONMENT:
-        assert f"{variable} is missing" in finished.stderr
+    assert refused_start.returncode != 0
+    _assert_names_every_missing_variable(refused_start.stderr)
 
 
 def test_uvicorn_serves_once_the_judge_is_configured():
@@ -68,11 +67,11 @@ def image() -> str:
 @pytest.fixture
 def configured_container(image: str) -> Iterator[str]:
     """A running container configured from `JUDGE_ENVIRONMENT`, removed afterwards."""
-    variables = [
+    environment_arguments = [
         argument for pair in JUDGE_ENVIRONMENT.items() for argument in ("--env", "=".join(pair))
     ]
     container_id = _docker(
-        "run", "--detach", "--rm", "--publish", "127.0.0.1::8000", *variables, image
+        "run", "--detach", "--rm", "--publish", "127.0.0.1::8000", *environment_arguments, image
     )
     try:
         yield container_id
@@ -82,16 +81,15 @@ def configured_container(image: str) -> Iterator[str]:
 
 @pytest.mark.docker
 def test_the_container_refuses_to_start_without_a_configured_judge(image):
-    finished = subprocess.run(
+    refused_start = subprocess.run(
         ["docker", "run", "--rm", image],
         capture_output=True,
         text=True,
         timeout=STARTUP_TIMEOUT_SECONDS,
     )
 
-    assert finished.returncode != 0
-    for variable in JUDGE_ENVIRONMENT:
-        assert f"{variable} is missing" in finished.stderr
+    assert refused_start.returncode != 0
+    _assert_names_every_missing_variable(refused_start.stderr)
 
 
 @pytest.mark.docker
@@ -110,6 +108,12 @@ def test_the_container_does_not_run_as_root(image):
 
 
 # --- helpers ---------------------------------------------------------------------------------
+
+
+def _assert_names_every_missing_variable(startup_log: str) -> None:
+    """Both ways of starting must say what to fix, not only that something is wrong."""
+    for variable in JUDGE_ENVIRONMENT:
+        assert f"{variable} is missing" in startup_log
 
 
 def _uvicorn_command(port: int) -> list[str]:

@@ -95,7 +95,7 @@ endpoint does not have to exist; a test that needs answers installs its own with
 @pytest.fixture
 def client(monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
     """HTTP client against the real app; `use_judge()` swaps in a fake for one test."""
-    with _started_app(monkeypatch) as client:
+    with _client_of_started_app(monkeypatch) as client:
         yield client
 
 
@@ -103,12 +103,14 @@ def client(monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
 def status_reporting_client(monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
     """HTTP client that reports a server fault as its status code, like a real client would,
     instead of re-raising the server-side error into the test."""
-    with _started_app(monkeypatch, raise_server_exceptions=False) as client:
+    with _client_of_started_app(monkeypatch, raise_server_exceptions=False) as client:
         yield client
 
 
 @contextmanager
-def _started_app(monkeypatch: pytest.MonkeyPatch, **client_options: Any) -> Iterator[TestClient]:
+def _client_of_started_app(
+    monkeypatch: pytest.MonkeyPatch, **client_options: Any
+) -> Iterator[TestClient]:
     """The app started the way uvicorn starts it, configured from `JUDGE_ENVIRONMENT`, and
     reset afterwards so no judge or override leaks into the next test."""
     for variable, value in JUDGE_ENVIRONMENT.items():

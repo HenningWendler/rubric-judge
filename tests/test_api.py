@@ -107,12 +107,17 @@ def test_the_result_carries_every_published_field(client):
     assert body["criterion_results"][0]["weight"] == 3
 
 
-def test_the_service_refuses_to_start_without_a_configured_judge(monkeypatch):
-    """No silent fallback and no fake score: a service that could not grade a single request
-    must not come up and report itself healthy. Every missing variable is named at once."""
+@pytest.fixture
+def unconfigured_environment(monkeypatch):
+    """No `RUBRIC_JUDGE_*` variable at all, whatever the developer running the suite exported."""
     for variable in JUDGE_ENVIRONMENT:
         monkeypatch.delenv(variable, raising=False)
     get_judge.cache_clear()
+
+
+def test_the_service_refuses_to_start_without_a_configured_judge(unconfigured_environment):
+    """No silent fallback and no fake score: a service that could not grade a single request
+    must not come up and report itself healthy. Every missing variable is named at once."""
 
     with pytest.raises(RuntimeError) as refusal:
         with TestClient(app):
@@ -123,12 +128,9 @@ def test_the_service_refuses_to_start_without_a_configured_judge(monkeypatch):
     get_judge.cache_clear()
 
 
-def test_a_judge_installed_before_startup_needs_no_environment(monkeypatch):
+def test_a_judge_installed_before_startup_needs_no_environment(unconfigured_environment):
     """A service that brings its own judge overrides `get_judge`; the startup check builds
     that judge instead of demanding `RUBRIC_JUDGE_*` variables it will never read."""
-    for variable in JUDGE_ENVIRONMENT:
-        monkeypatch.delenv(variable, raising=False)
-    get_judge.cache_clear()
     use_judge(FakeJudge({1: 2, 2: 0}))
 
     with TestClient(app) as client:

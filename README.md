@@ -178,8 +178,8 @@ INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
 ```
 
 Docker reads the file literally. Write `KEY=value` without quotes, because a quoted value
-reaches the service with its quotes. Whitespace around a value does no harm, the service drops
-it.
+reaches the service with its quotes. Whitespace around a value does no harm, because the service
+drops it.
 
 The image asks `/health` every second while it starts and every 30 seconds after that, so
 `docker ps` tells you whether the service answers.

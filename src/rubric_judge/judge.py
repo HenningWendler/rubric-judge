@@ -296,7 +296,7 @@ class JudgeConfig(DocumentedModel):
             "max_concurrent": "RUBRIC_JUDGE_MAX_CONCURRENT",
         }
         required_fields = {"endpoint", "api_key", "model"}
-        trimmed = {
+        trimmed_value_per_variable = {
             variable: environment[variable].strip()
             for variable in variable_per_field.values()
             if variable in environment
@@ -304,16 +304,20 @@ class JudgeConfig(DocumentedModel):
         unusable = [
             f"{variable} is missing"
             for field, variable in variable_per_field.items()
-            if field in required_fields and variable not in trimmed
-        ] + [f"{variable} is empty" for variable, value in trimmed.items() if value == ""]
+            if field in required_fields and variable not in trimmed_value_per_variable
+        ] + [
+            f"{variable} is empty"
+            for variable, value in trimmed_value_per_variable.items()
+            if value == ""
+        ]
         if unusable:
             raise RuntimeError(f"Unusable environment variables: {', '.join(unusable)}")
 
         return cls.model_validate(
             {
-                field: trimmed[variable]
+                field: trimmed_value_per_variable[variable]
                 for field, variable in variable_per_field.items()
-                if variable in trimmed
+                if variable in trimmed_value_per_variable
             }
         )
 
