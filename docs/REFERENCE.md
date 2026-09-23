@@ -504,7 +504,9 @@ the same rules to any mapping you hand it, settings loaded from a file or a plai
 test. Both raise `RuntimeError` naming every missing or empty variable at once, and
 `pydantic.ValidationError` when a numeric variable does not parse or is out of range. An
 optional variable that is absent falls back to the field default. An optional variable set to
-the empty string is refused like a missing required one.
+the empty string is refused like a missing required one. Whitespace around a value is dropped
+before any of that is decided, because `docker run --env-file` passes it through where
+`uvicorn --env-file` strips it, so a value of nothing but spaces counts as empty.
 
 ```python
 @lru_cache
@@ -512,15 +514,18 @@ def get_judge() -> Judge          # from rubric_judge.api
 ```
 The FastAPI dependency every endpoint takes its judge from, and the one place the HTTP service
 builds an `OpenAIJudge(JudgeConfig.from_env())`. Cached for the whole process, so one
-`max_concurrent` budget is shared by every request rather than handed out per request. Two
-things to know when you plug in a judge of your own:
+`max_concurrent` budget is shared by every request rather than handed out per request. The
+service calls it once while it starts, through any override installed before startup, so a
+service that brings its own judge needs no `RUBRIC_JUDGE_*` variables. Two things to know when
+you plug in a judge of your own:
 
 ```python
 app.dependency_overrides[get_judge] = lambda: my_own_judge   # grade differently
 get_judge.cache_clear()   # after changing RUBRIC_JUDGE_* inside this process
 ```
 
-It raises `RuntimeError` when the judge cannot be configured, which surfaces as a `500`.
+It raises `RuntimeError` when the judge cannot be configured. That happens while the service
+starts, so uvicorn exits with code 3 and the service never answers a request.
 
 ## Exceptions
 
@@ -716,10 +721,11 @@ runs, so they stay real output.
 
 ### `GET /health`
 
-Answers `{"status": "ok"}` even when the judge is unconfigured, so a missing key never takes
-the container down. `POST /evaluate` is what fails then, loudly, with a `500`, and with a `503`
-when the judge is configured but its endpoint cannot answer. `POST /compare` needs no judge at
-all and answers correctly with no API key configured.
+Answers `{"status": "ok"}`. A service that answers has a complete judge configuration, because
+an unconfigured one refuses to start. The judge endpoint is not asked, so an outage there never
+takes the container down. `POST /evaluate` is what fails then, with a `503`. `POST /compare`
+needs no judge at all and answers correctly while the endpoint is down. The Docker image's
+`HEALTHCHECK` asks this endpoint.
 
 ## Errors
 
@@ -751,17 +757,11 @@ The `422` body carries only `loc`, `msg` and `type`. The rejected value is never
 | `run_metrics()` or `label_metrics()` over cases judged on different scales, since raw grades in two units do not average | `ValueError` naming every scale found | none, unreachable over HTTP: `RunResult` refuses such a run first |
 | `judge_prompt(scale)` for a scale with no `level_descriptions`, or `OpenAIJudge(config, scale=…)` with such a scale and no `system_prompt` | `ValueError` naming the scale | none, raised at construction time and not per request |
 | A judge returning a score above the `scale` it declares | `ValueError` out of `evaluate_case()` naming the criterion, a bug in the judge and not an outage | `500` |
-| Judge not configured: a required `RUBRIC_JUDGE_*` variable missing, or any of them, required or optional, exported empty | `RuntimeError` naming every offending variable and which of the two it is | `500` |
-| A numeric `RUBRIC_JUDGE_*` variable that does not parse or is out of range | `pydantic.ValidationError` naming the setting | `500` |
+| Judge not configured: a required `RUBRIC_JUDGE_*` variable missing, or any of them, required or optional, exported empty or as nothing but whitespace | `RuntimeError` naming every offending variable and which of the two it is | none, the service does not start: uvicorn exits with code 3 |
+| A numeric `RUBRIC_JUDGE_*` variable that does not parse or is out of range | `pydantic.ValidationError` naming the setting | none, the service does not start: uvicorn exits with code 3 |
 | Judge endpoint unreachable, timed out, rate limited or answering `5xx` | retried up to `RUBRIC_JUDGE_MAX_ATTEMPTS` times with a doubling wait, then `JudgeUnavailableError`. The whole run is dropped | `503` |
 | Judge reply unparseable after `RUBRIC_JUDGE_MAX_ATTEMPTS` tries, with no JSON, broken JSON, or a grade off the scale | `UnusableReplyError`, a `ValueError`, per attempt, then `JudgeUnavailableError` naming the last complaint | `503` |
 | Judge reply carrying no content at all, or a response with no choice, from a truncation, a content filter or a tool-call path | `JudgeUnavailableError` naming the endpoint's `finish_reason`, not retried | `503` |
 | Judge endpoint rejecting the key, the model or the request | the `openai` SDK's own exception, unretried, because repeating it would not help | `500` |
 | A bug in the program | propagates as itself | `500` |
 | Request cancelled by a client disconnect or a shutdown | `asyncio.CancelledError` propagates | none |
-
-One exception to the `422` rows above. While the judge is unconfigured, `POST /evaluate` and
-`POST /evaluate/run` answer `500` even for an invalid body. FastAPI resolves the `get_judge`
-dependency before it validates the body, so the server fault is reported rather than the
-client's. That is the right way round, but it does mean the body was never read.
-`POST /compare` takes no judge and validates its body either way.

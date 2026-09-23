@@ -145,11 +145,14 @@ field tables in [REFERENCE.md](REFERENCE.md). One text, never three, so they can
 ## Tests
 
 ```bash
-.venv/bin/python -m pytest
+.venv/bin/python -m pytest              # 362 tests, no Docker needed
+.venv/bin/python -m pytest -m docker    # the 3 tests that build and run the image
+.venv/bin/python -m pytest -m ""        # all 365
 ```
 
-346 tests, and no real LLM is ever called. The mocking happens at two levels, with a third
-helper for the comparison tests.
+No real LLM is ever called. The mocking happens at two levels, with a third helper for the
+comparison tests. The Docker tests carry the `docker` marker and are deselected by default,
+because they need a running Docker daemon and a first build takes about a minute.
 
 `FakeJudge` in [../tests/conftest.py](../tests/conftest.py) replaces the `Judge` protocol and
 scores from a lookup table. `{1: 2, 2: JudgeUnavailableError("down")}` scores criterion 1 with
@@ -164,7 +167,15 @@ because the criteria are judged concurrently and one queue would hand out replie
 order. The end-to-end tests hand a real `OpenAIJudge` an `AsyncOpenAI` client whose transport is
 that stub and drive the whole chain: the HTTP request, the real `openai` SDK writing the call
 and reading the reply, the parsing, and the weighted fold. That is what proves the wire format
-and the self-healing retry, without a socket or an environment variable.
+and the self-healing retry, without a socket. The `client` fixture sets placeholder
+`RUBRIC_JUDGE_*` values from `JUDGE_ENVIRONMENT`, because the app refuses to start without
+them, and your own exported variables never reach a test.
+
+[../tests/test_deployment.py](../tests/test_deployment.py) starts the service the two ways it
+really runs. Uvicorn runs as a subprocess in the default run. The image is built and run only
+under `-m docker`. Both are checked the same way: without configuration they must exit and
+name the missing variables, and configured they must answer `/health`. The container must also
+report `healthy` through its own `HEALTHCHECK` and must not run as root.
 
 `run_of` in [../tests/conftest.py](../tests/conftest.py) builds a finished `RunResult` straight
 from judge scores. `run_of({1: 2, 2: 0}, {21: 1})` is a two-case run, and
@@ -181,12 +192,27 @@ numbers it asserts on.
 | [test_prompt.py](../tests/test_prompt.py) | the prompt a scale generates, held against the hand-written original in [../tests/judge_prompt_en.txt](../tests/judge_prompt_en.txt) |
 | [test_scale.py](../tests/test_scale.py) | what a valid scale is, and what it does to a grade, a run and a comparison |
 | [test_labels.py](../tests/test_labels.py) | what a valid label is, which cases a filter and a bucket select, and what a relabelled case does to a comparison |
-| [test_api.py](../tests/test_api.py) | validation, wiring, serialization, and the end-to-end chain |
+| [test_api.py](../tests/test_api.py) | validation, wiring, the startup refusal, serialization, and the end-to-end chain |
+| [test_deployment.py](../tests/test_deployment.py) | a real uvicorn process, and the Docker image under `-m docker` |
 
 The documents in [../examples](../examples) are real responses of this app driven by a judge
 that grades from a table. They are the only place a reader can check the library against
 something they did not compute themselves, and a test recomputes the stored comparison from the
 two stored runs so that stays true.
+
+## Pinned dependencies
+
+`pyproject.toml` states the ranges the library works with, and those stay open, because
+they are what a project installing rubric-judge has to resolve against its own dependencies.
+[../constraints.txt](../constraints.txt) pins one tested set for the Docker image and the
+README install. Regenerate it from a fresh environment, so nothing left over from development
+ends up in it, and run the suite on the new versions before committing.
+
+```bash
+python3.12 -m venv /tmp/freeze && /tmp/freeze/bin/pip install .
+/tmp/freeze/bin/pip freeze --exclude rubric-judge > constraints.txt
+.venv/bin/pip install --constraint constraints.txt -e '.[test]' && .venv/bin/python -m pytest -m ""
+```
 
 ## Scope
 

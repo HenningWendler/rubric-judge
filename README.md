@@ -130,15 +130,126 @@ Python 3.11 or newer.
 
 ```bash
 python3.12 -m venv .venv
-.venv/bin/pip install -e .
+.venv/bin/pip install --constraint constraints.txt -e .
 ```
 
-Add the test extra if you want to run the suite, `.venv/bin/pip install -e '.[test]'`. The
-runtime dependencies are `pydantic`, `openai`, `fastapi` and `uvicorn`.
+The runtime dependencies are `pydantic`, `openai`, `fastapi` and `uvicorn`.
+[constraints.txt](constraints.txt) pins them, and everything they pull in, to the versions the
+test suite passed on. Leave the flag out and pip takes the newest versions `pyproject.toml`
+allows, which is also what a project installing rubric-judge as a dependency gets. Add the test
+extra if you want to run the suite,
+`.venv/bin/pip install --constraint constraints.txt -e '.[test]'`.
 
 There is no command line interface. The package installs no console script, and
 `python -m rubric_judge` does nothing. The two entry points are the library and the HTTP
 service.
+
+### With Docker
+
+The image serves the HTTP API from [Over HTTP](#over-http) and nothing else. It runs Python
+3.12 and exactly the versions in `constraints.txt`, as one uvicorn process on port 8000 under
+a user that is not root.
+
+```bash
+docker build --tag rubric-judge .
+```
+
+Docker builds for the machine it runs on, so an image built on an Apple silicon Mac runs only
+on arm64. Name the platform of the server it is meant for.
+
+```bash
+docker build --platform linux/amd64 --tag rubric-judge .
+```
+
+The configuration is the variables from [Configure](#configure), passed in when the container
+starts. None of them is baked into the image. `--env-file` reads the same `.env` the service
+reads without Docker, and `--publish 8001:8000` puts the service on the port every curl
+example in this manual uses.
+
+```bash
+docker run --rm --env-file .env --publish 8001:8000 rubric-judge
+```
+
+```
+INFO:     Started server process [1]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+```
+
+Docker reads the file literally. Write `KEY=value` without quotes, because a quoted value
+reaches the service with its quotes. Whitespace around a value does no harm, the service drops
+it.
+
+The image asks `/health` every second while it starts and every 30 seconds after that, so
+`docker ps` tells you whether the service answers.
+
+```bash
+docker ps --filter ancestor=rubric-judge --format '{{.Image}}  {{.Status}}'
+```
+
+```
+rubric-judge  Up 13 seconds (healthy)
+```
+
+Every request in [Over HTTP](#over-http) works against the container unchanged. The first one
+there, sent to this container on 2026-09-23 with the judge from
+[About the output](#about-the-output-in-this-manual), scores what the library scored.
+
+```bash
+curl -sS -X POST http://localhost:8001/evaluate \
+  -H 'Content-Type: application/json' \
+  --data @- <<'JSON' | jq '{score, grades: [.criterion_results[] | {criterion_id, score, is_present}]}'
+{
+  "id": 1,
+  "context": "The question asked was: How do I report sick leave?",
+  "answer": "Call your line manager as early as you can on the first day you are ill, at the latest before 9:00. If you cannot reach them, leave a voicemail and send a short message as well.",
+  "criteria": [
+    {"id": 11, "content": "Tells the employee to inform their line manager.", "weight": 3},
+    {"id": 12, "content": "Names the deadline: before 9:00 on the first day of absence.", "weight": 2},
+    {"id": 13, "content": "Says a doctor's note is needed from the fourth day of absence.", "weight": 1}
+  ],
+  "labels": ["procedure"]
+}
+JSON
+```
+
+```json
+{
+  "score": 0.8333333333333333,
+  "grades": [
+    {
+      "criterion_id": 11,
+      "score": 2.0,
+      "is_present": true
+    },
+    {
+      "criterion_id": 12,
+      "score": 2.0,
+      "is_present": true
+    },
+    {
+      "criterion_id": 13,
+      "score": 0.0,
+      "is_present": false
+    }
+  ]
+}
+```
+
+A container started without its variables does not come up. It exits with code 3, and the
+traceback it prints ends by naming every variable that is missing.
+
+```bash
+docker run --rm rubric-judge
+```
+
+```
+    raise RuntimeError(f"Unusable environment variables: {', '.join(unusable)}")
+RuntimeError: Unusable environment variables: RUBRIC_JUDGE_ENDPOINT is missing, RUBRIC_JUDGE_API_KEY is missing, RUBRIC_JUDGE_MODEL is missing
+
+ERROR:    Application startup failed. Exiting.
+```
 
 ## Configure
 
@@ -161,7 +272,8 @@ OpenRouter, because the official `openai` SDK talks to whatever `base_url` it is
 
 A variable exported **empty** is refused, and that holds for the optional ones too. An
 empty optional variable does not fall back to its default, only one that is absent
-entirely does. Every missing or empty variable is reported at once, in a single error.
+entirely does. Whitespace around a value is dropped first, so a value of nothing but spaces
+counts as empty. Every missing or empty variable is reported at once, in a single error.
 
 ```
 RuntimeError: Unusable environment variables: RUBRIC_JUDGE_API_KEY is missing,
@@ -176,7 +288,8 @@ is set in code, which [Another scale](#another-scale) shows.
 
 Nothing reads `.env` for you. The library reads the process environment, so load the file
 however your project already does, for example with `python-dotenv`. The HTTP service is
-the exception, because `uvicorn --env-file .env` does it for you.
+the exception, because `uvicorn --env-file .env` and `docker run --env-file .env` both do it
+for you.
 
 ---
 
@@ -586,10 +699,27 @@ The variables are the ones in [Configure](#configure), and `--env-file` is uvico
 yourself. An exported variable wins over the file.
 
 Port 8001 rather than 8000 only because 8000 was occupied on the machine these examples ran
-on. Generated, interactive API docs are served at `/docs`.
+on. Generated, interactive API docs are served at `/docs`. The container from
+[With Docker](#with-docker) serves the same API on the same port, so every example below
+works against it unchanged.
 
-The judge is built lazily, on the first request that needs one, so a server that starts
-says nothing about whether your credentials work.
+The service builds its judge while it starts, and refuses to start when a variable is missing
+or empty. Started without them, uvicorn exits with code 3, and the traceback it prints ends by
+naming all of them.
+
+```bash
+.venv/bin/uvicorn rubric_judge.api:app --port 8001
+```
+
+```
+    raise RuntimeError(f"Unusable environment variables: {', '.join(unusable)}")
+RuntimeError: Unusable environment variables: RUBRIC_JUDGE_ENDPOINT is missing, RUBRIC_JUDGE_API_KEY is missing, RUBRIC_JUDGE_MODEL is missing
+
+ERROR:    Application startup failed. Exiting.
+```
+
+Nothing is sent to the judge endpoint at startup. A server that starts has a complete
+configuration, but your key and model are first tried by the first request.
 
 ### Health
 
@@ -601,9 +731,10 @@ curl -sS http://localhost:8001/health
 {"status":"ok"}
 ```
 
-That is the whole contract. It answers `200` even with no API key configured, deliberately,
-because liveness must not depend on a third party. The request that fails then is
-`POST /evaluate`, with a `500`.
+That is the whole contract. A service that answers has a complete configuration, because an
+unconfigured one never starts. `/health` does not ask the judge endpoint, because liveness must
+not depend on a third party. When that endpoint is down, `POST /evaluate` is what fails, with a
+`503`.
 
 ### 1. One answer
 
@@ -866,7 +997,7 @@ statuses is in [the reference](docs/REFERENCE.md).
 | `422` | A label filter matching no case | `{"detail":[{"loc":["body"],"msg":"Value error, label_filter [['polizy']] matches no case; labels present in this run: policy (2), procedure (2)","type":"value_error"}]}` |
 | `422` | Two runs that do not describe the same catalog | `{"detail":"the runs are not comparable: case 4, criterion 42: weight 1.0 vs 2.0"}` |
 | `503` | The judge could not answer, so the whole run is dropped | `{"detail":"Judge gave no usable answer in 3 attempts: Connection error."}` |
-| `500` | The judge is not configured, or the program has a bug | `Internal Server Error`, with the missing variables named in the server log |
+| `500` | The judge endpoint rejects the key or the model, or the program has a bug | `Internal Server Error`, with the cause in the server log |
 
 A healthy service does not hand you a `503` on request. The one above was produced by
 starting a second server pointed at a dead endpoint, which is worth knowing if you intend to
