@@ -8,13 +8,19 @@ from openai import (
     APIConnectionError,
     APITimeoutError,
     AsyncOpenAI,
+    AuthenticationError,
+    BadRequestError,
     InternalServerError,
+    NotFoundError,
+    PermissionDeniedError,
     RateLimitError,
 )
+from pydantic import ValidationError
 
 from rubric_judge import Case, Run, evaluate_case, evaluate_run
 from rubric_judge.judge import (
     JudgeConfig,
+    JudgeHealth,
     JudgeReply,
     JudgeUnavailableError,
     OpenAIJudge,
@@ -51,6 +57,21 @@ def server_error(message: str = "bad gateway") -> InternalServerError:
     return InternalServerError(
         message,
         response=httpx.Response(502, request=_REQUEST),  # type: ignore[arg-type]  # see above
+        body=None,
+    )
+
+
+def rejected(status: int) -> Exception:
+    """The SDK's own exception for an endpoint answering `status`, built like the others."""
+    error_type = {
+        400: BadRequestError,
+        401: AuthenticationError,
+        403: PermissionDeniedError,
+        404: NotFoundError,
+    }[status]
+    return error_type(
+        f"rejected with {status}",
+        response=httpx.Response(status, request=_REQUEST),  # type: ignore[arg-type]  # see above
         body=None,
     )
 
@@ -629,6 +650,139 @@ def test_a_non_numeric_environment_value_names_the_offending_setting():
         JudgeConfig.from_mapping(
             {**REQUIRED_ENVIRONMENT, "RUBRIC_JUDGE_TEMPERATURE": "warm"}
         )
+
+
+def test_the_health_interval_is_off_unless_configured():
+    assert JudgeConfig.from_mapping(REQUIRED_ENVIRONMENT).health_interval_seconds == 0
+
+
+def test_the_health_interval_is_read_from_the_environment():
+    config = JudgeConfig.from_mapping(
+        {**REQUIRED_ENVIRONMENT, "RUBRIC_JUDGE_HEALTH_INTERVAL": "86400"}
+    )
+    assert config.health_interval_seconds == 86400
+
+
+@pytest.mark.parametrize("interval_seconds", [1, 59])
+def test_a_health_interval_under_a_minute_is_refused(interval_seconds):
+    """Every check is a paid call, so an interval of a few seconds would bill one each time."""
+    with pytest.raises(ValidationError, match="health_interval_seconds"):
+        JudgeConfig(
+            model="m", endpoint="http://x/v1", api_key="k", health_interval_seconds=interval_seconds
+        )
+
+
+@pytest.mark.parametrize("interval_seconds", [0, 60])
+def test_zero_disables_the_health_interval_and_sixty_is_the_shortest(interval_seconds):
+    config = JudgeConfig(
+        model="m", endpoint="http://x/v1", api_key="k", health_interval_seconds=interval_seconds
+    )
+    assert config.health_interval_seconds == interval_seconds
+
+
+# --- health ---------------------------------------------------------------------------------
+
+
+def test_a_new_judge_is_unproven_and_due_for_a_check():
+    health = JudgeHealth(clock=lambda: 0.0)
+
+    assert not health.is_healthy
+    assert health.seconds_until_check_due(interval_seconds=3600) == 0.0
+
+
+def test_a_failure_restarts_the_wait_like_a_proof_does():
+    """A check that failed is repeated one interval later, not in a tight loop."""
+    now = [100.0]
+    health = JudgeHealth(clock=lambda: now[0])
+
+    health.record_failure()
+    now[0] = 160.0
+
+    assert health.seconds_until_check_due(interval_seconds=3600) == 3540.0
+
+
+async def test_a_check_the_endpoint_answers_proves_the_judge_healthy():
+    judge, fake = _judge([""])  # even an empty reply proves the endpoint accepted the call
+
+    await judge.check()
+
+    assert judge.health.is_healthy
+    assert fake.calls == [[{"role": "user", "content": "Reply with OK."}]]
+
+
+@pytest.mark.parametrize("status", [400, 401, 403, 404])
+async def test_a_check_the_endpoint_rejects_is_raised_unretried_and_unhealthy(status):
+    """Unlike a failed `score`, a failed check always condemns the judge: its request is fixed
+    and small, so nothing about one case can be to blame."""
+    judge, fake = _judge([rejected(status), "unused"])
+
+    with pytest.raises(type(rejected(status))):
+        await judge.check()
+
+    assert not judge.health.is_healthy
+    assert len(fake.calls) == 1
+
+
+async def test_a_check_waits_out_an_outage_before_giving_up():
+    judge, fake = _judge([rate_limited(), server_error(), rate_limited()])
+
+    with pytest.raises(JudgeUnavailableError, match="health check in 3 attempts"):
+        await judge.check()
+
+    assert not judge.health.is_healthy
+    assert len(fake.calls) == 3
+
+
+async def test_a_check_that_heals_within_its_attempts_proves_the_judge():
+    judge, _ = _judge([rate_limited(), "OK"])
+
+    await judge.check()
+
+    assert judge.health.is_healthy
+
+
+@pytest.mark.parametrize("status", [401, 403, 404])
+async def test_a_rejected_key_model_or_url_during_scoring_makes_the_judge_unhealthy(status):
+    judge, _ = _judge(['Fine.\n{"score": 2}', rejected(status)])
+    await judge.score("answer", CRITERION)
+
+    with pytest.raises(type(rejected(status))):
+        await judge.score("answer", CRITERION)
+
+    assert not judge.health.is_healthy
+
+
+async def test_a_bad_request_during_scoring_leaves_the_judge_healthy():
+    """One oversized case can earn a 400 while the next one goes through, so it says nothing
+    about the service."""
+    judge, _ = _judge(['Fine.\n{"score": 2}', rejected(400)])
+    await judge.score("answer", CRITERION)
+
+    with pytest.raises(BadRequestError):
+        await judge.score("answer", CRITERION)
+
+    assert judge.health.is_healthy
+
+
+async def test_an_outage_during_scoring_leaves_the_judge_healthy():
+    """An outage is already answered with a 503 per request and heals by itself."""
+    judge, _ = _judge(['Fine.\n{"score": 2}', rate_limited(), rate_limited(), rate_limited()])
+    await judge.score("answer", CRITERION)
+
+    with pytest.raises(JudgeUnavailableError):
+        await judge.score("answer", CRITERION)
+
+    assert judge.health.is_healthy
+
+
+async def test_an_answered_call_makes_a_failing_judge_healthy_again():
+    judge, _ = _judge([rejected(401), 'Fine.\n{"score": 2}'])
+    with pytest.raises(AuthenticationError):
+        await judge.score("answer", CRITERION)
+
+    await judge.score("answer", CRITERION)
+
+    assert judge.health.is_healthy
 
 
 # --- throttling -----------------------------------------------------------------------------
