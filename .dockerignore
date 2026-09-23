@@ -1,0 +1,7 @@
+# Only what the image needs reaches the build, so .env, temp/ and .git never can.
+*
+!pyproject.toml
+!constraints.txt
+!README.md
+!src/
+**/__pycache__
