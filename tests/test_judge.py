@@ -5,16 +5,23 @@ from typing import Any, cast
 import httpx
 import pytest
 from openai import (
+    NOT_GIVEN,
     APIConnectionError,
     APITimeoutError,
     AsyncOpenAI,
+    AuthenticationError,
+    BadRequestError,
     InternalServerError,
+    NotFoundError,
+    PermissionDeniedError,
     RateLimitError,
 )
+from pydantic import ValidationError
 
 from rubric_judge import Case, Run, evaluate_case, evaluate_run
 from rubric_judge.judge import (
     JudgeConfig,
+    JudgeHealth,
     JudgeReply,
     JudgeUnavailableError,
     OpenAIJudge,
@@ -51,6 +58,21 @@ def server_error(message: str = "bad gateway") -> InternalServerError:
     return InternalServerError(
         message,
         response=httpx.Response(502, request=_REQUEST),  # type: ignore[arg-type]  # see above
+        body=None,
+    )
+
+
+def rejected(status: int) -> Exception:
+    """The SDK's own exception for an endpoint answering `status`, built like the others."""
+    error_type = {
+        400: BadRequestError,
+        401: AuthenticationError,
+        403: PermissionDeniedError,
+        404: NotFoundError,
+    }[status]
+    return error_type(
+        f"rejected with {status}",
+        response=httpx.Response(status, request=_REQUEST),  # type: ignore[arg-type]  # see above
         body=None,
     )
 
@@ -605,11 +627,271 @@ def test_an_empty_required_environment_variable_is_refused():
         JudgeConfig.from_mapping({**REQUIRED_ENVIRONMENT, "RUBRIC_JUDGE_API_KEY": ""})
 
 
+def test_whitespace_around_an_environment_value_is_dropped():
+    """`docker run --env-file` keeps a trailing space that `uvicorn --env-file` strips; the
+    same file must configure the same judge either way, not a URL that answers 404."""
+    config = JudgeConfig.from_mapping(
+        {
+            **REQUIRED_ENVIRONMENT,
+            "RUBRIC_JUDGE_ENDPOINT": "http://x/v1  ",
+            "RUBRIC_JUDGE_MODEL": " m",
+        }
+    )
+    assert config.endpoint == "http://x/v1"
+    assert config.model == "m"
+
+
+def test_a_misspelled_judge_variable_is_refused_rather_than_ignored():
+    """Ignored, `RUBRIC_JUDGE_HEALTH_INTERVALL` would start a service that never checks its
+    judge while its operator believes it does."""
+    with pytest.raises(RuntimeError, match="RUBRIC_JUDGE_HEALTH_INTERVALL is unknown"):
+        JudgeConfig.from_mapping(
+            {**REQUIRED_ENVIRONMENT, "RUBRIC_JUDGE_HEALTH_INTERVALL": "86400"}
+        )
+
+
+def test_an_unknown_judge_variable_is_named_together_with_a_missing_one():
+    with pytest.raises(RuntimeError) as refusal:
+        JudgeConfig.from_mapping(
+            {"RUBRIC_JUDGE_ENDPOINT": "http://x/v1", "RUBRIC_JUDGE_MODLE": "m",
+             "RUBRIC_JUDGE_API_KEY": "k"}
+        )
+
+    assert str(refusal.value) == (
+        "Unusable environment variables: RUBRIC_JUDGE_MODEL is missing, "
+        "RUBRIC_JUDGE_MODLE is unknown"
+    )
+
+
+def test_names_without_the_judge_prefix_are_left_alone():
+    config = JudgeConfig.from_mapping({**REQUIRED_ENVIRONMENT, "PATH": "/usr/bin", "RUBRIC_X": "1"})
+    assert config.model == REQUIRED_ENVIRONMENT["RUBRIC_JUDGE_MODEL"]
+
+
+def test_a_value_of_only_whitespace_is_refused_as_empty():
+    with pytest.raises(RuntimeError, match="RUBRIC_JUDGE_API_KEY is empty"):
+        JudgeConfig.from_mapping({**REQUIRED_ENVIRONMENT, "RUBRIC_JUDGE_API_KEY": "   "})
+
+
 def test_a_non_numeric_environment_value_names_the_offending_setting():
     with pytest.raises(ValueError, match="temperature"):
         JudgeConfig.from_mapping(
             {**REQUIRED_ENVIRONMENT, "RUBRIC_JUDGE_TEMPERATURE": "warm"}
         )
+
+
+def test_the_health_interval_is_off_unless_configured():
+    assert JudgeConfig.from_mapping(REQUIRED_ENVIRONMENT).health_interval_seconds == 0
+
+
+def test_the_health_interval_is_read_from_the_environment():
+    config = JudgeConfig.from_mapping(
+        {**REQUIRED_ENVIRONMENT, "RUBRIC_JUDGE_HEALTH_INTERVAL": "86400"}
+    )
+    assert config.health_interval_seconds == 86400
+
+
+@pytest.mark.parametrize("interval_seconds", [1, 59])
+def test_a_health_interval_under_a_minute_is_refused(interval_seconds):
+    """Every check is a paid call, so an interval of a few seconds would bill one each time."""
+    with pytest.raises(ValidationError, match="health_interval_seconds"):
+        JudgeConfig(
+            model="m", endpoint="http://x/v1", api_key="k", health_interval_seconds=interval_seconds
+        )
+
+
+def test_the_health_retry_schedule_defaults_to_three_retries_from_five_minutes():
+    config = JudgeConfig.from_mapping(REQUIRED_ENVIRONMENT)
+    assert (config.health_check_retries, config.health_check_first_pause_seconds) == (3, 300)
+
+
+def test_the_health_retry_schedule_is_read_from_the_environment():
+    config = JudgeConfig.from_mapping(
+        {
+            **REQUIRED_ENVIRONMENT,
+            "RUBRIC_JUDGE_HEALTH_RETRIES": "0",
+            "RUBRIC_JUDGE_HEALTH_FIRST_PAUSE": "60",
+        }
+    )
+    assert (config.health_check_retries, config.health_check_first_pause_seconds) == (0, 60)
+
+
+@pytest.mark.parametrize(
+    "setting", [{"health_check_retries": -1}, {"health_check_first_pause_seconds": 0}]
+)
+def test_a_negative_retry_count_or_a_pause_of_nothing_is_refused(setting):
+    with pytest.raises(ValidationError):
+        JudgeConfig(model="m", endpoint="http://x/v1", api_key="k", **setting)
+
+
+@pytest.mark.parametrize("interval_seconds", [0, 60])
+def test_zero_disables_the_health_interval_and_sixty_is_the_shortest(interval_seconds):
+    config = JudgeConfig(
+        model="m", endpoint="http://x/v1", api_key="k", health_interval_seconds=interval_seconds
+    )
+    assert config.health_interval_seconds == interval_seconds
+
+
+# --- health ---------------------------------------------------------------------------------
+
+
+def test_a_new_judge_is_unproven_and_due_for_a_check():
+    health = JudgeHealth(clock=lambda: 0.0)
+
+    assert not health.is_healthy
+    assert health.seconds_until_check_due(interval_seconds=3600) == 0.0
+
+
+def test_a_failure_restarts_the_wait_like_a_proof_does():
+    """A check that failed is repeated one interval later, not in a tight loop."""
+    now = [100.0]
+    health = JudgeHealth(clock=lambda: now[0])
+
+    health.record_failure()
+    now[0] = 160.0
+
+    assert health.seconds_until_check_due(interval_seconds=3600) == 3540.0
+
+
+async def test_a_check_the_endpoint_answers_proves_the_judge_healthy():
+    judge, fake = _judge([""])  # even an empty reply proves the endpoint accepted the call
+
+    await judge.check()
+
+    assert judge.health.is_healthy
+    assert fake.calls == [[{"role": "user", "content": "Reply with OK."}]]
+
+
+@pytest.mark.parametrize("status", [400, 401, 403, 404])
+async def test_a_check_the_endpoint_rejects_is_raised_unretried_and_unhealthy(status):
+    """Unlike a failed `score`, a failed check always condemns the judge: its request is fixed
+    and small, so nothing about one case can be to blame."""
+    judge, fake = _judge([rejected(status), "unused"])
+
+    with pytest.raises(type(rejected(status))):
+        await judge.check()
+
+    assert not judge.health.is_healthy
+    assert len(fake.calls) == 1
+
+
+async def test_a_check_waits_out_an_outage_before_giving_up():
+    judge, fake = _judge([rate_limited(), server_error(), rate_limited()])
+
+    with pytest.raises(JudgeUnavailableError, match="health check in 3 attempts"):
+        await judge.check()
+
+    assert not judge.health.is_healthy
+    assert len(fake.calls) == 3
+
+
+async def test_a_check_that_heals_within_its_attempts_proves_the_judge():
+    judge, _ = _judge([rate_limited(), "OK"])
+
+    await judge.check()
+
+    assert judge.health.is_healthy
+
+
+async def test_only_the_health_check_carries_its_own_timeout():
+    """A 16-token check that hangs for the SDK's default ten minutes would hold its whole
+    schedule up, while a judge call may think for longer."""
+    timeouts_sent: list[Any] = []
+
+    async def create(**request: Any) -> type:
+        timeouts_sent.append(request["timeout"])
+        return _completion('Fine.\n{"score": 2}')
+
+    config = JudgeConfig(model="m", endpoint="http://x/v1", api_key="k")
+    judge = OpenAIJudge(config, client=_client_answering(SimpleNamespace(create=create)))
+
+    await judge.check_once()
+    await judge.score("answer", CRITERION)
+
+    assert timeouts_sent == [60.0, NOT_GIVEN]
+
+
+async def test_the_check_is_sent_with_the_judges_model_and_temperature_and_16_tokens():
+    """The check proves what `score` will send, so a model that refuses the configured
+    temperature is found at startup, and it costs at most 16 reply tokens whatever
+    `max_tokens` allows a judge call."""
+    requests_sent: list[dict[str, Any]] = []
+
+    async def create(**request: Any) -> type:
+        requests_sent.append(request)
+        return _completion("OK")
+
+    config = JudgeConfig(
+        model="m-check", endpoint="http://x/v1", api_key="k", temperature=0.7, max_tokens=768
+    )
+    judge = OpenAIJudge(config, client=_client_answering(SimpleNamespace(create=create)))
+
+    await judge.check()
+
+    [request] = requests_sent
+    assert (request["model"], request["temperature"]) == ("m-check", 0.7)
+    assert request["max_completion_tokens"] == 16
+
+
+@pytest.mark.parametrize(
+    "outage",
+    [rate_limited(), server_error(), APITimeoutError(request=_REQUEST)],  # type: ignore[arg-type]  # see rate_limited
+)
+async def test_a_single_check_reports_an_outage_without_judging_the_judge(outage):
+    """Whether a run of outages is long enough to call the judge unhealthy is its caller's
+    schedule to decide, so one failed `check_once` changes nothing."""
+    judge, fake = _judge(['Fine.\n{"score": 2}', outage])
+    await judge.score("answer", CRITERION)
+
+    with pytest.raises(JudgeUnavailableError, match="did not answer the health check"):
+        await judge.check_once()
+
+    assert judge.health.is_healthy
+    assert len(fake.calls) == 2
+
+
+@pytest.mark.parametrize("status", [401, 403, 404])
+async def test_a_rejected_key_model_or_url_during_scoring_makes_the_judge_unhealthy(status):
+    judge, _ = _judge(['Fine.\n{"score": 2}', rejected(status)])
+    await judge.score("answer", CRITERION)
+
+    with pytest.raises(type(rejected(status))):
+        await judge.score("answer", CRITERION)
+
+    assert not judge.health.is_healthy
+
+
+async def test_a_bad_request_during_scoring_leaves_the_judge_healthy():
+    """One oversized case can earn a 400 while the next one goes through, so it says nothing
+    about the service."""
+    judge, _ = _judge(['Fine.\n{"score": 2}', rejected(400)])
+    await judge.score("answer", CRITERION)
+
+    with pytest.raises(BadRequestError):
+        await judge.score("answer", CRITERION)
+
+    assert judge.health.is_healthy
+
+
+async def test_an_outage_during_scoring_leaves_the_judge_healthy():
+    """An outage is already answered with a 503 per request and heals by itself."""
+    judge, _ = _judge(['Fine.\n{"score": 2}', rate_limited(), rate_limited(), rate_limited()])
+    await judge.score("answer", CRITERION)
+
+    with pytest.raises(JudgeUnavailableError):
+        await judge.score("answer", CRITERION)
+
+    assert judge.health.is_healthy
+
+
+async def test_an_answered_call_makes_a_failing_judge_healthy_again():
+    judge, _ = _judge([rejected(401), 'Fine.\n{"score": 2}'])
+    with pytest.raises(AuthenticationError):
+        await judge.score("answer", CRITERION)
+
+    await judge.score("answer", CRITERION)
+
+    assert judge.health.is_healthy
 
 
 # --- throttling -----------------------------------------------------------------------------

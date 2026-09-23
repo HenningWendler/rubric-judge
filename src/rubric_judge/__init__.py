@@ -5,6 +5,7 @@ from rubric_judge.evaluation import evaluate_case, evaluate_run, filter_cases_by
 from rubric_judge.judge import (
     Judge,
     JudgeConfig,
+    JudgeHealth,
     JudgeReply,
     JudgeUnavailableError,
     OpenAIJudge,
@@ -53,6 +54,7 @@ __all__ = [
     "CriterionResult",
     "Judge",
     "JudgeConfig",
+    "JudgeHealth",
     "JudgeReply",
     "JudgeUnavailableError",
     "LabelFilter",

@@ -130,15 +130,159 @@ Python 3.11 or newer.
 
 ```bash
 python3.12 -m venv .venv
-.venv/bin/pip install -e .
+.venv/bin/pip install --constraint constraints.txt -e .
 ```
 
-Add the test extra if you want to run the suite, `.venv/bin/pip install -e '.[test]'`. The
-runtime dependencies are `pydantic`, `openai`, `fastapi` and `uvicorn`.
+The runtime dependencies are `pydantic`, `openai`, `fastapi` and `uvicorn`.
+[constraints.txt](constraints.txt) pins them, and everything they pull in, to the versions the
+test suite passed on. Leave the flag out and pip takes the newest versions `pyproject.toml`
+allows, which is also what a project installing rubric-judge as a dependency gets. Add the test
+extra if you want to run the suite,
+`.venv/bin/pip install --constraint constraints.txt -e '.[test]'`.
 
 There is no command line interface. The package installs no console script, and
 `python -m rubric_judge` does nothing. The two entry points are the library and the HTTP
 service.
+
+### With Docker
+
+The image serves the HTTP API from [Over HTTP](#over-http) and nothing else. It runs Python
+3.12 and exactly the versions in `constraints.txt`, as one uvicorn process on port 8000 under
+a user that is not root.
+
+```bash
+docker build --tag rubric-judge .
+```
+
+Docker builds for the machine it runs on, so an image built on an Apple silicon Mac runs only
+on arm64. Name the platform of the server it is meant for.
+
+```bash
+docker build --platform linux/amd64 --tag rubric-judge .
+```
+
+The configuration is the variables from [Configure](#configure), passed in when the container
+starts. None of them is baked into the image. `--env-file` reads the same `.env` the service
+reads without Docker, and `--publish 8001:8000` puts the service on the port every curl
+example in this manual uses.
+
+```bash
+docker run --rm --env-file .env --publish 8001:8000 rubric-judge
+```
+
+```
+INFO:     Started server process [1]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+```
+
+Docker reads the file literally. Write `KEY=value` without quotes, because a quoted value
+reaches the service with its quotes. Whitespace around a value does no harm, because the service
+drops it.
+
+Before the log says `Application startup complete`, the service has sent its judge one small
+call and got an answer, as [Configuring the service](#configuring-the-service) explains. A
+container that came up has a judge that works.
+
+The image asks `/health` every second while it starts and every 30 seconds after that, so
+`docker ps` tells you whether the service is healthy. Docker itself only shows that verdict.
+Restarting an unhealthy container or routing around it is your orchestrator's job.
+
+```bash
+docker ps --filter ancestor=rubric-judge --format '{{.Image}}  {{.Status}}'
+```
+
+```
+rubric-judge  Up 5 seconds (healthy)
+```
+
+Every request in [Over HTTP](#over-http) works against the container unchanged. The first one
+there, sent to this container on 2026-09-23 with the judge from
+[About the output](#about-the-output-in-this-manual), scores what the library scored.
+
+```bash
+curl -sS -X POST http://localhost:8001/evaluate \
+  -H 'Content-Type: application/json' \
+  --data @- <<'JSON' | jq '{score, grades: [.criterion_results[] | {criterion_id, score, is_present}]}'
+{
+  "id": 1,
+  "context": "The question asked was: How do I report sick leave?",
+  "answer": "Call your line manager as early as you can on the first day you are ill, at the latest before 9:00. If you cannot reach them, leave a voicemail and send a short message as well.",
+  "criteria": [
+    {"id": 11, "content": "Tells the employee to inform their line manager.", "weight": 3},
+    {"id": 12, "content": "Names the deadline: before 9:00 on the first day of absence.", "weight": 2},
+    {"id": 13, "content": "Says a doctor's note is needed from the fourth day of absence.", "weight": 1}
+  ],
+  "labels": ["procedure"]
+}
+JSON
+```
+
+```json
+{
+  "score": 0.8333333333333333,
+  "grades": [
+    {
+      "criterion_id": 11,
+      "score": 2.0,
+      "is_present": true
+    },
+    {
+      "criterion_id": 12,
+      "score": 2.0,
+      "is_present": true
+    },
+    {
+      "criterion_id": 13,
+      "score": 0.0,
+      "is_present": false
+    }
+  ]
+}
+```
+
+A container whose judge does not work never comes up. It exits with code 3, and the traceback
+it prints ends with the cause. Here a key the endpoint refuses, passed over the one in `.env`.
+
+```bash
+docker run --rm --env-file .env --env RUBRIC_JUDGE_API_KEY=sk-invalid rubric-judge
+```
+
+```
+    raise self._make_status_error_from_response(err.response) from None
+openai.AuthenticationError: Error code: 401 - {'error': {'message': 'Incorrect API key provided: sk-invalid. You can find your API key at https://platform.openai.com/account/api-keys.', 'type': 'invalid_request_error', 'code': 'invalid_api_key', 'param': None}, 'status': 401}
+
+ERROR:    Application startup failed. Exiting.
+```
+
+A half-written configuration is refused the same way, with every missing variable named.
+
+```bash
+docker run --rm --env RUBRIC_JUDGE_MODEL=gpt-5.4-mini rubric-judge
+```
+
+```
+    raise RuntimeError(f"Unusable environment variables: {', '.join(unusable)}")
+RuntimeError: Unusable environment variables: RUBRIC_JUDGE_ENDPOINT is missing, RUBRIC_JUDGE_API_KEY is missing
+
+ERROR:    Application startup failed. Exiting.
+```
+
+A container started with no `RUBRIC_JUDGE_*` variable at all comes up in compare-only mode,
+described in [Configuring the service](#configuring-the-service).
+
+```bash
+docker run --rm --publish 8001:8000 rubric-judge
+```
+
+```
+INFO:     Started server process [1]
+INFO:     Waiting for application startup.
+No RUBRIC_JUDGE_* variable is set, so this service starts without a judge. POST /compare works, POST /evaluate and POST /evaluate/run answer 503.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+```
 
 ## Configure
 
@@ -155,28 +299,50 @@ variables serve both entry points.
 | `RUBRIC_JUDGE_MAX_TOKENS` | int, 1 or more | no, `768` | Budget per judge call. It has to fit the reasoning and the closing JSON. A reply cut off before its JSON is unusable and costs a retry |
 | `RUBRIC_JUDGE_MAX_ATTEMPTS` | int, 1 or more | no, `3` | Tries per criterion, counting the first. An unusable reply and a failed connection each cost one. Running out fails the whole run. Raise it for a small model that formats badly, or for a flaky endpoint |
 | `RUBRIC_JUDGE_MAX_CONCURRENT` | int, 1 or more | no, `8` | Judge calls in flight at once. Raise it for a local vLLM or Ollama, lower it for a small hosted tier |
+| `RUBRIC_JUDGE_HEALTH_INTERVAL` | int, `0` or 60 or more | no, `0` | Seconds a running service lets its judge go without an answered call before it proves it with one small call, for example `86400` for once a day. `0` never checks. See [A judge that stops working](#a-judge-that-stops-working) |
+| `RUBRIC_JUDGE_HEALTH_RETRIES` | int, 0 or more | no, `3` | How often that periodic check is repeated after an outage before the service reports unhealthy. `0` reports it after the first failed check |
+| `RUBRIC_JUDGE_HEALTH_FIRST_PAUSE` | int, 1 or more | no, `300` | Seconds before the first of those retries. Each further pause doubles, so the default waits 5, 10 and 20 minutes |
 
 Any OpenAI-compatible endpoint works, including OpenAI, Azure, vLLM, Ollama, Groq and
 OpenRouter, because the official `openai` SDK talks to whatever `base_url` it is given.
 
 A variable exported **empty** is refused, and that holds for the optional ones too. An
 empty optional variable does not fall back to its default, only one that is absent
-entirely does. Every missing or empty variable is reported at once, in a single error.
+entirely does. Whitespace around a value is dropped first, so a value of nothing but spaces
+counts as empty. Every missing or empty variable is reported at once, in a single error.
 
 ```
 RuntimeError: Unusable environment variables: RUBRIC_JUDGE_API_KEY is missing,
 RUBRIC_JUDGE_MODEL is missing, RUBRIC_JUDGE_MAX_TOKENS is empty
 ```
 
+A misspelled name is refused too. Every variable starting with `RUBRIC_JUDGE_` has to be one
+of the table above, because a typo read as nothing would quietly fall back to the default. Here
+the periodic check would have stayed off while you believed it ran once a day.
+
+```bash
+RUBRIC_JUDGE_HEALTH_INTERVALL=86400 .venv/bin/python -c "from rubric_judge import JudgeConfig; JudgeConfig.from_env()"
+```
+
+```
+RuntimeError: Unusable environment variables: RUBRIC_JUDGE_HEALTH_INTERVALL is unknown
+```
+
 A numeric variable that does not parse is a separate, later failure. It raises a
 `pydantic.ValidationError` naming the setting, not the `RuntimeError` above.
+
+The HTTP service also reads the absence of all of them. Set no `RUBRIC_JUDGE_*` variable at
+all and it starts in compare-only mode, which [Configuring the service](#configuring-the-service)
+describes. Any single one, an optional one included, means a judge was intended, and then the
+three required ones have to be there too.
 
 The grading scale is deliberately not an environment variable. It belongs to the judge and
 is set in code, which [Another scale](#another-scale) shows.
 
 Nothing reads `.env` for you. The library reads the process environment, so load the file
 however your project already does, for example with `python-dotenv`. The HTTP service is
-the exception, because `uvicorn --env-file .env` does it for you.
+the exception, because `uvicorn --env-file .env` and `docker run --env-file .env` both do it
+for you.
 
 ---
 
@@ -586,10 +752,53 @@ The variables are the ones in [Configure](#configure), and `--env-file` is uvico
 yourself. An exported variable wins over the file.
 
 Port 8001 rather than 8000 only because 8000 was occupied on the machine these examples ran
-on. Generated, interactive API docs are served at `/docs`.
+on. Generated, interactive API docs are served at `/docs`. The container from
+[With Docker](#with-docker) serves the same API on the same port, so every example below
+works against it unchanged.
 
-The judge is built lazily, on the first request that needs one, so a server that starts
-says nothing about whether your credentials work.
+The service proves its judge before it serves. It builds the judge from the variables and sends
+it one small call with the configured model and temperature, which costs at most 16 reply
+tokens. A missing, empty or unknown variable, a refused key, an unknown model and an endpoint
+that does not answer within `RUBRIC_JUDGE_MAX_ATTEMPTS` each stop uvicorn with exit code 3, and
+the traceback it prints ends with the cause. Here only the model is set.
+
+```bash
+RUBRIC_JUDGE_MODEL=gpt-5.4-mini .venv/bin/uvicorn rubric_judge.api:app --port 8001
+```
+
+```
+    raise RuntimeError(f"Unusable environment variables: {', '.join(unusable)}")
+RuntimeError: Unusable environment variables: RUBRIC_JUDGE_ENDPOINT is missing, RUBRIC_JUDGE_API_KEY is missing
+
+ERROR:    Application startup failed. Exiting.
+```
+
+With no `RUBRIC_JUDGE_*` variable at all, the service starts in compare-only mode instead.
+`POST /compare` works, and the two endpoints that need a judge answer `503` naming the
+variables to set. A single variable, like the model above, already means a judge was intended,
+which is why that start was refused rather than put into this mode.
+
+```bash
+.venv/bin/uvicorn rubric_judge.api:app --port 8001
+```
+
+```
+INFO:     Started server process [80494]
+INFO:     Waiting for application startup.
+No RUBRIC_JUDGE_* variable is set, so this service starts without a judge. POST /compare works, POST /evaluate and POST /evaluate/run answer 503.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:8001 (Press CTRL+C to quit)
+```
+
+```bash
+curl -sS -X POST http://localhost:8001/evaluate \
+  -H 'Content-Type: application/json' \
+  --data '{"id": 1, "answer": "x", "criteria": [{"id": 1, "content": "y", "weight": 1}]}'
+```
+
+```json
+{"detail":"This service was started without a judge. Set RUBRIC_JUDGE_ENDPOINT, RUBRIC_JUDGE_API_KEY and RUBRIC_JUDGE_MODEL and restart it to evaluate."}
+```
 
 ### Health
 
@@ -598,12 +807,20 @@ curl -sS http://localhost:8001/health
 ```
 
 ```json
-{"status":"ok"}
+{"status":"ok","judge":"ok"}
 ```
 
-That is the whole contract. It answers `200` even with no API key configured, deliberately,
-because liveness must not depend on a third party. The request that fails then is
-`POST /evaluate`, with a `500`.
+`status` is `ok` exactly when the answer is a `200`, and `judge` says why.
+
+| Status | Body | Meaning |
+|---|---|---|
+| `200` | `{"status":"ok","judge":"ok"}` | The judge answered its last call |
+| `503` | `{"status":"unhealthy","judge":"failing"}` | The endpoint refused the key, the model or the URL, or a periodic check found it unreachable or crashed. The cause is in the server log and never in the body. A crashed check stays unhealthy until a restart |
+| `200` | `{"status":"ok","judge":"none"}` | Compare-only mode, started without any `RUBRIC_JUDGE_*` variable |
+| `200` | `{"status":"ok","judge":"custom"}` | A judge installed in code by overriding `get_judge`, see [the reference](docs/REFERENCE.md#functions). Its health is yours to watch |
+
+`/health` never calls the judge itself, so it answers at once and never times out a probe. How
+the judge stays proven after startup is in [A judge that stops working](#a-judge-that-stops-working).
 
 ### 1. One answer
 
@@ -866,7 +1083,8 @@ statuses is in [the reference](docs/REFERENCE.md).
 | `422` | A label filter matching no case | `{"detail":[{"loc":["body"],"msg":"Value error, label_filter [['polizy']] matches no case; labels present in this run: policy (2), procedure (2)","type":"value_error"}]}` |
 | `422` | Two runs that do not describe the same catalog | `{"detail":"the runs are not comparable: case 4, criterion 42: weight 1.0 vs 2.0"}` |
 | `503` | The judge could not answer, so the whole run is dropped | `{"detail":"Judge gave no usable answer in 3 attempts: Connection error."}` |
-| `500` | The judge is not configured, or the program has a bug | `Internal Server Error`, with the missing variables named in the server log |
+| `503` | `/evaluate` or `/evaluate/run` in compare-only mode | `{"detail":"This service was started without a judge. Set RUBRIC_JUDGE_ENDPOINT, RUBRIC_JUDGE_API_KEY and RUBRIC_JUDGE_MODEL and restart it to evaluate."}` |
+| `500` | The judge endpoint rejects the key or the model, or the program has a bug | `Internal Server Error`, with the cause in the server log. A rejected key or model also turns `/health` unhealthy |
 
 A healthy service does not hand you a `503` on request. The one above was produced by
 starting a second server pointed at a dead endpoint, which is worth knowing if you intend to
@@ -1251,6 +1469,37 @@ retry costs only judge calls.
 
 A bug in the program ends the run too, but as itself, with a `500`. "Your endpoint is down,
 try again" and "this program is broken" are different messages to get.
+
+### A judge that stops working
+
+A service proves its judge once before it serves, and every judge call that gets an answer
+after that is proof again. A call the endpoint refuses with `401`, `403` or `404` turns
+`/health` into a `503` at once, because a refused key, a missing permission or an unknown model
+condemns every later call too. The request itself is answered with a `500`. The next judge
+call that gets an answer makes the service healthy again.
+
+An outage does not flip it. Timeouts, rate limits and `5xx` answers are retried, then answered
+with a `503` per request, and they heal by themselves. Marking every replica unhealthy for a
+provider's blip would take the whole service down for it. A `400` does not flip it either,
+because one oversized case can earn it while the next case goes through.
+
+A quiet service gets no proof from traffic. Set `RUBRIC_JUDGE_HEALTH_INTERVAL` and it sends the
+same small call as at startup whenever its judge has gone that many seconds without an answered
+call, `86400` for once a day. Each such call waits at most 60 seconds for its answer. A
+rejection turns the service unhealthy at once. An outage is retried instead, after 5, 10 and
+20 minutes by default (`RUBRIC_JUDGE_HEALTH_RETRIES`, `RUBRIC_JUDGE_HEALTH_FIRST_PAUSE`), and the
+service stays healthy while it waits. A judge call answered in the meantime ends the wait. Only
+when every attempt failed does the service report unhealthy, and the next check runs one
+interval later rather than in a loop. Left unset, the service relies on its startup check and
+its traffic alone, and a key revoked while nobody calls goes unnoticed until the next request.
+
+The longest an outage can take to show is therefore the interval, plus four attempts of 60
+seconds and 35 minutes of pauses, plus the 90 seconds Docker takes to see three failed probes
+in a row. The startup check does not wait like this. It makes `RUBRIC_JUDGE_MAX_ATTEMPTS`
+attempts, pausing 0.5 and then 1 second between the default 3, and then stops the service, so a
+container started during an outage exits and your restart policy tries again. Each attempt waits
+at most 60 seconds, so an endpoint that accepts the connection and never answers holds the start
+for about three minutes with the default of 3 attempts.
 
 ### Concurrency
 

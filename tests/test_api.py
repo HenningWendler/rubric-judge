@@ -6,20 +6,40 @@ import json
 from typing import Any
 
 import httpx
+import openai
 import pytest
 from fastapi.testclient import TestClient
 from openai import AsyncOpenAI
+from pydantic import ValidationError
 
-from tests.conftest import CASE, RUN, RUN_SCORES, FakeJudge, run_of, use_judge
+from tests.conftest import (
+    CASE,
+    REQUIRED_JUDGE_VARIABLES,
+    RUN,
+    RUN_SCORES,
+    FakeJudge,
+    StubOpenAIServer,
+    judge_environment,
+    run_of,
+    use_judge,
+)
 
 from rubric_judge import JudgeUnavailableError, RunResult
-from rubric_judge.api import app, get_judge
-from rubric_judge.judge import JudgeConfig, OpenAIJudge
+from rubric_judge.api import (
+    COMPARE_ONLY_REFUSAL,
+    JudgeSource,
+    app,
+    health_report,
+    judge_source,
+    prove_the_judge_periodically,
+    retry_pauses_seconds,
+)
+from rubric_judge.judge import JudgeConfig, JudgeHealth, OpenAIJudge
 from rubric_judge.models import DEFAULT_SCALE, Scale
 
 
 def test_health(client):
-    assert client.get("/health").json() == {"status": "ok"}
+    assert client.get("/health").json() == {"status": "ok", "judge": "custom"}
 
 
 def test_evaluate_serves_the_evaluation_of_the_case(client):
@@ -99,14 +119,472 @@ def test_the_result_carries_every_published_field(client):
     assert body["criterion_results"][0]["weight"] == 3
 
 
-def test_health_answers_even_when_the_judge_is_unconfigured(unconfigured_client):
-    """Liveness must not depend on the judge, or a missing key takes the container down."""
-    assert unconfigured_client.get("/health").status_code == 200
+# --- startup and health ----------------------------------------------------------------------
 
 
-def test_evaluate_fails_loudly_when_the_judge_is_unconfigured(unconfigured_client):
-    """No silent fallback and no fake score: a missing key is a server fault, not a 0.0."""
-    assert unconfigured_client.post("/evaluate", json=CASE).status_code == 500
+@pytest.fixture
+def configured_client(clean_environment, monkeypatch, stub_openai_server):
+    """The app started the way a deployment starts it: its judge built from `RUBRIC_JUDGE_*`
+    and proven against a real endpoint, here the stub server. Server faults come back as
+    their status code, so a test can watch a refused key turn into a 500."""
+    for variable, value in judge_environment(stub_openai_server.endpoint_seen_from()).items():
+        monkeypatch.setenv(variable, value)
+    with TestClient(app, raise_server_exceptions=False) as client:
+        yield client
+
+
+@pytest.fixture
+def instant_backoff(monkeypatch):
+    """No real waiting between retries of an endpoint that is down."""
+    monkeypatch.setattr("rubric_judge.judge._FIRST_BACKOFF_SECONDS", 0)
+
+
+def test_a_half_written_configuration_refuses_to_start(clean_environment, monkeypatch):
+    """Any `RUBRIC_JUDGE_*` variable means a judge was intended, so a lone optional one is a
+    configuration with three variables missing, not a request for compare-only mode."""
+    monkeypatch.setenv("RUBRIC_JUDGE_TEMPERATURE", "0.0")
+
+    with pytest.raises(RuntimeError) as refusal:
+        with TestClient(app):
+            pass
+
+    for variable in REQUIRED_JUDGE_VARIABLES:
+        assert f"{variable} is missing" in str(refusal.value)
+
+
+def test_a_misspelled_judge_variable_stops_the_service_before_it_calls_the_judge(
+    clean_environment, monkeypatch, stub_openai_server
+):
+    for variable, value in judge_environment(stub_openai_server.endpoint_seen_from()).items():
+        monkeypatch.setenv(variable, value)
+    monkeypatch.setenv("RUBRIC_JUDGE_HEALTH_INTERVALL", "86400")
+
+    with pytest.raises(RuntimeError, match="RUBRIC_JUDGE_HEALTH_INTERVALL is unknown"):
+        with TestClient(app):
+            pass
+
+    assert stub_openai_server.completions_received == 0
+
+
+def test_a_judge_the_endpoint_refuses_stops_the_service_before_it_serves(
+    clean_environment, monkeypatch, stub_openai_server
+):
+    """A complete configuration is not a working one. A service with a revoked key must not
+    come up healthy and fail every request."""
+    stub_openai_server.status = 401
+    for variable, value in judge_environment(stub_openai_server.endpoint_seen_from()).items():
+        monkeypatch.setenv(variable, value)
+
+    with pytest.raises(openai.AuthenticationError):
+        with TestClient(app):
+            pass
+
+
+def test_a_proven_judge_reports_healthy(configured_client, stub_openai_server):
+    response = configured_client.get("/health")
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok", "judge": "ok"}
+    assert stub_openai_server.completions_received == 1  # the one check at startup
+
+
+def test_a_refused_key_turns_health_unhealthy_until_the_endpoint_answers_again(
+    configured_client, stub_openai_server
+):
+    stub_openai_server.status = 401
+    assert configured_client.post("/evaluate", json=CASE).status_code == 500
+    refused = configured_client.get("/health")
+
+    stub_openai_server.status = 200
+    assert configured_client.post("/evaluate", json=CASE).status_code == 200
+    recovered = configured_client.get("/health")
+
+    assert (refused.status_code, refused.json()) == (
+        503, {"status": "unhealthy", "judge": "failing"},
+    )
+    assert (recovered.status_code, recovered.json()) == (200, {"status": "ok", "judge": "ok"})
+
+
+def test_an_outage_is_a_503_that_leaves_the_service_healthy(
+    configured_client, stub_openai_server, instant_backoff
+):
+    """An outage heals by itself and is already answered with a 503 per request. Marking the
+    service unhealthy for it would take every replica down for a provider's blip."""
+    stub_openai_server.status = 502
+
+    assert configured_client.post("/evaluate", json=CASE).status_code == 503
+    assert configured_client.get("/health").status_code == 200
+
+
+def test_one_judge_serves_the_whole_process_so_its_limit_is_shared(configured_client):
+    """`OpenAIJudge` carries the concurrency limit, so it only bounds anything if every
+    request shares one instance. The judge built at startup is that instance."""
+    judge_at_startup = app.state.judge
+
+    configured_client.post("/evaluate", json=CASE)
+    configured_client.post("/evaluate", json=CASE)
+
+    assert isinstance(judge_at_startup, OpenAIJudge)
+    assert app.state.judge is judge_at_startup
+
+
+def test_without_any_judge_variable_the_service_only_compares(clean_environment):
+    """Compare-only mode is chosen by setting nothing at all, and says so wherever a caller
+    looks: in the health body and in the 503 of every endpoint that would need a judge."""
+    body = _runs(run_of({1: 0}), run_of({1: 2}))
+
+    with TestClient(app) as client:
+        health = client.get("/health").json()
+        evaluate = client.post("/evaluate", json=CASE)
+        evaluate_run = client.post("/evaluate/run", json=RUN)
+        compare = client.post("/compare", json=body)
+
+    assert health == {"status": "ok", "judge": "none"}
+    assert (evaluate.status_code, evaluate.json()["detail"]) == (503, COMPARE_ONLY_REFUSAL)
+    assert evaluate_run.status_code == 503
+    assert compare.status_code == 200
+
+
+def test_an_endpoint_down_at_startup_stops_the_service_within_its_own_attempt_budget(
+    clean_environment, monkeypatch, stub_openai_server, instant_backoff
+):
+    """The startup check fails fast on `RUBRIC_JUDGE_MAX_ATTEMPTS` and never waits out the
+    periodic check's schedule of minutes, so the platform's restart policy tries again."""
+    stub_openai_server.status = 502
+    for variable, value in judge_environment(stub_openai_server.endpoint_seen_from()).items():
+        monkeypatch.setenv(variable, value)
+    monkeypatch.setenv("RUBRIC_JUDGE_MAX_ATTEMPTS", "2")
+    monkeypatch.setenv("RUBRIC_JUDGE_HEALTH_INTERVAL", "60")
+    monkeypatch.setenv("RUBRIC_JUDGE_HEALTH_RETRIES", "5")
+
+    with pytest.raises(JudgeUnavailableError, match="in 2 attempts"):
+        with TestClient(app):
+            pass
+
+    assert stub_openai_server.completions_received == 2
+
+
+def test_a_health_interval_under_a_minute_stops_the_service(
+    clean_environment, monkeypatch, stub_openai_server
+):
+    for variable, value in judge_environment(stub_openai_server.endpoint_seen_from()).items():
+        monkeypatch.setenv(variable, value)
+    monkeypatch.setenv("RUBRIC_JUDGE_HEALTH_INTERVAL", "30")
+
+    with pytest.raises(ValidationError, match="health_interval_seconds"):
+        with TestClient(app):
+            pass
+
+    assert stub_openai_server.completions_received == 0
+
+
+def test_the_periodic_check_ends_with_the_service(
+    clean_environment, monkeypatch, stub_openai_server
+):
+    """Stopping a service that checks its judge is a clean shutdown, not a crash report: the
+    cancelled check must not surface as a `CancelledError` when the block ends."""
+    for variable, value in judge_environment(stub_openai_server.endpoint_seen_from()).items():
+        monkeypatch.setenv(variable, value)
+    monkeypatch.setenv("RUBRIC_JUDGE_HEALTH_INTERVAL", "60")
+
+    with TestClient(app) as client:
+        assert client.get("/health").json() == {"status": "ok", "judge": "ok"}
+
+
+def test_compare_only_answers_503_before_the_body_is_validated(clean_environment):
+    """A caller sending a broken body to a service that cannot evaluate is told about the
+    service first, since fixing the body would change nothing."""
+    with TestClient(app) as client:
+        evaluate = client.post("/evaluate", json={"id": 1})
+        evaluate_run = client.post("/evaluate/run", json={})
+
+    assert (evaluate.status_code, evaluate_run.status_code) == (503, 503)
+
+
+def test_a_judge_installed_before_startup_needs_no_environment(clean_environment):
+    """A program that embeds the app and brings its own judge overrides `get_judge`. The
+    service neither demands `RUBRIC_JUDGE_*` variables it will never read nor checks a judge
+    it knows nothing about, and says so in the health body."""
+    use_judge(FakeJudge({1: 2, 2: 0}))
+
+    try:
+        with TestClient(app) as client:
+            assert client.post("/evaluate", json=CASE).json()["score"] == pytest.approx(0.75)
+            assert client.get("/health").json() == {"status": "ok", "judge": "custom"}
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_an_installed_judge_starts_even_beside_a_half_written_environment(
+    clean_environment, monkeypatch
+):
+    """The override wins, so variables the service will never read cannot stop it."""
+    monkeypatch.setenv("RUBRIC_JUDGE_MODEL", "never-read")
+    use_judge(FakeJudge({1: 2, 2: 2}))
+
+    try:
+        with TestClient(app) as client:
+            assert client.get("/health").json() == {"status": "ok", "judge": "custom"}
+            assert client.post("/evaluate", json=CASE).status_code == 200
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_an_override_wins_over_the_environment():
+    assert judge_source({"RUBRIC_JUDGE_MODEL": "m"}, override_installed=True) is JudgeSource.CUSTOM
+
+
+def test_a_crashed_health_monitor_is_reported_as_unhealthy():
+    """A monitor that died would otherwise leave the last good answer standing forever."""
+    healthy = JudgeHealth()
+    healthy.record_proof()
+
+    report = health_report(JudgeSource.ENVIRONMENT, healthy, monitor_alive=False)
+
+    assert report.status == "unhealthy"
+
+
+def test_a_crashed_health_monitor_is_logged_at_once_and_reported_unhealthy(
+    clean_environment, monkeypatch, stub_openai_server, caplog
+):
+    """`/health` says only that the judge is failing, so the log has to say why, and at the
+    moment it happens rather than when the service is stopped."""
+
+    async def crashing_monitor(judge: OpenAIJudge) -> None:
+        raise RuntimeError("a bug in the monitor")
+
+    monkeypatch.setattr("rubric_judge.api.prove_the_judge_periodically", crashing_monitor)
+    for variable, value in judge_environment(stub_openai_server.endpoint_seen_from()).items():
+        monkeypatch.setenv(variable, value)
+    monkeypatch.setenv("RUBRIC_JUDGE_HEALTH_INTERVAL", "60")
+
+    with pytest.raises(RuntimeError, match="a bug in the monitor"):  # re-raised at shutdown
+        with TestClient(app) as client:
+            health = client.get("/health")
+            logged_while_serving = caplog.text
+
+    assert health.status_code == 503
+    assert "a bug in the monitor" in logged_while_serving
+
+
+# --- the periodic check, on a clock the test controls -----------------------------------------
+
+
+class _MonitorStopped(Exception):
+    """Ends the otherwise endless monitor loop once a test has seen enough sleeps."""
+
+
+class FakeTime:
+    """A clock and a sleep for `prove_the_judge_periodically`: sleeping advances the clock at
+    once, and `during_sleep` lets a test put real traffic between two wake-ups."""
+
+    def __init__(self, sleeps_until_stop: int, during_sleep=lambda now: None):
+        self.now = 0.0
+        self.slept: list[float] = []
+        self.sleeps_until_stop = sleeps_until_stop
+        self.during_sleep = during_sleep
+
+    def clock(self) -> float:
+        return self.now
+
+    async def sleep(self, seconds: float) -> None:
+        if len(self.slept) == self.sleeps_until_stop:
+            raise _MonitorStopped
+        self.slept.append(seconds)
+        self.during_sleep(self.now)
+        self.now += seconds
+
+
+def _judge_checking_every_hour(server: StubOpenAIServer, fake_time: FakeTime) -> OpenAIJudge:
+    judge = OpenAIJudge(
+        JudgeConfig(
+            model="stub-model",
+            endpoint=server.endpoint_seen_from(),
+            api_key="stub-key",
+            health_interval_seconds=3600,
+        )
+    )
+    judge.health = JudgeHealth(clock=fake_time.clock)
+    return judge
+
+
+async def test_the_periodic_check_runs_once_per_interval(stub_openai_server):
+    fake_time = FakeTime(sleeps_until_stop=3)
+    judge = _judge_checking_every_hour(stub_openai_server, fake_time)
+
+    with pytest.raises(_MonitorStopped):
+        await prove_the_judge_periodically(judge, fake_time.sleep)
+
+    assert fake_time.slept == [0.0, 3600.0, 3600.0]
+    assert stub_openai_server.completions_received == 3  # one after each wake-up
+    assert judge.health.is_healthy
+
+
+async def test_a_failed_periodic_check_is_retried_one_interval_later(stub_openai_server):
+    """Not in a tight loop: a check billed every few milliseconds against a dead key is the
+    one thing worse than no check at all. The monitor survives the failure."""
+    stub_openai_server.status = 401
+    fake_time = FakeTime(sleeps_until_stop=3)
+    judge = _judge_checking_every_hour(stub_openai_server, fake_time)
+
+    with pytest.raises(_MonitorStopped):
+        await prove_the_judge_periodically(judge, fake_time.sleep)
+
+    assert fake_time.slept == [0.0, 3600.0, 3600.0]
+    assert stub_openai_server.completions_received == 3  # one after each wake-up
+    assert not judge.health.is_healthy
+
+
+def test_the_retry_pauses_double_from_the_first():
+    assert retry_pauses_seconds(300, 3) == [300, 600, 1200]
+    assert retry_pauses_seconds(300, 0) == []
+
+
+def _judge_proven_at_the_start(server: StubOpenAIServer, fake_time: FakeTime) -> OpenAIJudge:
+    """A judge that got an answer at 0, so its first periodic check is due an hour later."""
+    judge = _judge_checking_every_hour(server, fake_time)
+    judge.health.record_proof()
+    return judge
+
+
+async def test_an_outage_is_retried_on_its_schedule_before_the_judge_turns_unhealthy(
+    stub_openai_server,
+):
+    """5, 10 and 20 minutes for a provider's outage to heal, and the service stays healthy
+    all that time, because a blip must not take every replica down."""
+    stub_openai_server.status = 502
+    fake_time = FakeTime(sleeps_until_stop=5)
+    judge = _judge_proven_at_the_start(stub_openai_server, fake_time)
+    healthy_during_pauses: list[bool] = []
+    fake_time.during_sleep = lambda now: healthy_during_pauses.append(judge.health.is_healthy)
+
+    with pytest.raises(_MonitorStopped):
+        await prove_the_judge_periodically(judge, fake_time.sleep)
+
+    assert fake_time.slept == [3600.0, 300.0, 600.0, 1200.0, 3600.0]
+    assert stub_openai_server.completions_received == 5  # 1 attempt, 3 retries, next check
+    assert healthy_during_pauses == [True, True, True, True, False]
+    assert not judge.health.is_healthy
+
+
+async def test_an_outage_that_heals_within_the_schedule_never_turns_the_judge_unhealthy(
+    stub_openai_server,
+):
+    stub_openai_server.status = 502
+    fake_time = FakeTime(sleeps_until_stop=3)
+    judge = _judge_proven_at_the_start(stub_openai_server, fake_time)
+
+    def endpoint_back_during_the_first_pause(now: float) -> None:
+        if fake_time.slept == [3600.0, 300.0]:
+            stub_openai_server.status = 200
+
+    fake_time.during_sleep = endpoint_back_during_the_first_pause
+
+    with pytest.raises(_MonitorStopped):
+        await prove_the_judge_periodically(judge, fake_time.sleep)
+
+    assert fake_time.slept == [3600.0, 300.0, 3600.0]
+    assert stub_openai_server.completions_received == 3  # failed, healed, next check
+    assert judge.health.is_healthy
+
+
+async def test_traffic_answered_during_a_pause_ends_the_retry_schedule(stub_openai_server):
+    """A real call answered while the check waits has settled the question, so no retry is
+    spent, and the next check waits a full interval from that call."""
+    stub_openai_server.status = 502
+    fake_time = FakeTime(sleeps_until_stop=3)
+    judge = _judge_proven_at_the_start(stub_openai_server, fake_time)
+
+    def answered_call_during_the_first_pause(now: float) -> None:
+        if fake_time.slept == [3600.0, 300.0]:
+            fake_time.now = now + 100.0
+            judge.health.record_proof()
+            fake_time.now = now
+
+    fake_time.during_sleep = answered_call_during_the_first_pause
+
+    with pytest.raises(_MonitorStopped):
+        await prove_the_judge_periodically(judge, fake_time.sleep)
+
+    assert fake_time.slept == [3600.0, 300.0, 3400.0]
+    assert stub_openai_server.completions_received == 2  # failed, then the next check
+    assert judge.health.is_healthy
+
+
+async def test_zero_health_retries_turn_the_judge_unhealthy_on_the_first_failed_check(
+    stub_openai_server,
+):
+    stub_openai_server.status = 502
+    fake_time = FakeTime(sleeps_until_stop=2)
+    judge = _judge_proven_at_the_start(stub_openai_server, fake_time)
+    judge.config = judge.config.model_copy(update={"health_check_retries": 0})
+
+    with pytest.raises(_MonitorStopped):
+        await prove_the_judge_periodically(judge, fake_time.sleep)
+
+    assert fake_time.slept == [3600.0, 3600.0]  # no pause, straight to the next interval
+    assert stub_openai_server.completions_received == 2
+    assert not judge.health.is_healthy
+
+
+async def test_a_periodic_check_rejected_with_400_is_final_at_once(stub_openai_server):
+    """During traffic a `400` says nothing about the service, but the check's request is fixed
+    and small, so a `400` to it means every check will meet the same refusal."""
+    stub_openai_server.status = 400
+    fake_time = FakeTime(sleeps_until_stop=2)
+    judge = _judge_proven_at_the_start(stub_openai_server, fake_time)
+
+    with pytest.raises(_MonitorStopped):
+        await prove_the_judge_periodically(judge, fake_time.sleep)
+
+    assert fake_time.slept == [3600.0, 3600.0]
+    assert not judge.health.is_healthy
+
+
+async def test_traffic_refused_during_a_pause_ends_the_retry_schedule_unhealthy(
+    stub_openai_server,
+):
+    """A refused key found by a real call is as final as one found by the check, so no retry
+    is spent on it and the judge stays failing."""
+    stub_openai_server.status = 502
+    fake_time = FakeTime(sleeps_until_stop=3)
+    judge = _judge_proven_at_the_start(stub_openai_server, fake_time)
+
+    def refused_call_during_the_first_pause(now: float) -> None:
+        if fake_time.slept == [3600.0, 300.0]:
+            fake_time.now = now + 100.0
+            judge.health.record_failure()
+            fake_time.now = now
+
+    fake_time.during_sleep = refused_call_during_the_first_pause
+
+    with pytest.raises(_MonitorStopped):
+        await prove_the_judge_periodically(judge, fake_time.sleep)
+
+    assert fake_time.slept == [3600.0, 300.0, 3400.0]
+    assert stub_openai_server.completions_received == 2  # failed, then the next check
+    assert not judge.health.is_healthy
+
+
+async def test_real_traffic_postpones_the_periodic_check(stub_openai_server):
+    """A judge call answered half an hour in is proof enough, so the next check waits a full
+    interval from then and not from the last check."""
+    fake_time = FakeTime(sleeps_until_stop=3)
+    judge = _judge_checking_every_hour(stub_openai_server, fake_time)
+
+    def answered_call_half_an_hour_later(now: float) -> None:
+        if now == 0.0 and judge.health.last_evidence_at is not None:
+            fake_time.now = 1800.0
+            judge.health.record_proof()
+            fake_time.now = 0.0
+
+    fake_time.during_sleep = answered_call_half_an_hour_later
+
+    with pytest.raises(_MonitorStopped):
+        await prove_the_judge_periodically(judge, fake_time.sleep)
+
+    assert fake_time.slept == [0.0, 3600.0, 1800.0]
+    assert stub_openai_server.completions_received == 2  # none at the wake-up after 3600
 
 
 # --- POST /evaluate/run -----------------------------------------------------------------
@@ -189,14 +667,6 @@ def test_one_invalid_case_rejects_the_whole_run_before_any_call(client):
 # OpenAI-compatible endpoint correctly. These go through the full chain — HTTP request, the
 # SDK writing the call and reading the reply, the parser, the weighted fold, HTTP response —
 # with an in-memory transport under the SDK where a socket used to be.
-
-JUDGE_ENVIRONMENT = {
-    "RUBRIC_JUDGE_ENDPOINT": "http://stub/v1",
-    "RUBRIC_JUDGE_API_KEY": "stub-key",
-    "RUBRIC_JUDGE_MODEL": "stub-model",
-}
-"""Enough to let `get_judge` build a judge from the environment. It is never called, so the
-endpoint does not have to exist — only the wiring is under test."""
 
 EMAIL_CRITERION = CASE["criteria"][0]["content"]
 LAST_DAY_CRITERION = CASE["criteria"][1]["content"]
@@ -397,35 +867,12 @@ def test_a_custom_outage_type_answers_503_at_every_entry_point(client):
         assert response.json() == {"detail": "my quota is used up"}
 
 
-def test_an_unconfigured_judge_is_reported_before_the_body_is_read(unconfigured_client):
-    """FastAPI resolves a dependency before it validates the body, so an unconfigured service
-    answers 500 for an invalid body too — the server fault is reported rather than the
-    client's. Pinned because it is the one place the error table's "invalid body -> 422" does
-    not hold, and because a `RuntimeError` reaching a caller as a 422 would be worse: it would
-    send them looking for a mistake in a request that was never read."""
-    assert unconfigured_client.post("/evaluate", json={"id": 1}).status_code == 500
-    assert unconfigured_client.post("/evaluate/run", json={"cases": []}).status_code == 500
-
-
-def test_compare_validates_its_body_with_no_judge_in_the_way(unconfigured_client):
+def test_compare_validates_its_body_with_no_judge_in_the_way(client):
     """`/compare` takes no judge at all, so nothing stands between the body and its
-    validation: an invalid comparison is a 422 whether or not the service is configured."""
-    response = unconfigured_client.post("/compare", json={"baseline": {}})
+    validation: an invalid comparison is a 422 before any judge could be consulted."""
+    response = client.post("/compare", json={"baseline": {}})
 
     assert response.status_code == 422
-
-
-def test_one_judge_serves_the_whole_process_so_its_limit_is_shared(monkeypatch):
-    """`OpenAIJudge` carries the concurrency limit, so it only bounds anything if every
-    request shares one instance — that is what caching `get_judge` is for. The one test that
-    builds the app's judge from the process environment rather than injecting one."""
-    for variable, value in JUDGE_ENVIRONMENT.items():
-        monkeypatch.setenv(variable, value)
-    get_judge.cache_clear()
-
-    assert get_judge() is get_judge()
-
-    get_judge.cache_clear()
 
 
 def test_a_rubric_larger_than_the_concurrency_limit_is_scored_completely(client, stub_endpoint):
@@ -587,13 +1034,13 @@ def test_a_run_judged_on_a_custom_scale_reports_its_raw_grades_and_a_normalized_
     assert body["metrics"]["average_criterion_score"] == pytest.approx(5.25)  # raw, 0..10
 
 
-def test_a_judge_grading_above_its_own_scale_is_a_bug_and_not_a_score(unconfigured_client):
+def test_a_judge_grading_above_its_own_scale_is_a_bug_and_not_a_score(status_reporting_client):
     """A broken judge is a 500, where an unreachable one is a 503: the request is not worth
     repeating, and a case score nobody can tell from a real one must not come back as a 200
     either way."""
     use_judge(FakeJudge({1: 5, 2: 0}))
 
-    assert unconfigured_client.post("/evaluate", json=CASE).status_code == 500
+    assert status_reporting_client.post("/evaluate", json=CASE).status_code == 500
 
 
 def test_a_described_custom_scale_reaches_the_caller_with_its_wording(client):
@@ -616,10 +1063,13 @@ def test_a_described_custom_scale_reaches_the_caller_with_its_wording(client):
     assert body["score"] == pytest.approx(0.8333333333333334)  # (3*3/3 + 1*1/3) / 4
 
 
-def test_compare_answers_even_when_the_judge_is_unconfigured(unconfigured_client):
-    """Pure computation: comparing stored runs must not need an API key."""
+def test_compare_never_consults_the_judge(client):
+    """Pure computation: comparing stored runs must keep working while the judge endpoint is
+    down. A judge that knows no criterion fails on any call it gets, so a 200 proves none
+    was made."""
+    use_judge(FakeJudge({}))
     body = _runs(run_of({1: 0}), run_of({1: 2}))
-    assert unconfigured_client.post("/compare", json=body).status_code == 200
+    assert client.post("/compare", json=body).status_code == 200
 
 
 def test_a_run_without_cases_is_rejected_rather_than_dividing_by_zero(client):

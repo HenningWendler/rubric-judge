@@ -8,12 +8,24 @@ import asyncio
 import json
 import os
 import re
-from collections.abc import Mapping
+import time
+from collections.abc import Callable, Mapping
 from typing import Protocol
 
-from openai import APIConnectionError, AsyncOpenAI, InternalServerError, RateLimitError
+from openai import (
+    NOT_GIVEN,
+    APIConnectionError,
+    AsyncOpenAI,
+    AuthenticationError,
+    InternalServerError,
+    NotFoundError,
+    NotGiven,
+    OpenAIError,
+    PermissionDeniedError,
+    RateLimitError,
+)
 from openai.types.chat import ChatCompletion, ChatCompletionMessageParam
-from pydantic import Field
+from pydantic import Field, field_validator
 
 from rubric_judge.models import DEFAULT_SCALE, Criterion, DocumentedModel, Scale
 from rubric_judge.prompt import (
@@ -39,8 +51,53 @@ _RETRYABLE_TRANSPORT_FAILURES = (APIConnectionError, RateLimitError, InternalSer
 A rejected key, an unknown model or a malformed request are absent on purpose — asking again
 changes nothing about any of them, it only delays the report."""
 
+_SERVICE_WIDE_REJECTIONS = (AuthenticationError, PermissionDeniedError, NotFoundError)
+"""Endpoint answers that condemn every call this judge will ever make, not just one: the key
+is refused, the key may not use the model, or the model or the URL does not exist. A `400` is
+absent on purpose, because one oversized case can earn it while the next case goes through."""
+
 _FIRST_BACKOFF_SECONDS = 0.5
 """How long to wait after the first transport failure; doubled after each further one."""
+
+_HEALTH_CHECK_CONVERSATION: list[ChatMessage] = [{"role": "user", "content": "Reply with OK."}]
+"""What `OpenAIJudge.check` sends. The reply is never read, so the prompt only has to be
+short and harmless."""
+
+_HEALTH_CHECK_TOKEN_BUDGET = 16
+"""Reply tokens a health check may cost. Small, because the reply is never read, but not 1:
+the check has to be a request the endpoint accepts like any other."""
+
+_HEALTH_CHECK_TIMEOUT_SECONDS = 60.0
+"""How long one health check waits for an answer before it counts as an outage. A 16-token
+reply comes back within seconds, while the SDK's own default of 600 seconds would let one
+hanging endpoint hold a check for ten minutes. Judge calls keep that default, because a
+reasoning model can legitimately think for longer."""
+
+MINIMUM_HEALTH_INTERVAL_SECONDS = 60
+"""The shortest `JudgeConfig.health_interval_seconds` there is, apart from 0 for "never". Every
+check is a paid call, so an interval of a few seconds would bill one each time."""
+
+JUDGE_VARIABLE_PREFIX = "RUBRIC_JUDGE_"
+"""What every environment variable configuring the judge starts with. Any name carrying it is
+read as meant for the judge: refused by `JudgeConfig.from_mapping` when no field reads it, and
+enough for the HTTP service to expect a judge at all."""
+
+_VARIABLE_PER_FIELD = {
+    "endpoint": "RUBRIC_JUDGE_ENDPOINT",
+    "api_key": "RUBRIC_JUDGE_API_KEY",
+    "model": "RUBRIC_JUDGE_MODEL",
+    "temperature": "RUBRIC_JUDGE_TEMPERATURE",
+    "max_tokens": "RUBRIC_JUDGE_MAX_TOKENS",
+    "max_attempts": "RUBRIC_JUDGE_MAX_ATTEMPTS",
+    "max_concurrent": "RUBRIC_JUDGE_MAX_CONCURRENT",
+    "health_interval_seconds": "RUBRIC_JUDGE_HEALTH_INTERVAL",
+    "health_check_retries": "RUBRIC_JUDGE_HEALTH_RETRIES",
+    "health_check_first_pause_seconds": "RUBRIC_JUDGE_HEALTH_FIRST_PAUSE",
+}
+"""The one list of `JudgeConfig` fields the environment sets, and the variable each is read from."""
+
+_REQUIRED_FIELDS = ("endpoint", "api_key", "model")
+"""The fields a judge cannot be built without. A tuple, so the refusal names them in this order."""
 
 
 class JudgeUnavailableError(Exception):
@@ -221,6 +278,45 @@ class JudgeConfig(DocumentedModel):
     The endpoint's rate limit is the whole reason: a rubric of 200 criteria would otherwise
     open 200 connections at the same moment and get itself throttled or banned."""
 
+    health_interval_seconds: int = Field(default=0, ge=0)
+    """How often a running service proves its judge still answers, in seconds, with one
+    `OpenAIJudge.check`. 0 never does, and otherwise it is at least
+    `MINIMUM_HEALTH_INTERVAL_SECONDS`. Every judge call that gets an answer counts as proof
+    too, so a busy service never spends a check."""
+
+    health_check_retries: int = Field(default=3, ge=0)
+    """How often a failed periodic health check is repeated before the judge counts as
+    unhealthy, for outages only. A rejected key, model or request is final at once. 0 turns
+    the judge unhealthy on the first failed check."""
+
+    health_check_first_pause_seconds: int = Field(default=300, ge=1)
+    """How long a periodic health check waits before its first retry, doubled before each
+    further one. The default schedule waits 5, 10 and 20 minutes, so a provider's outage has
+    35 minutes to heal before any replica is reported unhealthy."""
+
+    @field_validator("health_interval_seconds")
+    @classmethod
+    def _refuse_an_interval_shorter_than_a_minute(cls, interval_seconds: int) -> int:
+        """Refuse a health interval that would bill a check every few seconds.
+
+        Args:
+            interval_seconds: The configured interval, already known to be 0 or more.
+
+        Returns:
+            `interval_seconds` unchanged, when it is 0 or at least
+            `MINIMUM_HEALTH_INTERVAL_SECONDS`.
+
+        Raises:
+            ValueError: 1 to 59 seconds. Pydantic reports it as a `ValidationError` naming
+                the field.
+        """
+        if 0 < interval_seconds < MINIMUM_HEALTH_INTERVAL_SECONDS:
+            raise ValueError(
+                f"must be 0 to disable the check, or at least "
+                f"{MINIMUM_HEALTH_INTERVAL_SECONDS} seconds, not {interval_seconds}"
+            )
+        return interval_seconds
+
     @classmethod
     def from_env(cls) -> "JudgeConfig":
         """Build the config from the process's `RUBRIC_JUDGE_*` environment variables.
@@ -246,28 +342,40 @@ class JudgeConfig(DocumentedModel):
         """Build the config from a mapping of `RUBRIC_JUDGE_*` variables to their values.
 
         Reads `ENDPOINT`, `API_KEY`, `MODEL` (all required) plus `TEMPERATURE`,
-        `MAX_TOKENS`, `MAX_ATTEMPTS` and `MAX_CONCURRENT`, each prefixed
-        `RUBRIC_JUDGE_`. An optional variable that is absent is not passed on, so the
-        field defaults above stay the single source of truth for it.
+        `MAX_TOKENS`, `MAX_ATTEMPTS`, `MAX_CONCURRENT`, `HEALTH_INTERVAL`, `HEALTH_RETRIES`
+        and `HEALTH_FIRST_PAUSE`, each prefixed `RUBRIC_JUDGE_`. An optional variable that is
+        absent is not passed on, so the field defaults above stay the single source of truth
+        for it.
 
         A variable set to the *empty* string is a half-finished configuration and is refused
         for every variable alike, required or optional — one condition cannot mean "your key
         is missing" on one line and "take the default" on the next.
 
+        Whitespace around a value is dropped before anything else is decided. `docker run
+        --env-file` passes a trailing space through verbatim where `uvicorn --env-file`
+        strips it, and an endpoint URL ending in two spaces answers every call with a 404.
+        A value of nothing but whitespace is therefore empty, and refused as such.
+
+        A `RUBRIC_JUDGE_*` name outside the set above is refused as unknown. It is nearly
+        always a typo, and `RUBRIC_JUDGE_HEALTH_INTERVALL` read as nothing would start a
+        service that never checks its judge while its operator believes it does.
+
         Args:
             environment: Variable name to value, `os.environ` in production and a plain dict
-                anywhere else. Names outside the `RUBRIC_JUDGE_*` set above are ignored,
-                so the whole process environment can be handed in. Values are the strings
-                they are exported as; an empty one is refused rather than read as "unset".
+                anywhere else. Names without the `RUBRIC_JUDGE_` prefix are ignored, so the
+                whole process environment can be handed in. Values are the strings they are
+                exported as, surrounding whitespace ignored; an empty one is refused rather
+                than read as "unset".
 
         Returns:
             A validated `JudgeConfig`. Numeric variables are parsed and range-checked by
             Pydantic, so a typo cannot turn into a silently odd setting.
 
         Raises:
-            RuntimeError: A required variable is missing, or any variable is set to the empty
-                string. The message names *all* of them at once and says which of the two
-                each one is — fixing configuration one error per restart is misery.
+            RuntimeError: A required variable is missing, any variable is set to the empty
+                string, or a `RUBRIC_JUDGE_*` name is unknown. The message names *all* of
+                them at once and says which of the three each one is, because fixing
+                configuration one error per restart is misery.
             ValidationError: A numeric variable does not parse or is out of range. The
                 message names the offending setting.
 
@@ -280,35 +388,50 @@ class JudgeConfig(DocumentedModel):
                 }
             ).max_attempts   # 3, the field default
         """
-        variable_per_field = {
-            "endpoint": "RUBRIC_JUDGE_ENDPOINT",
-            "api_key": "RUBRIC_JUDGE_API_KEY",
-            "model": "RUBRIC_JUDGE_MODEL",
-            "temperature": "RUBRIC_JUDGE_TEMPERATURE",
-            "max_tokens": "RUBRIC_JUDGE_MAX_TOKENS",
-            "max_attempts": "RUBRIC_JUDGE_MAX_ATTEMPTS",
-            "max_concurrent": "RUBRIC_JUDGE_MAX_CONCURRENT",
+        trimmed_value_per_variable = {
+            name: value.strip()
+            for name, value in environment.items()
+            if name.startswith(JUDGE_VARIABLE_PREFIX)
         }
-        required_fields = {"endpoint", "api_key", "model"}
-        unusable = [
-            f"{variable} is missing"
-            for field, variable in variable_per_field.items()
-            if field in required_fields and variable not in environment
-        ] + [
-            f"{variable} is empty"
-            for variable in variable_per_field.values()
-            if environment.get(variable) == ""
-        ]
+        unusable = (
+            _missing_required_variables(trimmed_value_per_variable)
+            + _empty_variables(trimmed_value_per_variable)
+            + _unknown_variables(trimmed_value_per_variable)
+        )
         if unusable:
             raise RuntimeError(f"Unusable environment variables: {', '.join(unusable)}")
 
         return cls.model_validate(
             {
-                field: environment[variable]
-                for field, variable in variable_per_field.items()
-                if variable in environment
+                field: trimmed_value_per_variable[variable]
+                for field, variable in _VARIABLE_PER_FIELD.items()
+                if variable in trimmed_value_per_variable
             }
         )
+
+
+def _missing_required_variables(value_per_variable: Mapping[str, str]) -> list[str]:
+    """Name each required variable that is absent, since a judge cannot be built without it."""
+    return [
+        f"{_VARIABLE_PER_FIELD[field]} is missing"
+        for field in _REQUIRED_FIELDS
+        if _VARIABLE_PER_FIELD[field] not in value_per_variable
+    ]
+
+
+def _empty_variables(value_per_variable: Mapping[str, str]) -> list[str]:
+    """Name each variable set to nothing, a half-finished line rather than a wish for a default."""
+    return [f"{variable} is empty" for variable, value in value_per_variable.items() if value == ""]
+
+
+def _unknown_variables(value_per_variable: Mapping[str, str]) -> list[str]:
+    """Name each `RUBRIC_JUDGE_*` name no field reads, because it is nearly always a typo."""
+    known_variables = set(_VARIABLE_PER_FIELD.values())
+    return [
+        f"{variable} is unknown"
+        for variable in value_per_variable
+        if variable not in known_variables
+    ]
 
 
 def parse_judge_reply(reply: str, scale: Scale) -> JudgeReply:
@@ -408,6 +531,76 @@ def _reasoning_before(reply: str, score_object: re.Match[str]) -> str:
     return reply[: score_object.start()].strip() or reply.strip()
 
 
+class JudgeHealth:
+    """Whether a judge's endpoint has recently proven to work, and when to ask it again.
+
+    The one clock every record and every question about staleness is measured on lives here,
+    so the judge that records evidence and the monitor that asks about it can never disagree
+    about what time it is. A test hands in a clock of its own and lets a day pass at once. A
+    judge starts unproven: nothing is healthy before its endpoint has answered once.
+
+    Example:
+        health = JudgeHealth()
+        health.is_healthy                                          # False
+        health.record_proof()
+        health.is_healthy                                          # True
+        health.seconds_until_check_due(interval_seconds=3600)      # just under 3600.0
+    """
+
+    def __init__(self, clock: Callable[[], float] = time.monotonic) -> None:
+        """Start unproven, with a check due at once.
+
+        Args:
+            clock: Returns the current moment in seconds and never goes backwards. The
+                default is `time.monotonic`, which a wall-clock change cannot move.
+        """
+        self.clock = clock
+        self.is_healthy = False
+        """True from the last answer the endpoint gave until the next refusal."""
+
+        self.last_evidence_at: float | None = None
+        """When the endpoint last answered or last failed, on `clock`, or `None` before
+        either. A failure restarts the wait as much as an answer does, so a check that failed
+        is repeated one interval later and not in a tight loop."""
+
+    def record_proof(self) -> None:
+        """The endpoint answered, so the judge is healthy and the next check waits again.
+
+        Example:
+            judge.health.record_proof()
+        """
+        self.is_healthy = True
+        self.last_evidence_at = self.clock()
+
+    def record_failure(self) -> None:
+        """The endpoint refused or never answered, so the judge is unhealthy until it answers.
+
+        Example:
+            judge.health.record_failure()
+        """
+        self.is_healthy = False
+        self.last_evidence_at = self.clock()
+
+    def seconds_until_check_due(self, interval_seconds: float) -> float:
+        """How long a periodic check can still wait.
+
+        Args:
+            interval_seconds: How long evidence stays fresh, positive. The caller does not
+                ask at all when checks are disabled.
+
+        Returns:
+            Seconds until the evidence is older than `interval_seconds`, and 0.0 once it is,
+            or when there has been no evidence yet.
+
+        Example:
+            judge.health.record_failure()
+            judge.health.seconds_until_check_due(interval_seconds=86400)   # about 86400.0
+        """
+        if self.last_evidence_at is None:
+            return 0.0
+        return max(0.0, self.last_evidence_at + interval_seconds - self.clock())
+
+
 class OpenAIJudge:
     """A `Judge` backed by any OpenAI-compatible endpoint, with retries and a call limit.
 
@@ -478,6 +671,7 @@ class OpenAIJudge:
         self.scale = scale
         self.system_prompt = system_prompt or _system_prompt_for(scale)
         self.client = client or _client_for(config)
+        self.health = JudgeHealth()
         # One throttle per event loop, see `free_call_slots`.
         self._slots_per_loop: dict[asyncio.AbstractEventLoop, asyncio.Semaphore] = {}
 
@@ -634,21 +828,131 @@ class OpenAIJudge:
             {"role": "user", "content": criterion_prompt(answer, criterion.content, context)},
         ]
 
+    async def check(self) -> None:
+        """Prove that the endpoint accepts this judge's key, model and request shape.
+
+        One tiny call with the same model and temperature `score` sends, so a service can
+        refuse to start before a real request finds out. Any answer is proof, even an empty
+        one, because only the endpoint's acceptance is under test. Outages are retried quickly
+        with the backoff `score` uses, so a starting service fails fast and its platform's
+        restart policy tries again. A rejection is not retried.
+
+        Every failure marks `health` unhealthy, where a failed `score` does so only for a
+        rejection. This request is fixed and small, so nothing about one case can be to blame.
+
+        Raises:
+            JudgeUnavailableError: The endpoint gave no answer within `config.max_attempts`
+                attempts of `check_once`, naming the last cause.
+            openai.OpenAIError: The endpoint rejected the call, for example a refused key
+                (`401`), an unknown model (`404`) or a parameter the model does not take
+                (`400`). Raised on the first attempt, unchanged.
+
+        Example:
+            judge = OpenAIJudge(JudgeConfig.from_env())
+            await judge.check()   # returns, or raises before the first real request
+            judge.health.is_healthy   # True
+        """
+        try:
+            await self._check_until_answered()
+        except (JudgeUnavailableError, OpenAIError):
+            self.health.record_failure()
+            raise
+
+    async def check_once(self) -> None:
+        """Send the health check exactly once, for a caller with a retry schedule of its own.
+
+        The call waits at most `_HEALTH_CHECK_TIMEOUT_SECONDS` for an answer. An answer marks
+        `health` healthy. An outage is only reported and never recorded, because the caller
+        decides when a run of outages is long enough to call the judge unhealthy. A `401`,
+        `403` or `404` is recorded as a failure here, as it is on every call.
+
+        Raises:
+            JudgeUnavailableError: The endpoint did not answer: unreachable, timed out, rate
+                limited or failing on its side. Chained to the SDK's exception.
+            openai.OpenAIError: The endpoint rejected the call, unchanged.
+
+        Example:
+            await judge.check_once()   # one call of at most 16 tokens and 60 seconds
+        """
+        try:
+            await self._call_endpoint(
+                _HEALTH_CHECK_CONVERSATION,
+                _HEALTH_CHECK_TOKEN_BUDGET,
+                timeout_seconds=_HEALTH_CHECK_TIMEOUT_SECONDS,
+            )
+        except _RETRYABLE_TRANSPORT_FAILURES as outage:
+            raise JudgeUnavailableError(
+                f"the judge's endpoint did not answer the health check: {_describe(outage)}"
+            ) from outage
+
+    async def _check_until_answered(self) -> None:
+        """Repeat `check_once` through outages with the quick backoff `score` uses.
+
+        Raises:
+            JudgeUnavailableError: No answer within `config.max_attempts`.
+            openai.OpenAIError: The endpoint rejected the call.
+        """
+        last_outage: JudgeUnavailableError | None = None
+        for attempt in range(self.config.max_attempts):
+            try:
+                await self.check_once()
+                return
+            except JudgeUnavailableError as outage:
+                last_outage = outage
+                await asyncio.sleep(self._backoff_seconds(attempt))
+        raise JudgeUnavailableError(
+            f"Judge endpoint did not answer the health check in {self.config.max_attempts} "
+            f"attempts: {_describe(last_outage.__cause__ if last_outage else None)}"
+        ) from last_outage
+
     async def _ask(self, conversation: list[ChatMessage]) -> str:
-        """One HTTP call, and a slot held for exactly its duration.
+        """One judge call for one criterion, and the text the model wrote."""
+        response = await self._call_endpoint(conversation, self.config.max_tokens)
+        return _reply_text(response)
+
+    async def _call_endpoint(
+        self,
+        conversation: list[ChatMessage],
+        token_budget: int,
+        timeout_seconds: float | NotGiven = NOT_GIVEN,
+    ) -> ChatCompletion:
+        """One HTTP call, a slot held for exactly its duration, and what it says about health.
 
         The slot is taken around the call and not around the retry loop in `score()`: a
         criterion that is parsing a reply, or waiting to be asked again, must not keep a
         slot another criterion could use.
+
+        Any answer is recorded as proof, even one without content, because the endpoint did
+        accept the call. A rejection in `_SERVICE_WIDE_REJECTIONS` is recorded as a failure at
+        once, since every later call would meet it too. An outage is not, because it is
+        answered with a `503` and heals by itself.
+
+        Args:
+            conversation: The messages to send, system prompt first.
+            token_budget: The most reply tokens the call may cost, positive.
+            timeout_seconds: How long to wait for the answer. Left out, the SDK's own
+                default applies.
+
+        Returns:
+            The chat completion exactly as the endpoint returned it.
+
+        Raises:
+            openai.OpenAIError: Whatever the SDK raised, unchanged.
         """
-        async with self.free_call_slots:
-            response = await self.client.chat.completions.create(
-                model=self.config.model,
-                messages=conversation,
-                temperature=self.config.temperature,
-                max_completion_tokens=self.config.max_tokens,
-            )
-        return _reply_text(response)
+        try:
+            async with self.free_call_slots:
+                response = await self.client.chat.completions.create(
+                    model=self.config.model,
+                    messages=conversation,
+                    temperature=self.config.temperature,
+                    max_completion_tokens=token_budget,
+                    timeout=timeout_seconds,
+                )
+        except _SERVICE_WIDE_REJECTIONS:
+            self.health.record_failure()
+            raise
+        self.health.record_proof()
+        return response
 
 
 def _reply_text(response: ChatCompletion) -> str:
@@ -699,7 +1003,7 @@ def _system_prompt_for(scale: Scale) -> str:
     return JUDGE_EN if scale == DEFAULT_SCALE else judge_prompt(scale)
 
 
-def _describe(failure: Exception | None) -> str:
+def _describe(failure: BaseException | None) -> str:
     """The cause to name when the judge is given up on, never an empty string.
 
     `str(TimeoutError())` *is* the empty string, and a timeout is the likeliest judge failure

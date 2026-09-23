@@ -26,6 +26,9 @@ packages = ["src/rubric_judge"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+# Opt in with `pytest -m docker`; the default run needs no Docker daemon.
+addopts = "-m 'not docker'"
+markers = ["docker: builds and runs the Docker image, needs a running Docker daemon"]
 
 [tool.ruff.lint]
 select = ["D"]
