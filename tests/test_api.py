@@ -10,7 +10,15 @@ import pytest
 from fastapi.testclient import TestClient
 from openai import AsyncOpenAI
 
-from tests.conftest import CASE, RUN, RUN_SCORES, FakeJudge, run_of, use_judge
+from tests.conftest import (
+    CASE,
+    JUDGE_ENVIRONMENT,
+    RUN,
+    RUN_SCORES,
+    FakeJudge,
+    run_of,
+    use_judge,
+)
 
 from rubric_judge import JudgeUnavailableError, RunResult
 from rubric_judge.api import app, get_judge
@@ -99,14 +107,34 @@ def test_the_result_carries_every_published_field(client):
     assert body["criterion_results"][0]["weight"] == 3
 
 
-def test_health_answers_even_when_the_judge_is_unconfigured(unconfigured_client):
-    """Liveness must not depend on the judge, or a missing key takes the container down."""
-    assert unconfigured_client.get("/health").status_code == 200
+def test_the_service_refuses_to_start_without_a_configured_judge(monkeypatch):
+    """No silent fallback and no fake score: a service that could not grade a single request
+    must not come up and report itself healthy. Every missing variable is named at once."""
+    for variable in JUDGE_ENVIRONMENT:
+        monkeypatch.delenv(variable, raising=False)
+    get_judge.cache_clear()
+
+    with pytest.raises(RuntimeError) as refusal:
+        with TestClient(app):
+            pass
+
+    for variable in JUDGE_ENVIRONMENT:
+        assert f"{variable} is missing" in str(refusal.value)
+    get_judge.cache_clear()
 
 
-def test_evaluate_fails_loudly_when_the_judge_is_unconfigured(unconfigured_client):
-    """No silent fallback and no fake score: a missing key is a server fault, not a 0.0."""
-    assert unconfigured_client.post("/evaluate", json=CASE).status_code == 500
+def test_a_judge_installed_before_startup_needs_no_environment(monkeypatch):
+    """A service that brings its own judge overrides `get_judge`; the startup check builds
+    that judge instead of demanding `RUBRIC_JUDGE_*` variables it will never read."""
+    for variable in JUDGE_ENVIRONMENT:
+        monkeypatch.delenv(variable, raising=False)
+    get_judge.cache_clear()
+    use_judge(FakeJudge({1: 2, 2: 0}))
+
+    with TestClient(app) as client:
+        assert client.post("/evaluate", json=CASE).json()["score"] == pytest.approx(0.75)
+
+    app.dependency_overrides.clear()
 
 
 # --- POST /evaluate/run -----------------------------------------------------------------
@@ -189,14 +217,6 @@ def test_one_invalid_case_rejects_the_whole_run_before_any_call(client):
 # OpenAI-compatible endpoint correctly. These go through the full chain — HTTP request, the
 # SDK writing the call and reading the reply, the parser, the weighted fold, HTTP response —
 # with an in-memory transport under the SDK where a socket used to be.
-
-JUDGE_ENVIRONMENT = {
-    "RUBRIC_JUDGE_ENDPOINT": "http://stub/v1",
-    "RUBRIC_JUDGE_API_KEY": "stub-key",
-    "RUBRIC_JUDGE_MODEL": "stub-model",
-}
-"""Enough to let `get_judge` build a judge from the environment. It is never called, so the
-endpoint does not have to exist — only the wiring is under test."""
 
 EMAIL_CRITERION = CASE["criteria"][0]["content"]
 LAST_DAY_CRITERION = CASE["criteria"][1]["content"]
@@ -397,20 +417,10 @@ def test_a_custom_outage_type_answers_503_at_every_entry_point(client):
         assert response.json() == {"detail": "my quota is used up"}
 
 
-def test_an_unconfigured_judge_is_reported_before_the_body_is_read(unconfigured_client):
-    """FastAPI resolves a dependency before it validates the body, so an unconfigured service
-    answers 500 for an invalid body too — the server fault is reported rather than the
-    client's. Pinned because it is the one place the error table's "invalid body -> 422" does
-    not hold, and because a `RuntimeError` reaching a caller as a 422 would be worse: it would
-    send them looking for a mistake in a request that was never read."""
-    assert unconfigured_client.post("/evaluate", json={"id": 1}).status_code == 500
-    assert unconfigured_client.post("/evaluate/run", json={"cases": []}).status_code == 500
-
-
-def test_compare_validates_its_body_with_no_judge_in_the_way(unconfigured_client):
+def test_compare_validates_its_body_with_no_judge_in_the_way(client):
     """`/compare` takes no judge at all, so nothing stands between the body and its
-    validation: an invalid comparison is a 422 whether or not the service is configured."""
-    response = unconfigured_client.post("/compare", json={"baseline": {}})
+    validation: an invalid comparison is a 422 before any judge could be consulted."""
+    response = client.post("/compare", json={"baseline": {}})
 
     assert response.status_code == 422
 
@@ -587,13 +597,13 @@ def test_a_run_judged_on_a_custom_scale_reports_its_raw_grades_and_a_normalized_
     assert body["metrics"]["average_criterion_score"] == pytest.approx(5.25)  # raw, 0..10
 
 
-def test_a_judge_grading_above_its_own_scale_is_a_bug_and_not_a_score(unconfigured_client):
+def test_a_judge_grading_above_its_own_scale_is_a_bug_and_not_a_score(status_reporting_client):
     """A broken judge is a 500, where an unreachable one is a 503: the request is not worth
     repeating, and a case score nobody can tell from a real one must not come back as a 200
     either way."""
     use_judge(FakeJudge({1: 5, 2: 0}))
 
-    assert unconfigured_client.post("/evaluate", json=CASE).status_code == 500
+    assert status_reporting_client.post("/evaluate", json=CASE).status_code == 500
 
 
 def test_a_described_custom_scale_reaches_the_caller_with_its_wording(client):
@@ -616,10 +626,13 @@ def test_a_described_custom_scale_reaches_the_caller_with_its_wording(client):
     assert body["score"] == pytest.approx(0.8333333333333334)  # (3*3/3 + 1*1/3) / 4
 
 
-def test_compare_answers_even_when_the_judge_is_unconfigured(unconfigured_client):
-    """Pure computation: comparing stored runs must not need an API key."""
+def test_compare_never_consults_the_judge(client):
+    """Pure computation: comparing stored runs must keep working while the judge endpoint is
+    down. A judge that knows no criterion fails on any call it gets, so a 200 proves none
+    was made."""
+    use_judge(FakeJudge({}))
     body = _runs(run_of({1: 0}), run_of({1: 2}))
-    assert unconfigured_client.post("/compare", json=body).status_code == 200
+    assert client.post("/compare", json=body).status_code == 200
 
 
 def test_a_run_without_cases_is_rejected_rather_than_dividing_by_zero(client):

@@ -4,6 +4,8 @@ Stateless: no catalog, no run ids, no persistence. Everything that decides *what
 means lives in `evaluation.py` and below.
 """
 
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from functools import lru_cache
 from typing import Annotated
 
@@ -22,12 +24,9 @@ from rubric_judge.models import (
     RunResult,
 )
 
-app = FastAPI(title="rubric-judge", version="0.1.0")
-
-
 @lru_cache
 def get_judge() -> Judge:
-    """The one judge this process uses, built on the first request that needs it.
+    """The one judge this process uses, built once when the service starts.
 
     Cached rather than built per request for two reasons: importing this module must not
     read the environment (or a test could never import it), and `max_concurrent` is a
@@ -43,15 +42,50 @@ def get_judge() -> Judge:
 
     Raises:
         RuntimeError: The judge cannot be configured; the message names every missing
-            variable. Surfaces as a 500, which is correct — an unconfigured service is a
-            server fault, not a bad request, and must never fall back to a fake score. A
-            judge that is configured but unreachable is a 503 instead, raised per request.
+            variable. Raised while the service starts, so an unconfigured service never
+            serves and never falls back to a fake score. A judge that is configured but
+            unreachable is a 503 instead, raised per request.
 
     Example:
         app.dependency_overrides[get_judge] = lambda: my_own_judge   # grade differently
         get_judge.cache_clear()   # after changing RUBRIC_JUDGE_* in this process
     """
     return OpenAIJudge(JudgeConfig.from_env())
+
+
+@asynccontextmanager
+async def _build_the_judge_before_serving(app: FastAPI) -> AsyncIterator[None]:
+    """Refuse to start a service that could not grade a single request.
+
+    Without this, an unconfigured service answers `/health` and looks ready to an
+    orchestrator until the first real request fails. The judge built here is the one every
+    request then uses: an override of `get_judge` installed before startup is honored, so a
+    service that brings its own judge needs no `RUBRIC_JUDGE_*` variables at all. Nothing
+    is sent to the endpoint, so a service that starts has a complete configuration but has
+    not yet proven that its key works.
+
+    Args:
+        app: The application being started, whose dependency overrides decide which judge
+            is built.
+
+    Yields:
+        Control to the server once the judge exists, for as long as the service runs.
+
+    Raises:
+        RuntimeError: The judge cannot be configured; the message names every missing or
+            empty variable. Uvicorn reports it and exits, so the process never serves.
+        ValidationError: A numeric `RUBRIC_JUDGE_*` variable does not parse or is out of
+            range.
+
+    Example:
+        with TestClient(app):   # RuntimeError: Unusable environment variables: ...
+            pass
+    """
+    app.dependency_overrides.get(get_judge, get_judge)()
+    yield
+
+
+app = FastAPI(title="rubric-judge", version="0.1.0", lifespan=_build_the_judge_before_serving)
 
 
 @app.exception_handler(RequestValidationError)
@@ -115,9 +149,10 @@ async def report_unavailable_judge(_: Request, error: JudgeUnavailableError) -> 
 async def health() -> dict[str, str]:
     """Readiness probe for container orchestration.
 
-    Answers `{"status": "ok"}` even when the judge is unconfigured or its endpoint is down,
-    so neither takes the container down — `POST /evaluate` is what fails then, loudly, with
-    a 500 or a 503. Liveness must not depend on a third-party endpoint.
+    A service that answers at all has a complete judge configuration, because an
+    unconfigured one refuses to start. The judge endpoint itself is not asked, so an outage
+    there does not take the container down — `POST /evaluate` is what fails then, loudly,
+    with a 503. Liveness must not depend on a third-party endpoint.
 
     Returns:
         `{"status": "ok"}`, always and with a 200. There is no other body and no other
@@ -166,7 +201,8 @@ async def evaluate_case(case: Case, judge: Annotated[Judge, Depends(get_judge)])
     to be scored `0`, and a run with one invented `0` in it is a plausible number you could
     not tell from a real one. Retry the request once the judge is reachable again.
 
-    **500** if the judge is unconfigured or the program is broken.
+    **500** if the judge endpoint rejects the configured key or model, or the program is
+    broken.
 
     Args:
         case: The case to score: `id`, `answer`, at least one `criteria` entry with a
@@ -302,8 +338,8 @@ async def compare_runs(run_comparison: RunComparison) -> RunComparisonResult:
     the denominator each case score is normalized by and the scale is the unit every raw
     criterion score is in, so numbers computed under different ones do not subtract.
 
-    No judge is involved: this endpoint is pure computation and answers correctly even when
-    the service has no API key configured.
+    No judge is involved: this endpoint is pure computation and never calls the judge
+    endpoint, so it answers correctly while that endpoint is down.
 
     Args:
         run_comparison: The two runs to hold against each other — `baseline` and `candidate`,

@@ -3,6 +3,7 @@ domain and the HTTP tests alike — so a domain test and an HTTP test never desc
 the same input."""
 
 from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from typing import Any
 
 import pytest
@@ -81,25 +82,41 @@ class FakeJudge:
         return JudgeReply(score=outcome, reasoning=f"reasoning for {criterion.id}")
 
 
+JUDGE_ENVIRONMENT = {
+    "RUBRIC_JUDGE_ENDPOINT": "http://stub/v1",
+    "RUBRIC_JUDGE_API_KEY": "stub-key",
+    "RUBRIC_JUDGE_MODEL": "stub-model",
+}
+"""Enough for the service to build its judge at startup. That judge is never called, so the
+endpoint does not have to exist; a test that needs answers installs its own with
+`use_judge()`."""
+
+
 @pytest.fixture
-def client() -> Iterator[TestClient]:
+def client(monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
     """HTTP client against the real app; `use_judge()` swaps in a fake for one test."""
-    with TestClient(app) as client:
+    with _started_app(monkeypatch) as client:
+        yield client
+
+
+@pytest.fixture
+def status_reporting_client(monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
+    """HTTP client that reports a server fault as its status code, like a real client would,
+    instead of re-raising the server-side error into the test."""
+    with _started_app(monkeypatch, raise_server_exceptions=False) as client:
+        yield client
+
+
+@contextmanager
+def _started_app(monkeypatch: pytest.MonkeyPatch, **client_options: Any) -> Iterator[TestClient]:
+    """The app started the way uvicorn starts it, configured from `JUDGE_ENVIRONMENT`, and
+    reset afterwards so no judge or override leaks into the next test."""
+    for variable, value in JUDGE_ENVIRONMENT.items():
+        monkeypatch.setenv(variable, value)
+    get_judge.cache_clear()
+    with TestClient(app, **client_options) as client:
         yield client
     app.dependency_overrides.clear()
-    get_judge.cache_clear()
-
-
-@pytest.fixture
-def unconfigured_client(monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
-    """HTTP client against an app whose judge cannot be built: no environment, no override.
-    `raise_server_exceptions=False` makes the client behave like a real one and report the
-    status code instead of re-raising the server-side error."""
-    for variable in ("ENDPOINT", "API_KEY", "MODEL"):
-        monkeypatch.delenv(f"RUBRIC_JUDGE_{variable}", raising=False)
-    get_judge.cache_clear()
-    with TestClient(app, raise_server_exceptions=False) as client:
-        yield client
     get_judge.cache_clear()
 
 
