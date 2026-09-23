@@ -31,6 +31,7 @@ from rubric_judge.api import (
     health_report,
     judge_source,
     prove_the_judge_periodically,
+    retry_pauses_seconds,
 )
 from rubric_judge.judge import JudgeConfig, JudgeHealth, OpenAIJudge
 from rubric_judge.models import DEFAULT_SCALE, Scale
@@ -322,6 +323,82 @@ async def test_a_failed_periodic_check_is_retried_one_interval_later(stub_openai
     assert fake_time.slept == [0.0, 3600.0, 3600.0]
     assert stub_openai_server.completions_received == 3  # one after each wake-up
     assert not judge.health.is_healthy
+
+
+def test_the_retry_pauses_double_from_the_first():
+    assert retry_pauses_seconds(300, 3) == [300, 600, 1200]
+    assert retry_pauses_seconds(300, 0) == []
+
+
+def _judge_proven_at_the_start(server: StubOpenAIServer, fake_time: FakeTime) -> OpenAIJudge:
+    """A judge that got an answer at 0, so its first periodic check is due an hour later."""
+    judge = _judge_checking_every_hour(server, fake_time)
+    judge.health.record_proof()
+    return judge
+
+
+async def test_an_outage_is_retried_on_its_schedule_before_the_judge_turns_unhealthy(
+    stub_openai_server,
+):
+    """5, 10 and 20 minutes for a provider's outage to heal, and the service stays healthy
+    all that time, because a blip must not take every replica down."""
+    stub_openai_server.status = 502
+    fake_time = FakeTime(sleeps_until_stop=5)
+    judge = _judge_proven_at_the_start(stub_openai_server, fake_time)
+    healthy_during_pauses: list[bool] = []
+    fake_time.during_sleep = lambda now: healthy_during_pauses.append(judge.health.is_healthy)
+
+    with pytest.raises(_MonitorStopped):
+        await prove_the_judge_periodically(judge, fake_time.sleep)
+
+    assert fake_time.slept == [3600.0, 300.0, 600.0, 1200.0, 3600.0]
+    assert stub_openai_server.completions_received == 5  # 1 attempt, 3 retries, next check
+    assert healthy_during_pauses == [True, True, True, True, False]
+    assert not judge.health.is_healthy
+
+
+async def test_an_outage_that_heals_within_the_schedule_never_turns_the_judge_unhealthy(
+    stub_openai_server,
+):
+    stub_openai_server.status = 502
+    fake_time = FakeTime(sleeps_until_stop=3)
+    judge = _judge_proven_at_the_start(stub_openai_server, fake_time)
+
+    def endpoint_back_during_the_first_pause(now: float) -> None:
+        if fake_time.slept == [3600.0, 300.0]:
+            stub_openai_server.status = 200
+
+    fake_time.during_sleep = endpoint_back_during_the_first_pause
+
+    with pytest.raises(_MonitorStopped):
+        await prove_the_judge_periodically(judge, fake_time.sleep)
+
+    assert fake_time.slept == [3600.0, 300.0, 3600.0]
+    assert stub_openai_server.completions_received == 3  # failed, healed, next check
+    assert judge.health.is_healthy
+
+
+async def test_traffic_answered_during_a_pause_ends_the_retry_schedule(stub_openai_server):
+    """A real call answered while the check waits has settled the question, so no retry is
+    spent, and the next check waits a full interval from that call."""
+    stub_openai_server.status = 502
+    fake_time = FakeTime(sleeps_until_stop=3)
+    judge = _judge_proven_at_the_start(stub_openai_server, fake_time)
+
+    def answered_call_during_the_first_pause(now: float) -> None:
+        if fake_time.slept == [3600.0, 300.0]:
+            fake_time.now = now + 100.0
+            judge.health.record_proof()
+            fake_time.now = now
+
+    fake_time.during_sleep = answered_call_during_the_first_pause
+
+    with pytest.raises(_MonitorStopped):
+        await prove_the_judge_periodically(judge, fake_time.sleep)
+
+    assert fake_time.slept == [3600.0, 300.0, 3400.0]
+    assert stub_openai_server.completions_received == 2  # failed, then the next check
+    assert judge.health.is_healthy
 
 
 async def test_real_traffic_postpones_the_periodic_check(stub_openai_server):

@@ -5,6 +5,7 @@ from typing import Any, cast
 import httpx
 import pytest
 from openai import (
+    NOT_GIVEN,
     APIConnectionError,
     APITimeoutError,
     AsyncOpenAI,
@@ -672,6 +673,30 @@ def test_a_health_interval_under_a_minute_is_refused(interval_seconds):
         )
 
 
+def test_the_health_retry_schedule_defaults_to_three_retries_from_five_minutes():
+    config = JudgeConfig.from_mapping(REQUIRED_ENVIRONMENT)
+    assert (config.health_check_retries, config.health_check_first_pause_seconds) == (3, 300)
+
+
+def test_the_health_retry_schedule_is_read_from_the_environment():
+    config = JudgeConfig.from_mapping(
+        {
+            **REQUIRED_ENVIRONMENT,
+            "RUBRIC_JUDGE_HEALTH_RETRIES": "0",
+            "RUBRIC_JUDGE_HEALTH_FIRST_PAUSE": "60",
+        }
+    )
+    assert (config.health_check_retries, config.health_check_first_pause_seconds) == (0, 60)
+
+
+@pytest.mark.parametrize(
+    "setting", [{"health_check_retries": -1}, {"health_check_first_pause_seconds": 0}]
+)
+def test_a_negative_retry_count_or_a_pause_of_nothing_is_refused(setting):
+    with pytest.raises(ValidationError):
+        JudgeConfig(model="m", endpoint="http://x/v1", api_key="k", **setting)
+
+
 @pytest.mark.parametrize("interval_seconds", [0, 60])
 def test_zero_disables_the_health_interval_and_sixty_is_the_shortest(interval_seconds):
     config = JudgeConfig(
@@ -739,6 +764,41 @@ async def test_a_check_that_heals_within_its_attempts_proves_the_judge():
     await judge.check()
 
     assert judge.health.is_healthy
+
+
+async def test_only_the_health_check_carries_its_own_timeout():
+    """A 16-token check that hangs for the SDK's default ten minutes would hold its whole
+    schedule up, while a judge call may think for longer."""
+    timeouts_sent: list[Any] = []
+
+    async def create(**request: Any) -> type:
+        timeouts_sent.append(request["timeout"])
+        return _completion('Fine.\n{"score": 2}')
+
+    config = JudgeConfig(model="m", endpoint="http://x/v1", api_key="k")
+    judge = OpenAIJudge(config, client=_client_answering(SimpleNamespace(create=create)))
+
+    await judge.check_once()
+    await judge.score("answer", CRITERION)
+
+    assert timeouts_sent == [60.0, NOT_GIVEN]
+
+
+@pytest.mark.parametrize(
+    "outage",
+    [rate_limited(), server_error(), APITimeoutError(request=_REQUEST)],  # type: ignore[arg-type]  # see rate_limited
+)
+async def test_a_single_check_reports_an_outage_without_judging_the_judge(outage):
+    """Whether a run of outages is long enough to call the judge unhealthy is its caller's
+    schedule to decide, so one failed `check_once` changes nothing."""
+    judge, fake = _judge(['Fine.\n{"score": 2}', outage])
+    await judge.score("answer", CRITERION)
+
+    with pytest.raises(JudgeUnavailableError, match="did not answer the health check"):
+        await judge.check_once()
+
+    assert judge.health.is_healthy
+    assert len(fake.calls) == 2
 
 
 @pytest.mark.parametrize("status", [401, 403, 404])

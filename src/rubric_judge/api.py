@@ -163,15 +163,34 @@ def get_judge(request: Request) -> Judge:
     return judge
 
 
+def retry_pauses_seconds(first_pause_seconds: float, retries: int) -> list[float]:
+    """The pauses a failing periodic health check waits before each of its retries.
+
+    Args:
+        first_pause_seconds: The wait before the first retry, positive. Each further wait
+            doubles it.
+        retries: How many retries follow the first attempt, 0 or more.
+
+    Returns:
+        One pause per retry, in order. Empty for 0 retries, when the first failed attempt
+        is final.
+
+    Example:
+        retry_pauses_seconds(300, 3)   # [300, 600, 1200], 35 minutes for an outage to heal
+    """
+    return [first_pause_seconds * 2**retry for retry in range(retries)]
+
+
 async def prove_the_judge_periodically(
     judge: OpenAIJudge, sleep: Callable[[float], Awaitable[None]] = asyncio.sleep
 ) -> None:
     """Keep `judge.health` fresh by checking the endpoint whenever its evidence goes stale.
 
     Runs for as long as the service does. Real traffic resets the wait, so a busy service
-    never spends a check. A failed check is logged and leaves the judge unhealthy until the
-    endpoint answers again, either to real traffic or to the next check one interval later.
-    Time is read from `judge.health.clock`, the clock the evidence was recorded on.
+    never spends a check. A check that meets an outage is retried on the schedule of
+    `retry_pauses_seconds`, and the judge turns unhealthy only once every attempt failed. A
+    rejection is final at once. Either way the next check runs one interval later. Time is
+    read from `judge.health.clock`, the clock the evidence was recorded on.
 
     Args:
         judge: The service's judge, with a positive `config.health_interval_seconds`.
@@ -189,18 +208,54 @@ async def prove_the_judge_periodically(
     while True:
         await sleep(judge.health.seconds_until_check_due(interval_seconds))
         if judge.health.seconds_until_check_due(interval_seconds) == 0:
-            await _check_and_log_failure(judge)
+            await _check_on_schedule(judge, sleep)
 
 
-async def _check_and_log_failure(judge: OpenAIJudge) -> None:
-    """Run one periodic check that cannot end the task running the next one.
+async def _check_on_schedule(
+    judge: OpenAIJudge, sleep: Callable[[float], Awaitable[None]]
+) -> None:
+    """Run one periodic check with its retries, and record what it found.
 
-    A failure belongs in the log and in `judge.health`, never in a crash of the monitor.
+    The judge stays as it was while outages are retried, because a provider's blip must not
+    take every replica down. Real traffic that gets answered or refused during a pause has
+    already decided the question, so the schedule ends there. A bug escapes to the monitor.
+
+    Args:
+        judge: The service's judge, whose `config` holds the retry schedule.
+        sleep: Waits the given seconds, the monitor's own.
     """
-    try:
-        await judge.check()
-    except (JudgeUnavailableError, OpenAIError) as failure:
-        logger.warning("Judge health check failed, reporting unhealthy: %s", failure)
+    started_at = judge.health.clock()
+    pauses = retry_pauses_seconds(
+        judge.config.health_check_first_pause_seconds, judge.config.health_check_retries
+    )
+    for attempt_number, pause_before in enumerate([0.0, *pauses], start=1):
+        if pause_before:
+            await sleep(pause_before)
+            if _traffic_decided_since(judge.health, started_at):
+                return
+        try:
+            await judge.check_once()
+            return
+        except JudgeUnavailableError as outage:
+            logger.warning(
+                "Judge health check attempt %d of %d failed: %s",
+                attempt_number, len(pauses) + 1, outage,
+            )
+        except OpenAIError as rejection:
+            judge.health.record_failure()
+            logger.warning("Judge health check rejected, reporting unhealthy: %s", rejection)
+            return
+    judge.health.record_failure()
+    logger.warning("Judge health check failed %d times, reporting unhealthy", len(pauses) + 1)
+
+
+def _traffic_decided_since(judge_health: JudgeHealth, started_at: float) -> bool:
+    """Tell whether traffic has made the rest of a retry schedule pointless.
+
+    True once an answered or refused judge call arrived after the check began.
+    """
+    last_evidence_at = judge_health.last_evidence_at
+    return last_evidence_at is not None and last_evidence_at > started_at
 
 
 @asynccontextmanager

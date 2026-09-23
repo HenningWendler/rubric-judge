@@ -13,11 +13,13 @@ from collections.abc import Callable, Mapping
 from typing import Protocol
 
 from openai import (
+    NOT_GIVEN,
     APIConnectionError,
     AsyncOpenAI,
     AuthenticationError,
     InternalServerError,
     NotFoundError,
+    NotGiven,
     OpenAIError,
     PermissionDeniedError,
     RateLimitError,
@@ -64,6 +66,12 @@ short and harmless."""
 _HEALTH_CHECK_TOKEN_BUDGET = 16
 """Reply tokens a health check may cost. Small, because the reply is never read, but not 1:
 the check has to be a request the endpoint accepts like any other."""
+
+_HEALTH_CHECK_TIMEOUT_SECONDS = 60.0
+"""How long one health check waits for an answer before it counts as an outage. A 16-token
+reply comes back within seconds, while the SDK's own default of 600 seconds would let one
+hanging endpoint hold a check for ten minutes. Judge calls keep that default, because a
+reasoning model can legitimately think for longer."""
 
 MINIMUM_HEALTH_INTERVAL_SECONDS = 60
 """The shortest `JudgeConfig.health_interval_seconds` there is, apart from 0 for "never". Every
@@ -254,6 +262,16 @@ class JudgeConfig(DocumentedModel):
     `MINIMUM_HEALTH_INTERVAL_SECONDS`. Every judge call that gets an answer counts as proof
     too, so a busy service never spends a check."""
 
+    health_check_retries: int = Field(default=3, ge=0)
+    """How often a failed periodic health check is repeated before the judge counts as
+    unhealthy, for outages only. A rejected key, model or request is final at once. 0 turns
+    the judge unhealthy on the first failed check."""
+
+    health_check_first_pause_seconds: int = Field(default=300, ge=1)
+    """How long a periodic health check waits before its first retry, doubled before each
+    further one. The default schedule waits 5, 10 and 20 minutes, so a provider's outage has
+    35 minutes to heal before any replica is reported unhealthy."""
+
     @field_validator("health_interval_seconds")
     @classmethod
     def _refuse_an_interval_shorter_than_a_minute(cls, interval_seconds: int) -> int:
@@ -302,8 +320,8 @@ class JudgeConfig(DocumentedModel):
         """Build the config from a mapping of `RUBRIC_JUDGE_*` variables to their values.
 
         Reads `ENDPOINT`, `API_KEY`, `MODEL` (all required) plus `TEMPERATURE`,
-        `MAX_TOKENS`, `MAX_ATTEMPTS`, `MAX_CONCURRENT` and `HEALTH_INTERVAL`, each prefixed
-        `RUBRIC_JUDGE_`. An optional variable that is absent is not passed on, so the
+        `MAX_TOKENS`, `MAX_ATTEMPTS`, `MAX_CONCURRENT`, `HEALTH_INTERVAL`, `HEALTH_RETRIES`
+        and `HEALTH_FIRST_PAUSE`, each prefixed `RUBRIC_JUDGE_`. An optional variable that is absent is not passed on, so the
         field defaults above stay the single source of truth for it.
 
         A variable set to the *empty* string is a half-finished configuration and is refused
@@ -351,6 +369,8 @@ class JudgeConfig(DocumentedModel):
             "max_attempts": "RUBRIC_JUDGE_MAX_ATTEMPTS",
             "max_concurrent": "RUBRIC_JUDGE_MAX_CONCURRENT",
             "health_interval_seconds": "RUBRIC_JUDGE_HEALTH_INTERVAL",
+            "health_check_retries": "RUBRIC_JUDGE_HEALTH_RETRIES",
+            "health_check_first_pause_seconds": "RUBRIC_JUDGE_HEALTH_FIRST_PAUSE",
         }
         required_fields = {"endpoint", "api_key", "model"}
         trimmed_value_per_variable = {
@@ -777,17 +797,17 @@ class OpenAIJudge:
         """Prove that the endpoint accepts this judge's key, model and request shape.
 
         One tiny call with the same model and temperature `score` sends, so a service can
-        refuse to start, or report itself unhealthy, before a real request finds out. Any
-        answer is proof, even an empty one, because only the endpoint's acceptance is under
-        test. Outages are waited out with the backoff `score` uses, and a rejection is not
-        retried.
+        refuse to start before a real request finds out. Any answer is proof, even an empty
+        one, because only the endpoint's acceptance is under test. Outages are retried quickly
+        with the backoff `score` uses, so a starting service fails fast and its platform's
+        restart policy tries again. A rejection is not retried.
 
         Every failure marks `health` unhealthy, where a failed `score` does so only for a
         rejection. This request is fixed and small, so nothing about one case can be to blame.
 
         Raises:
-            JudgeUnavailableError: The endpoint gave no answer within `config.max_attempts`,
-                naming the last cause.
+            JudgeUnavailableError: The endpoint gave no answer within `config.max_attempts`
+                attempts of `check_once`, naming the last cause.
             openai.OpenAIError: The endpoint rejected the call, for example a refused key
                 (`401`), an unknown model (`404`) or a parameter the model does not take
                 (`400`). Raised on the first attempt, unchanged.
@@ -798,29 +818,56 @@ class OpenAIJudge:
             judge.health.is_healthy   # True
         """
         try:
-            await self._ping_until_answered()
+            await self._check_until_answered()
         except (JudgeUnavailableError, OpenAIError):
             self.health.record_failure()
             raise
 
-    async def _ping_until_answered(self) -> None:
-        """Send the health check, waiting out outages like `score` does.
+    async def check_once(self) -> None:
+        """Send the health check exactly once, for a caller with a retry schedule of its own.
+
+        The call waits at most `_HEALTH_CHECK_TIMEOUT_SECONDS` for an answer. An answer marks
+        `health` healthy. A failure is only reported and never recorded, except a `401`,
+        `403` or `404`, which every call records, because the caller decides when a run of
+        outages is long enough to call the judge unhealthy.
+
+        Raises:
+            JudgeUnavailableError: The endpoint did not answer: unreachable, timed out, rate
+                limited or failing on its side. Chained to the SDK's exception.
+            openai.OpenAIError: The endpoint rejected the call, unchanged.
+
+        Example:
+            await judge.check_once()   # one call of at most 16 tokens and 60 seconds
+        """
+        try:
+            await self._call_endpoint(
+                _HEALTH_CHECK_CONVERSATION,
+                _HEALTH_CHECK_TOKEN_BUDGET,
+                timeout_seconds=_HEALTH_CHECK_TIMEOUT_SECONDS,
+            )
+        except _RETRYABLE_TRANSPORT_FAILURES as outage:
+            raise JudgeUnavailableError(
+                f"the judge's endpoint did not answer the health check: {_describe(outage)}"
+            ) from outage
+
+    async def _check_until_answered(self) -> None:
+        """Repeat `check_once` through outages with the quick backoff `score` uses.
 
         Raises:
             JudgeUnavailableError: No answer within `config.max_attempts`.
             openai.OpenAIError: The endpoint rejected the call.
         """
-        last_outage: Exception | None = None
+        last_outage: JudgeUnavailableError | None = None
         for attempt in range(self.config.max_attempts):
             try:
-                await self._call_endpoint(_HEALTH_CHECK_CONVERSATION, _HEALTH_CHECK_TOKEN_BUDGET)
+                await self.check_once()
                 return
-            except _RETRYABLE_TRANSPORT_FAILURES as outage:
+            except JudgeUnavailableError as outage:
                 last_outage = outage
                 await asyncio.sleep(self._backoff_seconds(attempt))
         raise JudgeUnavailableError(
             f"Judge endpoint did not answer the health check in {self.config.max_attempts} "
-            f"attempts: {_describe(last_outage)}"
+            f"attempts: {_describe(last_outage.__cause__ if last_outage else None)}"
         ) from last_outage
 
     async def _ask(self, conversation: list[ChatMessage]) -> str:
@@ -829,7 +876,10 @@ class OpenAIJudge:
         return _reply_text(response)
 
     async def _call_endpoint(
-        self, conversation: list[ChatMessage], token_budget: int
+        self,
+        conversation: list[ChatMessage],
+        token_budget: int,
+        timeout_seconds: float | NotGiven = NOT_GIVEN,
     ) -> ChatCompletion:
         """One HTTP call, a slot held for exactly its duration, and what it says about health.
 
@@ -845,6 +895,8 @@ class OpenAIJudge:
         Args:
             conversation: The messages to send, system prompt first.
             token_budget: The most reply tokens the call may cost, positive.
+            timeout_seconds: How long to wait for the answer. Left out, the SDK's own
+                default applies.
 
         Returns:
             The chat completion exactly as the endpoint returned it.
@@ -859,6 +911,7 @@ class OpenAIJudge:
                     messages=conversation,
                     temperature=self.config.temperature,
                     max_completion_tokens=token_budget,
+                    timeout=timeout_seconds,
                 )
         except _SERVICE_WIDE_REJECTIONS:
             self.health.record_failure()
@@ -915,7 +968,7 @@ def _system_prompt_for(scale: Scale) -> str:
     return JUDGE_EN if scale == DEFAULT_SCALE else judge_prompt(scale)
 
 
-def _describe(failure: Exception | None) -> str:
+def _describe(failure: BaseException | None) -> str:
     """The cause to name when the judge is given up on, never an empty string.
 
     `str(TimeoutError())` *is* the empty string, and a timeout is the likeliest judge failure
