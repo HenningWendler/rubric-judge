@@ -100,21 +100,24 @@ def judge_environment(endpoint: str) -> dict[str, str]:
 
 
 class StubOpenAIServer:
-    """A real HTTP server that speaks just enough of the chat-completions API.
+    """A real HTTP server that speaks just enough of the OpenAI API: completions and models.
 
     Real, with a socket, because a service built from the environment proves its judge with
     one call before it serves, and a uvicorn process or a container can only be pointed at a
-    URL. Every completion it answers grades a 2 on the bundled scale. Set `status` to make it
-    refuse the way an endpoint with a revoked key does.
+    URL. Every completion it answers grades a 2 on the bundled scale, and its model list is
+    `listed_model_ids`. Set `status` to make it refuse the way an endpoint with a revoked key
+    does.
     """
 
     def __init__(self, host: str = "127.0.0.1") -> None:
         """Start serving on a free port of `host`, in a background thread."""
         self.status = 200
-        """The status the next completions are answered with. 200 answers them, anything
+        """The status the next requests are answered with. 200 answers them, anything
         else refuses them with an OpenAI-shaped error body."""
 
+        self.listed_model_ids = ["stub-model"]
         self.completions_received = 0
+        self.model_lists_received = 0
         self._server = ThreadingHTTPServer((host, 0), self._handler())
         threading.Thread(target=self._server.serve_forever, daemon=True).start()
 
@@ -133,11 +136,19 @@ class StubOpenAIServer:
     def _handler(self) -> type[BaseHTTPRequestHandler]:
         stub = self
 
-        class CompletionHandler(BaseHTTPRequestHandler):
+        class OpenAIHandler(BaseHTTPRequestHandler):
             def do_POST(self) -> None:
                 self.rfile.read(int(self.headers["Content-Length"]))
                 stub.completions_received += 1
-                body = _stub_completion() if stub.status == 200 else _stub_refusal()
+                self._answer(_stub_completion())
+
+            def do_GET(self) -> None:
+                stub.model_lists_received += 1
+                self._answer(_stub_model_list(stub.listed_model_ids))
+
+            def _answer(self, body: dict[str, Any]) -> None:
+                if stub.status != 200:
+                    body = _stub_refusal()
                 encoded = json.dumps(body).encode()
                 self.send_response(stub.status)
                 self.send_header("Content-Type", "application/json")
@@ -148,7 +159,7 @@ class StubOpenAIServer:
             def log_message(self, format: str, *args: Any) -> None:
                 """Silent: a request log per completion would bury the test output."""
 
-        return CompletionHandler
+        return OpenAIHandler
 
 
 def _stub_completion() -> dict[str, Any]:
@@ -163,6 +174,16 @@ def _stub_completion() -> dict[str, Any]:
                 "message": {"role": "assistant", "content": 'Stub.\n{"score": 2}'},
                 "finish_reason": "stop",
             }
+        ],
+    }
+
+
+def _stub_model_list(model_ids: list[str]) -> dict[str, Any]:
+    return {
+        "object": "list",
+        "data": [
+            {"id": model_id, "object": "model", "created": 0, "owned_by": "stub"}
+            for model_id in model_ids
         ],
     }
 

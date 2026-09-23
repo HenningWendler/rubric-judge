@@ -161,12 +161,30 @@ def instant_backoff(monkeypatch):
     monkeypatch.setattr("rubric_judge.judge._FIRST_BACKOFF_SECONDS", 0)
 
 
-def _client_answering(completions: object) -> AsyncOpenAI:
+def _client_answering(completions: object, models: object = None) -> AsyncOpenAI:
     """The stand-in `OpenAIJudge(client=...)` is given: the judge only ever reaches for
-    `client.chat.completions.create`, so that is the whole client a test has to supply — no
-    SDK object to build and no socket to open behind it. Cast, because the parameter is
-    annotated with the SDK's own client and a test double is what the parameter is *for*."""
-    return cast(AsyncOpenAI, SimpleNamespace(chat=SimpleNamespace(completions=completions)))
+    `client.chat.completions.create` and, in the periodic check, `client.models.list`, so
+    that is the whole client a test has to supply — no SDK object to build and no socket to
+    open behind it. Cast, because the parameter is annotated with the SDK's own client and a
+    test double is what the parameter is *for*."""
+    return cast(
+        AsyncOpenAI,
+        SimpleNamespace(chat=SimpleNamespace(completions=completions), models=models),
+    )
+
+
+def _models_listing(listing: list[str] | Exception, timeouts_sent: list[Any]) -> object:
+    """A `client.models` whose `list` yields `listing` as model ids, or raises it once
+    iterated, like the SDK's paginator does."""
+
+    async def list_models(**request: Any):
+        timeouts_sent.append(request["timeout"])
+        if isinstance(listing, Exception):
+            raise listing
+        for model_id in listing:
+            yield SimpleNamespace(id=model_id)
+
+    return SimpleNamespace(list=list_models)
 
 
 def _judge(
@@ -793,9 +811,9 @@ async def test_a_check_that_heals_within_its_attempts_proves_the_judge():
     assert judge.health.is_healthy
 
 
-async def test_only_the_health_check_carries_its_own_timeout():
-    """A 16-token check that hangs for the SDK's default ten minutes would hold its whole
-    schedule up, while a judge call may think for longer."""
+async def test_only_the_health_checks_carry_their_own_timeout():
+    """A check that hangs for the SDK's default ten minutes would hold its whole schedule up,
+    while a judge call may think for longer."""
     timeouts_sent: list[Any] = []
 
     async def create(**request: Any) -> type:
@@ -803,12 +821,16 @@ async def test_only_the_health_check_carries_its_own_timeout():
         return _completion('Fine.\n{"score": 2}')
 
     config = JudgeConfig(model="m", endpoint="http://x/v1", api_key="k")
-    judge = OpenAIJudge(config, client=_client_answering(SimpleNamespace(create=create)))
+    models = _models_listing(["m"], timeouts_sent)
+    judge = OpenAIJudge(
+        config, client=_client_answering(SimpleNamespace(create=create), models)
+    )
 
+    await judge.check()
     await judge.check_once()
     await judge.score("answer", CRITERION)
 
-    assert timeouts_sent == [60.0, NOT_GIVEN]
+    assert timeouts_sent == [60.0, 60.0, NOT_GIVEN]
 
 
 async def test_the_check_is_sent_with_the_judges_model_and_temperature_and_16_tokens():
@@ -840,14 +862,17 @@ async def test_the_check_is_sent_with_the_judges_model_and_temperature_and_16_to
 async def test_a_single_check_reports_an_outage_without_judging_the_judge(outage):
     """Whether a run of outages is long enough to call the judge unhealthy is its caller's
     schedule to decide, so one failed `check_once` changes nothing."""
-    judge, fake = _judge(['Fine.\n{"score": 2}', outage])
+    config = JudgeConfig(model="m", endpoint="http://x/v1", api_key="k")
+    client = _client_answering(
+        FakeCompletions(['Fine.\n{"score": 2}']), _models_listing(outage, timeouts_sent=[])
+    )
+    judge = OpenAIJudge(config, client=client)
     await judge.score("answer", CRITERION)
 
     with pytest.raises(JudgeUnavailableError, match="did not answer the health check"):
         await judge.check_once()
 
     assert judge.health.is_healthy
-    assert len(fake.calls) == 2
 
 
 @pytest.mark.parametrize("status", [401, 403, 404])

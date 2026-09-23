@@ -299,7 +299,7 @@ variables serve both entry points.
 | `RUBRIC_JUDGE_MAX_TOKENS` | int, 1 or more | no, `768` | Budget per judge call. It has to fit the reasoning and the closing JSON. A reply cut off before its JSON is unusable and costs a retry |
 | `RUBRIC_JUDGE_MAX_ATTEMPTS` | int, 1 or more | no, `3` | Tries per criterion, counting the first. An unusable reply and a failed connection each cost one. Running out fails the whole run. Raise it for a small model that formats badly, or for a flaky endpoint |
 | `RUBRIC_JUDGE_MAX_CONCURRENT` | int, 1 or more | no, `8` | Judge calls in flight at once. Raise it for a local vLLM or Ollama, lower it for a small hosted tier |
-| `RUBRIC_JUDGE_HEALTH_INTERVAL` | int, `0` or 60 or more | no, `0` | Seconds a running service lets its judge go without an answered call before it proves it with one small call, for example `86400` for once a day. `0` never checks. See [A judge that stops working](#a-judge-that-stops-working) |
+| `RUBRIC_JUDGE_HEALTH_INTERVAL` | int, `0` or 60 or more | no, `0` | Seconds a running service lets its judge go without an answered call before it lists the endpoint's models, which costs no tokens, for example `86400` for once a day. `0` never checks. See [A judge that stops working](#a-judge-that-stops-working) |
 | `RUBRIC_JUDGE_HEALTH_RETRIES` | int, 0 or more | no, `3` | How often that periodic check is repeated after an outage before the service reports unhealthy. `0` reports it after the first failed check |
 | `RUBRIC_JUDGE_HEALTH_FIRST_PAUSE` | int, 1 or more | no, `300` | Seconds before the first of those retries. Each further pause doubles, so the default waits 5, 10 and 20 minutes |
 | `RUBRIC_JUDGE_ACCESS_TOKEN` | string | no, none | Read by the HTTP service only. Once set, every endpoint except `/health` needs `Authorization: Bearer <token>`. Unset, the service is open. See [Configuring the service](#configuring-the-service) |
@@ -880,7 +880,7 @@ curl -sS http://localhost:8001/health
 | Status | Body | Meaning |
 |---|---|---|
 | `200` | `{"status":"ok","judge":"ok"}` | The judge answered its last call |
-| `503` | `{"status":"unhealthy","judge":"failing"}` | The endpoint refused the key, the model or the URL, or a periodic check found it unreachable or crashed. The cause is in the server log and never in the body. A crashed check stays unhealthy until a restart |
+| `503` | `{"status":"unhealthy","judge":"failing"}` | The endpoint refused the key, the model or the URL, a periodic check found the model no longer listed or the endpoint unreachable, or the check crashed. The cause is in the server log and never in the body. A crashed check stays unhealthy until a restart |
 | `200` | `{"status":"ok","judge":"none"}` | Compare-only mode, started without any `RUBRIC_JUDGE_*` variable |
 | `200` | `{"status":"ok","judge":"custom"}` | A judge installed in code by overriding `get_judge`, see [the reference](docs/REFERENCE.md#functions). Its health is yours to watch |
 
@@ -1549,15 +1549,24 @@ with a `503` per request, and they heal by themselves. Marking every replica unh
 provider's blip would take the whole service down for it. A `400` does not flip it either,
 because one oversized case can earn it while the next case goes through.
 
-A quiet service gets no proof from traffic. Set `RUBRIC_JUDGE_HEALTH_INTERVAL` and it sends the
-same small call as at startup whenever its judge has gone that many seconds without an answered
-call, `86400` for once a day. Each such call waits at most 60 seconds for its answer. A
-rejection turns the service unhealthy at once. An outage is retried instead, after 5, 10 and
-20 minutes by default (`RUBRIC_JUDGE_HEALTH_RETRIES`, `RUBRIC_JUDGE_HEALTH_FIRST_PAUSE`), and the
-service stays healthy while it waits. A judge call answered in the meantime ends the wait. Only
-when every attempt failed does the service report unhealthy, and the next check runs one
-interval later rather than in a loop. Left unset, the service relies on its startup check and
-its traffic alone, and a key revoked while nobody calls goes unnoticed until the next request.
+A quiet service gets no proof from traffic. Set `RUBRIC_JUDGE_HEALTH_INTERVAL` and it lists the
+endpoint's models whenever its judge has gone that many seconds without an answered call,
+`86400` for once a day. The list costs no tokens, and it proves the key still works and that
+the configured model is still on it. Each such check waits at most 60 seconds for its answer. A
+model that fell off the list is final at once, like a rejection. An outage is retried instead,
+after 5, 10 and 20 minutes by default (`RUBRIC_JUDGE_HEALTH_RETRIES`,
+`RUBRIC_JUDGE_HEALTH_FIRST_PAUSE`), and the service stays healthy while it waits. A judge call
+answered in the meantime ends the wait. Only when every attempt failed does the service report
+unhealthy, and the next check runs one interval later rather than in a loop. Left unset, the
+service relies on its startup check and its traffic alone, and a key revoked while nobody calls
+goes unnoticed until the next request.
+
+The startup check sends one real completion instead, with the judge's model and temperature,
+because only a completion proves that the endpoint accepts a request shaped like a judge call.
+A model on the list does not prove that, and nothing about the request changes while the
+service runs. On Azure OpenAI the model list names base models rather than deployment names, so
+there the periodic check reports a working deployment as unhealthy. Leave
+`RUBRIC_JUDGE_HEALTH_INTERVAL` at `0` on Azure.
 
 The longest an outage can take to show is therefore the interval, plus four attempts of 60
 seconds and 35 minutes of pauses, plus the 90 seconds Docker takes to see three failed probes

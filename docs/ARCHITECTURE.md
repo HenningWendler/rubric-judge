@@ -197,12 +197,12 @@ numbers it asserts on.
 |---|---|
 | [test_metrics.py](../tests/test_metrics.py) | the scoring formula, float extremes, every run metric |
 | [test_evaluation.py](../tests/test_evaluation.py) | fan-out, ordering, failure policy, run aggregation |
-| [test_judge.py](../tests/test_judge.py) | the parser reply by reply, both retry loops, what is not retried, the concurrency limit, `check()` and which failures flip `health` |
+| [test_judge.py](../tests/test_judge.py) | the parser reply by reply, both retry loops, what is not retried, the concurrency limit, the startup `check()` and the periodic `check_once()` (a plain model list, no completion sent), and which failures flip `health` |
 | [test_comparison.py](../tests/test_comparison.py) | deltas and their direction, the three statuses, ordering, every refusal, and the stored documents in [../examples](../examples) against what the library recomputes from them |
 | [test_prompt.py](../tests/test_prompt.py) | the prompt a scale generates, held against the hand-written original in [../tests/judge_prompt_en.txt](../tests/judge_prompt_en.txt) |
 | [test_scale.py](../tests/test_scale.py) | what a valid scale is, and what it does to a grade, a run and a comparison |
 | [test_labels.py](../tests/test_labels.py) | what a valid label is, which cases a filter and a bucket select, and what a relabelled case does to a comparison |
-| [test_api.py](../tests/test_api.py) | validation, wiring, the three judge sources at startup, `/health` and its flips, the periodic check, serialization, and the end-to-end chain |
+| [test_api.py](../tests/test_api.py) | validation, wiring, the three judge sources at startup, `/health` and its flips, the periodic check including a model the endpoint stopped listing, serialization, and the end-to-end chain |
 | [test_deployment.py](../tests/test_deployment.py) | a real uvicorn process, and the Docker image under `-m docker` |
 
 The documents in [../examples](../examples) are real responses of this app driven by a judge
