@@ -582,13 +582,13 @@ async def test_the_periodic_check_runs_once_per_interval(stub_openai_server):
         await prove_the_judge_periodically(judge, fake_time.sleep)
 
     assert fake_time.slept == [0.0, 3600.0, 3600.0]
-    assert stub_openai_server.completions_received == 3  # one after each wake-up
+    assert stub_openai_server.model_lists_received == 3  # one after each wake-up
     assert judge.health.is_healthy
 
 
 async def test_a_failed_periodic_check_is_retried_one_interval_later(stub_openai_server):
-    """Not in a tight loop: a check billed every few milliseconds against a dead key is the
-    one thing worse than no check at all. The monitor survives the failure."""
+    """Not in a tight loop: a check sent every few milliseconds against a dead key would
+    hammer the endpoint for nothing. The monitor survives the failure."""
     stub_openai_server.status = 401
     fake_time = FakeTime(sleeps_until_stop=3)
     judge = _judge_checking_every_hour(stub_openai_server, fake_time)
@@ -597,7 +597,7 @@ async def test_a_failed_periodic_check_is_retried_one_interval_later(stub_openai
         await prove_the_judge_periodically(judge, fake_time.sleep)
 
     assert fake_time.slept == [0.0, 3600.0, 3600.0]
-    assert stub_openai_server.completions_received == 3  # one after each wake-up
+    assert stub_openai_server.model_lists_received == 3  # one after each wake-up
     assert not judge.health.is_healthy
 
 
@@ -628,7 +628,7 @@ async def test_an_outage_is_retried_on_its_schedule_before_the_judge_turns_unhea
         await prove_the_judge_periodically(judge, fake_time.sleep)
 
     assert fake_time.slept == [3600.0, 300.0, 600.0, 1200.0, 3600.0]
-    assert stub_openai_server.completions_received == 5  # 1 attempt, 3 retries, next check
+    assert stub_openai_server.model_lists_received == 5  # 1 attempt, 3 retries, next check
     assert healthy_during_pauses == [True, True, True, True, False]
     assert not judge.health.is_healthy
 
@@ -650,7 +650,7 @@ async def test_an_outage_that_heals_within_the_schedule_never_turns_the_judge_un
         await prove_the_judge_periodically(judge, fake_time.sleep)
 
     assert fake_time.slept == [3600.0, 300.0, 3600.0]
-    assert stub_openai_server.completions_received == 3  # failed, healed, next check
+    assert stub_openai_server.model_lists_received == 3  # failed, healed, next check
     assert judge.health.is_healthy
 
 
@@ -673,7 +673,7 @@ async def test_traffic_answered_during_a_pause_ends_the_retry_schedule(stub_open
         await prove_the_judge_periodically(judge, fake_time.sleep)
 
     assert fake_time.slept == [3600.0, 300.0, 3400.0]
-    assert stub_openai_server.completions_received == 2  # failed, then the next check
+    assert stub_openai_server.model_lists_received == 2  # failed, then the next check
     assert judge.health.is_healthy
 
 
@@ -689,13 +689,13 @@ async def test_zero_health_retries_turn_the_judge_unhealthy_on_the_first_failed_
         await prove_the_judge_periodically(judge, fake_time.sleep)
 
     assert fake_time.slept == [3600.0, 3600.0]  # no pause, straight to the next interval
-    assert stub_openai_server.completions_received == 2
+    assert stub_openai_server.model_lists_received == 2
     assert not judge.health.is_healthy
 
 
 async def test_a_periodic_check_rejected_with_400_is_final_at_once(stub_openai_server):
-    """During traffic a `400` says nothing about the service, but the check's request is fixed
-    and small, so a `400` to it means every check will meet the same refusal."""
+    """During traffic a `400` says nothing about the service, but the check's request is fixed,
+    so a `400` to it means every check will meet the same refusal."""
     stub_openai_server.status = 400
     fake_time = FakeTime(sleeps_until_stop=2)
     judge = _judge_proven_at_the_start(stub_openai_server, fake_time)
@@ -705,6 +705,31 @@ async def test_a_periodic_check_rejected_with_400_is_final_at_once(stub_openai_s
 
     assert fake_time.slept == [3600.0, 3600.0]
     assert not judge.health.is_healthy
+
+
+async def test_a_model_the_endpoint_stopped_listing_is_final_at_once(stub_openai_server):
+    """A removed model does not come back by waiting, so no retry is spent on it."""
+    stub_openai_server.listed_model_ids = ["another-model"]
+    fake_time = FakeTime(sleeps_until_stop=2)
+    judge = _judge_proven_at_the_start(stub_openai_server, fake_time)
+
+    with pytest.raises(_MonitorStopped):
+        await prove_the_judge_periodically(judge, fake_time.sleep)
+
+    assert fake_time.slept == [3600.0, 3600.0]  # no pause, straight to the next interval
+    assert stub_openai_server.model_lists_received == 2  # one per interval, no retries
+    assert not judge.health.is_healthy
+
+
+async def test_the_periodic_check_sends_no_completion(stub_openai_server):
+    fake_time = FakeTime(sleeps_until_stop=2)
+    judge = _judge_proven_at_the_start(stub_openai_server, fake_time)
+
+    with pytest.raises(_MonitorStopped):
+        await prove_the_judge_periodically(judge, fake_time.sleep)
+
+    assert stub_openai_server.model_lists_received == 2
+    assert stub_openai_server.completions_received == 0
 
 
 async def test_traffic_refused_during_a_pause_ends_the_retry_schedule_unhealthy(
@@ -728,7 +753,7 @@ async def test_traffic_refused_during_a_pause_ends_the_retry_schedule_unhealthy(
         await prove_the_judge_periodically(judge, fake_time.sleep)
 
     assert fake_time.slept == [3600.0, 300.0, 3400.0]
-    assert stub_openai_server.completions_received == 2  # failed, then the next check
+    assert stub_openai_server.model_lists_received == 2  # failed, then the next check
     assert not judge.health.is_healthy
 
 
@@ -750,7 +775,7 @@ async def test_real_traffic_postpones_the_periodic_check(stub_openai_server):
         await prove_the_judge_periodically(judge, fake_time.sleep)
 
     assert fake_time.slept == [0.0, 3600.0, 1800.0]
-    assert stub_openai_server.completions_received == 2  # none at the wake-up after 3600
+    assert stub_openai_server.model_lists_received == 2  # none at the wake-up after 3600
 
 
 # --- POST /evaluate/run -----------------------------------------------------------------

@@ -345,7 +345,7 @@ One whole comparison.
 |---|---|---|
 | `DEFAULT_SCALE` | `Scale(maximum=2, presence_threshold=0.5, level_descriptions={2: …, 1: …, 0: …})` | The scale the bundled prompt is written from and the one `OpenAIJudge` grades on unless you give it another. The three level descriptions are part of the scale's identity, so `Scale(maximum=2, presence_threshold=0.5)` is a different, undescribed scale and is not equal to it |
 | `WEAKEST_CASES_REPORTED` | `5` | How many cases `RunMetrics.weakest_cases_above_zero` names. A shortlist to look at next, not a complete ranking |
-| `MINIMUM_HEALTH_INTERVAL_SECONDS` | `60` | The shortest `health_interval_seconds` apart from `0`. Every check is a paid call. From `rubric_judge.judge` |
+| `MINIMUM_HEALTH_INTERVAL_SECONDS` | `60` | The shortest `health_interval_seconds` apart from `0`. A periodic check costs no tokens, but every replica sends one, and less than a minute would load the endpoint for no information a minute does not already give. From `rubric_judge.judge` |
 | `COMPARE_ONLY_REFUSAL` | the `503` detail | What `POST /evaluate` and `POST /evaluate/run` answer in compare-only mode. From `rubric_judge.api` |
 | `ACCESS_TOKEN_REFUSAL` | the `401` detail | What every endpoint except `GET /health` answers to a request without the access token. From `rubric_judge.api` |
 | `ACCESS_TOKEN_VARIABLE` | `"RUBRIC_JUDGE_ACCESS_TOKEN"` | The one `RUBRIC_JUDGE_*` variable that configures the HTTP service instead of the judge. From `rubric_judge.judge` |
@@ -503,15 +503,19 @@ request would hand each request its own full set of slots. `free_call_slots` ret
 semaphore of the event loop the call runs in, one per loop, and raises `RuntimeError` outside a
 running loop.
 
-`check_once` proves the endpoint accepts this judge's key, model and request shape with one
-call of at most 16 reply tokens, sent with the configured model and temperature, which waits at
-most 60 seconds for its answer. Any answer counts, even an empty one, and marks `health`
-healthy. An outage, a timeout included, raises `JudgeUnavailableError` and changes nothing, so
-the caller's own schedule decides when the judge is unhealthy. A rejection is raised as the
-SDK's own exception. `check` repeats `check_once` through outages with the quick backoff of
-`score` and marks `health` unhealthy on any failure, which is what the service's startup uses.
-During `score`, only a `401`, `403` or `404` marks it unhealthy, and any answer marks it
-healthy again. Judge calls keep the SDK's own timeout of 600 seconds.
+`check_once` is the periodic check. It lists the endpoint's models with `GET /v1/models`, which
+costs no tokens, and waits at most 60 seconds for its answer. A response naming the configured
+model marks `health` healthy. An outage, a timeout included, raises `JudgeUnavailableError`,
+records nothing, and leaves the caller's own schedule to decide when the judge is unhealthy. A
+response that no longer lists the model marks `health` unhealthy and raises
+`ModelNotListedError`, final at once rather than retried. A `401`, `403` or `404` also marks
+`health` unhealthy and is raised as the SDK's own exception. `check` is what the service's
+startup uses. It sends one real completion of at most 16 reply tokens with the judge's model
+and temperature, because only a completion proves the request shape a judge call uses. It waits
+at most 60 seconds per attempt, repeats through outages with the quick backoff of `score`, and
+marks `health` unhealthy on any failure. During `score`, only a
+`401`, `403` or `404` marks it unhealthy, and any answer marks it healthy again. Judge calls
+keep the SDK's own timeout of 600 seconds.
 
 ```python
 class JudgeHealth:
@@ -610,14 +614,16 @@ a periodic check, and `[]` for no retries. `prove_the_judge_periodically` is the
 the service runs when `health_interval_seconds` is positive. It calls `check_once` whenever the
 evidence in `judge.health` is older than the interval, retries an outage after each of those
 pauses while the judge stays as it was, and records a failure only once every attempt failed. A
-rejection is recorded at once, and traffic answered or refused during a pause ends the schedule.
-It logs every failed attempt instead of raising it, and only a bug ends it.
+rejection, `ModelNotListedError` included, is recorded at once with no retry, and traffic
+answered or refused during a pause ends the schedule. It logs every failed attempt instead of
+raising it, and only a bug ends it.
 
 ## Exceptions
 
 | Exception | Base | Raised when |
 |---|---|---|
 | `JudgeUnavailableError` | `Exception` | The judge produced no usable reply within `max_attempts`, or its endpoint answered with no choice or no content. The case and the run it belongs to are invalid, and `503` is what the HTTP layer answers. Raise it from a custom judge for anything its endpoint does |
+| `ModelNotListedError` | `Exception` | The periodic check (`OpenAIJudge.check_once`) reached the endpoint but the configured model is no longer among the models it lists. Treated like a rejection, final at once with no retry, and `GET /health` turns `503` |
 | `UnusableReplyError` | `ValueError` | One reply the parser refuses, with no score object, unparseable JSON, or a grade off the scale. Its message is the correction the retry loop sends back to the model, so it is worded for the judge and not for a human. Its own type, so the retry loop repeats an attempt for this exception and for nothing else |
 | `RunsNotComparableError` | `ValueError` | The two runs do not describe the same catalog or were not judged on the same scale. The message names every difference at once. A named type, so the HTTP layer can tell a refused comparison apart from a `ValidationError` or a `StatisticsError`, which are `ValueError` subclasses too |
 
@@ -819,7 +825,8 @@ asks this endpoint.
 | `judge` | `str` | `ok`, `failing`, `custom`, `none` | `ok` or `failing` for a judge from the environment, `custom` for one installed in code, `none` in compare-only mode |
 
 The judge turns `failing` when the endpoint refuses a call with `401`, `403` or `404`, when a
-periodic check fails on every attempt of its retry schedule or is rejected. It turns `ok` again
+periodic check fails on every attempt of its retry schedule, or when a periodic check finds the
+model no longer listed (`ModelNotListedError`, final at once, no retry). It turns `ok` again
 with the next answered call. A periodic check that crashed is a bug, is logged at once and keeps
 the judge `failing` until the service restarts. An outage answered with `503` per request does
 not change it. The cause of a `failing` judge is in the server log and never in the body. `POST
@@ -866,5 +873,6 @@ The `422` body carries only `loc`, `msg` and `type`. The rejected value is never
 | Judge reply unparseable after `RUBRIC_JUDGE_MAX_ATTEMPTS` tries, with no JSON, broken JSON, or a grade off the scale | `UnusableReplyError`, a `ValueError`, per attempt, then `JudgeUnavailableError` naming the last complaint | `503` |
 | Judge reply carrying no content at all, or a response with no choice, from a truncation, a content filter or a tool-call path | `JudgeUnavailableError` naming the endpoint's `finish_reason`, not retried | `503` |
 | Judge endpoint rejecting the key, the model or the request | the `openai` SDK's own exception, unretried, because repeating it would not help. A `401`, `403` or `404` also marks `judge.health` unhealthy | `500`, and `GET /health` answers `503` after a `401`, `403` or `404` |
+| Periodic check finds the model no longer listed | `ModelNotListedError`, final at once, no retry | none, and `GET /health` answers `503` |
 | A bug in the program | propagates as itself | `500` |
 | Request cancelled by a client disconnect or a shutdown | `asyncio.CancelledError` propagates | none |

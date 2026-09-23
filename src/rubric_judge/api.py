@@ -27,6 +27,7 @@ from rubric_judge.judge import (
     JudgeConfig,
     JudgeHealth,
     JudgeUnavailableError,
+    ModelNotListedError,
     OpenAIJudge,
 )
 from rubric_judge.models import (
@@ -292,7 +293,7 @@ async def prove_the_judge_periodically(
     Runs for as long as the service does. Real traffic resets the wait, so a busy service
     never spends a check. A check that meets an outage is retried on the schedule of
     `retry_pauses_seconds`, and the judge turns unhealthy only once every attempt failed. A
-    rejection is final at once. Either way the next check runs one interval later. Time is
+    rejection or a model the endpoint no longer lists is final at once. Either way the next check runs one interval later. Time is
     read from `judge.health.clock`, the clock the evidence was recorded on.
 
     Args:
@@ -344,7 +345,7 @@ async def _check_on_schedule(
                 "Judge health check attempt %d of %d failed: %s",
                 attempt_number, len(pauses) + 1, outage,
             )
-        except OpenAIError as rejection:
+        except (OpenAIError, ModelNotListedError) as rejection:
             judge.health.record_failure()
             logger.warning("Judge health check rejected, reporting unhealthy: %s", rejection)
             return
@@ -510,13 +511,14 @@ async def health(request: Request, response: Response) -> HealthReport:
 
     A service that answers at all has a judge that worked at startup, because it refuses to
     start otherwise. After that the judge stays proven by every call it gets answered and,
-    when `RUBRIC_JUDGE_HEALTH_INTERVAL` is set, by one small check whenever it has been
-    idle that long. This probe never calls the judge itself, so it answers at once.
+    when `RUBRIC_JUDGE_HEALTH_INTERVAL` is set, by one look at the endpoint's model list
+    whenever it has been idle that long, which costs no tokens. This probe never calls the judge itself, so it answers at once.
 
     **200** `{"status": "ok", "judge": "ok"}` while the judge works.
 
     **503** `{"status": "unhealthy", "judge": "failing"}` once the endpoint refused the key,
-    the model or the URL, or a periodic check found it unreachable. The cause is in the
+    the model or the URL, a periodic check found the model no longer listed, or found the
+    endpoint unreachable. The cause is in the
     server log, never in the body. A judge call that gets answered makes it healthy again.
     A periodic check that crashed is a bug and stays `failing` until the service restarts.
 
