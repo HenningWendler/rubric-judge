@@ -2,8 +2,12 @@
 domain and the HTTP tests alike — so a domain test and an HTTP test never describe *almost*
 the same input."""
 
+import json
+import os
+import threading
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
 import pytest
@@ -82,44 +86,131 @@ class FakeJudge:
         return JudgeReply(score=outcome, reasoning=f"reasoning for {criterion.id}")
 
 
-JUDGE_ENVIRONMENT = {
-    "RUBRIC_JUDGE_ENDPOINT": "http://stub/v1",
-    "RUBRIC_JUDGE_API_KEY": "stub-key",
-    "RUBRIC_JUDGE_MODEL": "stub-model",
-}
-"""Enough for the service to build its judge at startup. That judge is never called, so the
-endpoint does not have to exist; a test that needs answers installs its own with
-`use_judge()`."""
+REQUIRED_JUDGE_VARIABLES = ("RUBRIC_JUDGE_ENDPOINT", "RUBRIC_JUDGE_API_KEY", "RUBRIC_JUDGE_MODEL")
+"""The three variables a judge cannot be configured without, and every refusal must name."""
+
+
+def judge_environment(endpoint: str) -> dict[str, str]:
+    """A complete judge configuration pointing at `endpoint`, with placeholder credentials."""
+    return {
+        "RUBRIC_JUDGE_ENDPOINT": endpoint,
+        "RUBRIC_JUDGE_API_KEY": "stub-key",
+        "RUBRIC_JUDGE_MODEL": "stub-model",
+    }
+
+
+class StubOpenAIServer:
+    """A real HTTP server that speaks just enough of the chat-completions API.
+
+    Real, with a socket, because a service built from the environment proves its judge with
+    one call before it serves, and a uvicorn process or a container can only be pointed at a
+    URL. Every completion it answers grades a 2 on the bundled scale. Set `status` to make it
+    refuse the way an endpoint with a revoked key does.
+    """
+
+    def __init__(self, host: str = "127.0.0.1") -> None:
+        """Start serving on a free port of `host`, in a background thread."""
+        self.status = 200
+        """The status the next completions are answered with. 200 answers them, anything
+        else refuses them with an OpenAI-shaped error body."""
+
+        self.completions_received = 0
+        self._server = ThreadingHTTPServer((host, 0), self._handler())
+        threading.Thread(target=self._server.serve_forever, daemon=True).start()
+
+    @property
+    def port(self) -> int:
+        return int(self._server.server_address[1])
+
+    def endpoint_seen_from(self, host: str = "127.0.0.1") -> str:
+        """The base URL a client reaches this server under, `/v1` included."""
+        return f"http://{host}:{self.port}/v1"
+
+    def stop(self) -> None:
+        self._server.shutdown()
+        self._server.server_close()
+
+    def _handler(self) -> type[BaseHTTPRequestHandler]:
+        stub = self
+
+        class CompletionHandler(BaseHTTPRequestHandler):
+            def do_POST(self) -> None:
+                self.rfile.read(int(self.headers["Content-Length"]))
+                stub.completions_received += 1
+                body = _stub_completion() if stub.status == 200 else _stub_refusal()
+                encoded = json.dumps(body).encode()
+                self.send_response(stub.status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(encoded)))
+                self.end_headers()
+                self.wfile.write(encoded)
+
+            def log_message(self, format: str, *args: Any) -> None:
+                """Silent: a request log per completion would bury the test output."""
+
+        return CompletionHandler
+
+
+def _stub_completion() -> dict[str, Any]:
+    return {
+        "id": "chatcmpl-stub",
+        "object": "chat.completion",
+        "created": 0,
+        "model": "stub-model",
+        "choices": [
+            {
+                "index": 0,
+                "message": {"role": "assistant", "content": 'Stub.\n{"score": 2}'},
+                "finish_reason": "stop",
+            }
+        ],
+    }
+
+
+def _stub_refusal() -> dict[str, Any]:
+    return {"error": {"message": "stub refuses", "type": "invalid_request_error", "code": None}}
 
 
 @pytest.fixture
-def client(monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
+def stub_openai_server() -> Iterator[StubOpenAIServer]:
+    server = StubOpenAIServer()
+    yield server
+    server.stop()
+
+
+@pytest.fixture
+def clean_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No `RUBRIC_JUDGE_*` variable at all, whatever the developer running the suite
+    exported, so a test decides alone which judge the service starts with."""
+    for variable in [name for name in os.environ if name.startswith("RUBRIC_JUDGE_")]:
+        monkeypatch.delenv(variable)
+
+
+@pytest.fixture
+def client() -> Iterator[TestClient]:
     """HTTP client against the real app; `use_judge()` swaps in a fake for one test."""
-    with _client_of_started_app(monkeypatch) as client:
+    with _client_of_started_app() as client:
         yield client
 
 
 @pytest.fixture
-def status_reporting_client(monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
+def status_reporting_client() -> Iterator[TestClient]:
     """HTTP client that reports a server fault as its status code, like a real client would,
     instead of re-raising the server-side error into the test."""
-    with _client_of_started_app(monkeypatch, raise_server_exceptions=False) as client:
+    with _client_of_started_app(raise_server_exceptions=False) as client:
         yield client
 
 
 @contextmanager
-def _client_of_started_app(
-    monkeypatch: pytest.MonkeyPatch, **client_options: Any
-) -> Iterator[TestClient]:
-    """The app started the way uvicorn starts it, configured from `JUDGE_ENVIRONMENT`, and
-    reset afterwards so no judge or override leaks into the next test."""
-    for variable, value in JUDGE_ENVIRONMENT.items():
-        monkeypatch.setenv(variable, value)
-    get_judge.cache_clear()
+def _client_of_started_app(**client_options: Any) -> Iterator[TestClient]:
+    """The app started with a custom judge installed, so no test depends on the developer's
+    environment or on a reachable endpoint, and reset afterwards so no override leaks into
+    the next test. A judge that knows no criterion fails any call it gets; a test that needs
+    grades installs its own with `use_judge()`."""
+    use_judge(FakeJudge({}))
     with TestClient(app, **client_options) as client:
         yield client
     app.dependency_overrides.clear()
-    get_judge.cache_clear()
 
 
 def use_judge(judge: Judge) -> None:

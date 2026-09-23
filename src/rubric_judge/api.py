@@ -4,88 +4,271 @@ Stateless: no catalog, no run ids, no persistence. Everything that decides *what
 means lives in `evaluation.py` and below.
 """
 
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
-from functools import lru_cache
-from typing import Annotated
+import asyncio
+import logging
+import os
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from contextlib import asynccontextmanager, suppress
+from enum import StrEnum
+from typing import Annotated, Literal
 
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from openai import OpenAIError
 
 from rubric_judge import comparison, evaluation
-from rubric_judge.judge import Judge, JudgeConfig, JudgeUnavailableError, OpenAIJudge
+from rubric_judge.judge import (
+    Judge,
+    JudgeConfig,
+    JudgeHealth,
+    JudgeUnavailableError,
+    OpenAIJudge,
+)
 from rubric_judge.models import (
     Case,
     CaseResult,
+    DocumentedModel,
     Run,
     RunComparison,
     RunComparisonResult,
     RunResult,
 )
 
-@lru_cache
-def get_judge() -> Judge:
-    """The one judge this process uses, built once when the service starts.
+logger = logging.getLogger(__name__)
 
-    Cached rather than built per request for two reasons: importing this module must not
-    read the environment (or a test could never import it), and `max_concurrent` is a
-    property of the *instance* — a judge per request would give each request its own full
-    set of slots instead of sharing one budget.
+WITHOUT_A_JUDGE = (
+    "This service was started without a judge. Set RUBRIC_JUDGE_ENDPOINT, "
+    "RUBRIC_JUDGE_API_KEY and RUBRIC_JUDGE_MODEL and restart it to evaluate."
+)
+"""What `POST /evaluate` and `POST /evaluate/run` answer, with a 503, in compare-only mode."""
 
-    Returns:
-        The process-wide `OpenAIJudge`, configured from the environment and grading on
-        `DEFAULT_SCALE`. The scale is not an environment setting on purpose: it carries a
-        sentence per grade, and prose does not belong in a variable meant for a URL or a key.
-        A service that has to grade differently builds its own judge and overrides this
-        dependency.
 
-    Raises:
-        RuntimeError: The judge cannot be configured; the message names every missing
-            variable. Raised while the service starts, so an unconfigured service never
-            serves and never falls back to a fake score. A judge that is configured but
-            unreachable is a 503 instead, raised per request.
+class JudgeSource(StrEnum):
+    """Where the judge of a starting service comes from, decided once at startup.
 
     Example:
-        app.dependency_overrides[get_judge] = lambda: my_own_judge   # grade differently
-        get_judge.cache_clear()   # after changing RUBRIC_JUDGE_* in this process
+        judge_source({}, override_installed=False)   # JudgeSource.NONE
     """
-    return OpenAIJudge(JudgeConfig.from_env())
+
+    ENVIRONMENT = "environment"
+    """Built from `RUBRIC_JUDGE_*` and proven by one call before the service serves."""
+
+    CUSTOM = "custom"
+    """Installed in code by overriding `get_judge`. The embedding program owns its health."""
+
+    NONE = "none"
+    """No `RUBRIC_JUDGE_*` variable at all: compare-only mode."""
+
+
+class HealthReport(DocumentedModel):
+    """The body of `GET /health`.
+
+    Example:
+        HealthReport(status="ok", judge="ok")
+    """
+
+    status: Literal["ok", "unhealthy"]
+    """`ok` with a 200, or `unhealthy` with a 503 when the judge stopped working."""
+
+    judge: Literal["ok", "failing", "custom", "none"]
+    """`ok` or `failing` for a judge configured from the environment, `custom` for one
+    installed in code, whose health this service does not check, and `none` in compare-only
+    mode, where only `POST /compare` works."""
+
+
+def judge_source(environment: Mapping[str, str], override_installed: bool) -> JudgeSource:
+    """Decide where the judge of a starting service comes from.
+
+    Any `RUBRIC_JUDGE_*` variable, even an optional one, means a judge was intended, so only
+    an environment without a single one starts in compare-only mode. A half-written
+    configuration is then refused rather than mistaken for a service meant to only compare.
+
+    Args:
+        environment: Variable name to value, `os.environ` at startup and a plain dict in a
+            test. Names outside `RUBRIC_JUDGE_*` are ignored.
+        override_installed: Whether a program embedding the app has overridden `get_judge`
+            before startup. It wins over the environment.
+
+    Returns:
+        `CUSTOM` when an override is installed, else `ENVIRONMENT` when any
+        `RUBRIC_JUDGE_*` variable is present, else `NONE`.
+
+    Example:
+        judge_source({"RUBRIC_JUDGE_TEMPERATURE": "0.0"}, override_installed=False)
+        # JudgeSource.ENVIRONMENT, so the missing ENDPOINT, API_KEY and MODEL are refused
+    """
+    if override_installed:
+        return JudgeSource.CUSTOM
+    if any(name.startswith("RUBRIC_JUDGE_") for name in environment):
+        return JudgeSource.ENVIRONMENT
+    return JudgeSource.NONE
+
+
+def health_report(
+    source: JudgeSource, judge_health: JudgeHealth | None, monitor_alive: bool
+) -> HealthReport:
+    """Decide what `GET /health` reports.
+
+    Args:
+        source: Where the service's judge came from at startup.
+        judge_health: The health of the judge built from the environment, `None` for the
+            other two sources.
+        monitor_alive: False when the periodic check crashed. A monitor that died would
+            otherwise leave the last good answer standing forever.
+
+    Returns:
+        `ok` for compare-only and custom judges. For a judge from the environment, `ok` while
+        it is healthy and its monitor runs, and `unhealthy` with `failing` otherwise.
+
+    Example:
+        health_report(JudgeSource.NONE, None, monitor_alive=True)
+        # HealthReport(status="ok", judge="none")
+    """
+    if source is JudgeSource.NONE:
+        return HealthReport(status="ok", judge="none")
+    if source is JudgeSource.CUSTOM:
+        return HealthReport(status="ok", judge="custom")
+    if judge_health is not None and judge_health.is_healthy and monitor_alive:
+        return HealthReport(status="ok", judge="ok")
+    return HealthReport(status="unhealthy", judge="failing")
+
+
+def get_judge(request: Request) -> Judge:
+    """The one judge this process uses, built and proven once when the service starts.
+
+    One judge rather than one per request, because `max_concurrent` is a property of the
+    *instance*: a judge per request would give each request its own full set of slots instead
+    of sharing one budget. It is a dependency so that a program embedding the app can bring
+    its own judge by overriding it before startup.
+
+    Args:
+        request: The request being served, which carries the app the judge was stored on.
+
+    Returns:
+        The process-wide `OpenAIJudge` built from the environment, grading on
+        `DEFAULT_SCALE`. The scale is not an environment setting on purpose: it carries a
+        sentence per grade, and prose does not belong in a variable meant for a URL or a key.
+
+    Raises:
+        HTTPException: 503 in compare-only mode, naming the variables to set. A service
+            started without a judge is not broken, so this is not a 500.
+
+    Example:
+        app.dependency_overrides[get_judge] = lambda: my_own_judge   # before startup
+    """
+    judge: OpenAIJudge | None = request.app.state.judge
+    if judge is None:
+        raise HTTPException(status_code=503, detail=WITHOUT_A_JUDGE)
+    return judge
+
+
+async def prove_the_judge_periodically(
+    judge: OpenAIJudge, sleep: Callable[[float], Awaitable[None]] = asyncio.sleep
+) -> None:
+    """Keep `judge.health` fresh by checking the endpoint whenever its evidence goes stale.
+
+    Runs for as long as the service does. Real traffic resets the wait, so a busy service
+    never spends a check. A failed check is logged and leaves the judge unhealthy until the
+    endpoint answers again, either to real traffic or to the next check one interval later.
+    Time is read from `judge.health.clock`, the clock the evidence was recorded on.
+
+    Args:
+        judge: The service's judge, with a positive `config.health_interval_seconds`.
+        sleep: Waits the given seconds. Replaced in tests, together with the health clock,
+            so a day passes at once.
+
+    Raises:
+        Exception: Only a bug escapes, since endpoint failures are logged. It ends the
+            task, and `GET /health` then reports `unhealthy`.
+
+    Example:
+        monitor = asyncio.create_task(prove_the_judge_periodically(judge))
+    """
+    interval_seconds = judge.config.health_interval_seconds
+    while True:
+        await sleep(judge.health.seconds_until_check_due(interval_seconds))
+        if judge.health.seconds_until_check_due(interval_seconds) == 0:
+            await _check_and_log_failure(judge)
+
+
+async def _check_and_log_failure(judge: OpenAIJudge) -> None:
+    """Run one periodic check that cannot end the task running the next one.
+
+    A failure belongs in the log and in `judge.health`, never in a crash of the monitor.
+    """
+    try:
+        await judge.check()
+    except (JudgeUnavailableError, OpenAIError) as failure:
+        logger.warning("Judge health check failed, reporting unhealthy: %s", failure)
 
 
 @asynccontextmanager
-async def _build_the_judge_before_serving(app: FastAPI) -> AsyncIterator[None]:
-    """Refuse to start a service that could not grade a single request.
+async def _start_with_a_proven_judge(app: FastAPI) -> AsyncIterator[None]:
+    """Refuse to start a service whose judge does not work.
 
-    Without this, an unconfigured service answers `/health` and looks ready to an
-    orchestrator until the first real request fails. The judge built here is the one every
-    request then uses: an override of `get_judge` installed before startup is honored, so a
-    service that brings its own judge needs no `RUBRIC_JUDGE_*` variables at all. Nothing
-    is sent to the endpoint, so a service that starts has a complete configuration but has
-    not yet proven that its key works.
+    Without this, a misconfigured service answers `/health` and looks ready to an
+    orchestrator until the first real request fails. The judge from the environment is built
+    and sent one real call here, so a missing variable, a refused key, an unknown model and
+    an unreachable endpoint each stop the process before it serves. A custom judge and
+    compare-only mode start without a check.
 
     Args:
-        app: The application being started, whose dependency overrides decide which judge
-            is built.
+        app: The application being started. Its state receives the judge, where it came
+            from, and the periodic check when one is configured.
 
     Yields:
-        Control to the server once the judge exists, for as long as the service runs.
+        Control to the server once the judge is proven, for as long as the service runs.
 
     Raises:
-        RuntimeError: The judge cannot be configured; the message names every missing or
-            empty variable. Uvicorn reports it and exits, so the process never serves.
+        RuntimeError: A judge was intended but its configuration is incomplete. The message
+            names every missing or empty variable. Uvicorn reports it and exits with code 3.
         ValidationError: A numeric `RUBRIC_JUDGE_*` variable does not parse or is out of
             range.
+        JudgeUnavailableError: The endpoint did not answer within `max_attempts`.
+        openai.OpenAIError: The endpoint rejected the key, the model or the request.
 
     Example:
         with TestClient(app):   # RuntimeError: Unusable environment variables: ...
             pass
     """
-    app.dependency_overrides.get(get_judge, get_judge)()
+    app.state.judge_source = judge_source(os.environ, get_judge in app.dependency_overrides)
+    app.state.judge = None
+    app.state.health_monitor = None
+    if app.state.judge_source is JudgeSource.NONE:
+        logger.warning(
+            "No RUBRIC_JUDGE_* variable is set, so this service starts without a judge. "
+            "POST /compare works, POST /evaluate and POST /evaluate/run answer 503."
+        )
+    if app.state.judge_source is JudgeSource.ENVIRONMENT:
+        app.state.judge = OpenAIJudge(JudgeConfig.from_env())
+        await app.state.judge.check()
+        app.state.health_monitor = _start_monitor_if_configured(app.state.judge)
     yield
+    await _stop(app.state.health_monitor)
 
 
-app = FastAPI(title="rubric-judge", version="0.1.0", lifespan=_build_the_judge_before_serving)
+def _start_monitor_if_configured(judge: OpenAIJudge) -> asyncio.Task[None] | None:
+    """The periodic check as a background task, or `None` when the interval is 0."""
+    if judge.config.health_interval_seconds == 0:
+        return None
+    return asyncio.create_task(prove_the_judge_periodically(judge))
+
+
+async def _stop(monitor: asyncio.Task[None] | None) -> None:
+    """End the periodic check together with the service.
+
+    Its cancellation is the expected outcome and is swallowed. A crash it died of earlier is
+    raised here rather than lost.
+    """
+    if monitor is None:
+        return
+    monitor.cancel()
+    with suppress(asyncio.CancelledError):
+        await monitor
+
+
+app = FastAPI(title="rubric-judge", version="0.1.0", lifespan=_start_with_a_proven_judge)
 
 
 @app.exception_handler(RequestValidationError)
@@ -145,23 +328,52 @@ async def report_unavailable_judge(_: Request, error: JudgeUnavailableError) -> 
     return JSONResponse(status_code=503, content={"detail": str(error)})
 
 
-@app.get("/health", summary="Liveness and readiness probe")
-async def health() -> dict[str, str]:
+@app.get(
+    "/health",
+    summary="Liveness and readiness probe",
+    responses={503: {"model": HealthReport, "description": "The judge stopped working"}},
+)
+async def health(request: Request, response: Response) -> HealthReport:
     """Readiness probe for container orchestration.
 
-    A service that answers at all has a complete judge configuration, because an
-    unconfigured one refuses to start. The judge endpoint itself is not asked, so an outage
-    there does not take the container down — `POST /evaluate` is what fails then, loudly,
-    with a 503. Liveness must not depend on a third-party endpoint.
+    A service that answers at all has a judge that worked at startup, because it refuses to
+    start otherwise. After that the judge stays proven by every call it gets answered and,
+    when `RUBRIC_JUDGE_HEALTH_INTERVAL` is set, by one small check whenever it has been
+    idle that long. This probe never calls the judge itself, so it answers at once.
+
+    **200** `{"status": "ok", "judge": "ok"}` while the judge works.
+
+    **503** `{"status": "unhealthy", "judge": "failing"}` once the endpoint refused the key,
+    the model or the URL, or a periodic check found it unreachable. The cause is in the
+    server log, never in the body. A judge call that gets answered makes it healthy again.
+
+    **200** `{"status": "ok", "judge": "none"}` in compare-only mode, started without any
+    `RUBRIC_JUDGE_*` variable, where only `POST /compare` works.
+
+    **200** `{"status": "ok", "judge": "custom"}` for a judge installed in code, whose health
+    is the embedding program's to watch.
+
+    Args:
+        request: The request being served, which carries the app's judge and its health.
+        response: The response being built, whose status turns 503 when unhealthy.
 
     Returns:
-        `{"status": "ok"}`, always and with a 200. There is no other body and no other
-        status: an answer at all is the whole signal.
+        The `HealthReport` for this moment. `status` is `ok` exactly when the status code
+        is 200.
 
     Example:
-        httpx.get("http://localhost:8000/health").json()   # {"status": "ok"}
+        httpx.get("http://localhost:8000/health").json()   # {"status": "ok", "judge": "ok"}
     """
-    return {"status": "ok"}
+    judge: OpenAIJudge | None = request.app.state.judge
+    monitor: asyncio.Task[None] | None = request.app.state.health_monitor
+    report = health_report(
+        request.app.state.judge_source,
+        judge.health if judge is not None else None,
+        monitor_alive=monitor is None or not monitor.done(),
+    )
+    if report.status == "unhealthy":
+        response.status_code = 503
+    return report
 
 
 @app.post("/evaluate", summary="Score one answer against its rubric")
@@ -201,8 +413,11 @@ async def evaluate_case(case: Case, judge: Annotated[Judge, Depends(get_judge)])
     to be scored `0`, and a run with one invented `0` in it is a plausible number you could
     not tell from a real one. Retry the request once the judge is reachable again.
 
+    **503** as well in compare-only mode, when the service was started without any
+    `RUBRIC_JUDGE_*` variable. The detail names the variables to set.
+
     **500** if the judge endpoint rejects the configured key or model, or the program is
-    broken.
+    broken. `GET /health` turns unhealthy with it.
 
     Args:
         case: The case to score: `id`, `answer`, at least one `criteria` entry with a
