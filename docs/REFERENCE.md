@@ -109,6 +109,7 @@ somewhere else. Each field reads the environment variable named in the last colu
 | `max_tokens` | `int` | no, default `768` | `> 0`. Must fit the reasoning and the closing JSON object. `RUBRIC_JUDGE_MAX_TOKENS` |
 | `max_attempts` | `int` | no, default `3` | `>= 1`, the first try included. The only retry budget there is, since the SDK's own is switched off. `RUBRIC_JUDGE_MAX_ATTEMPTS` |
 | `max_concurrent` | `int` | no, default `8` | `>= 1`. Judge calls in flight at once, per judge *instance*. `RUBRIC_JUDGE_MAX_CONCURRENT` |
+| `health_interval_seconds` | `int` | no, default `0` | `0`, or `>= 60` (`MINIMUM_HEALTH_INTERVAL_SECONDS`). How long a running service lets its judge go without an answered call before it sends one `check()`. `0` never checks. `RUBRIC_JUDGE_HEALTH_INTERVAL` |
 
 ```python
 JudgeConfig(model="qwen3:8b", endpoint="http://localhost:11434/v1", api_key="ollama")
@@ -342,6 +343,8 @@ One whole comparison.
 |---|---|---|
 | `DEFAULT_SCALE` | `Scale(maximum=2, presence_threshold=0.5, level_descriptions={2: …, 1: …, 0: …})` | The scale the bundled prompt is written from and the one `OpenAIJudge` grades on unless you give it another. The three level descriptions are part of the scale's identity, so `Scale(maximum=2, presence_threshold=0.5)` is a different, undescribed scale and is not equal to it |
 | `WEAKEST_CASES_REPORTED` | `5` | How many cases `RunMetrics.weakest_cases_above_zero` names. A shortlist to look at next, not a complete ranking |
+| `MINIMUM_HEALTH_INTERVAL_SECONDS` | `60` | The shortest `health_interval_seconds` apart from `0`. Every check is a paid call. From `rubric_judge.judge` |
+| `WITHOUT_A_JUDGE` | the `503` detail | What `POST /evaluate` and `POST /evaluate/run` answer in compare-only mode. From `rubric_judge.api` |
 | `SCORE_EQUALITY_TOLERANCE` | `1e-9` | How close two scores must be to count as unchanged in a comparison. Far above the float noise two runs accumulate summing the same weights in a different order, and far below the smallest difference a rubric can actually produce |
 
 ## Functions
@@ -470,8 +473,10 @@ class OpenAIJudge:
     def __init__(self, config: JudgeConfig, system_prompt: str | None = None,
                  scale: Scale = DEFAULT_SCALE, client: AsyncOpenAI | None = None)
     async def score(self, answer: str, criterion: Criterion, context: str | None = None) -> JudgeReply
+    async def check(self) -> None
 
     scale: Scale            # what it grades on
+    health: JudgeHealth     # whether the endpoint recently answered
     system_prompt: str      # the system message it sends, generated unless you passed one
     config: JudgeConfig
     client: AsyncOpenAI
@@ -493,6 +498,29 @@ request would hand each request its own full set of slots. `free_call_slots` ret
 semaphore of the event loop the call runs in, one per loop, and raises `RuntimeError` outside a
 running loop.
 
+`check` proves the endpoint accepts this judge's key, model and request shape with one call of
+at most 16 reply tokens, sent with the configured model and temperature. Any answer counts,
+even an empty one. Outages are waited out like in `score` and end in `JudgeUnavailableError`,
+and a rejection is raised unretried as the SDK's own exception. Every failure of `check` marks
+`health` unhealthy. During `score`, only a `401`, `403` or `404` does, and any answer marks it
+healthy again.
+
+```python
+class JudgeHealth:
+    def __init__(self, clock: Callable[[], float] = time.monotonic)
+    def record_proof(self) -> None
+    def record_failure(self) -> None
+    def seconds_until_check_due(self, interval_seconds: float) -> float
+
+    clock: Callable[[], float]      # seconds, never going backwards
+    is_healthy: bool                # False until the first answer
+    last_evidence_at: float | None  # last answer or failure, on clock
+```
+The bookkeeping behind `OpenAIJudge.health`. `seconds_until_check_due` is `0.0` before any
+evidence and once the last evidence is older than the interval. A failure restarts the wait
+like an answer does, so a failed check is repeated one interval later. Pass your own `clock` to
+let a day pass in a test.
+
 ```python
 @classmethod
 def JudgeConfig.from_env() -> JudgeConfig
@@ -508,24 +536,43 @@ the empty string is refused like a missing required one. Whitespace around a val
 before any of that is decided, because `docker run --env-file` passes it through where
 `uvicorn --env-file` strips it, so a value of nothing but spaces counts as empty.
 
-```python
-@lru_cache
-def get_judge() -> Judge          # from rubric_judge.api
-```
-The FastAPI dependency every endpoint takes its judge from, and the one place the HTTP service
-builds an `OpenAIJudge(JudgeConfig.from_env())`. Cached for the whole process, so one
-`max_concurrent` budget is shared by every request rather than handed out per request. The
-service calls it once while it starts, through any override installed before startup, so a
-service that brings its own judge needs no `RUBRIC_JUDGE_*` variables. Two things to know when
-you plug in a judge of your own:
+The functions below come from `rubric_judge.api` and decide how the HTTP service starts.
 
 ```python
-app.dependency_overrides[get_judge] = lambda: my_own_judge   # grade differently
-get_judge.cache_clear()   # after changing RUBRIC_JUDGE_* inside this process
+def judge_source(environment: Mapping[str, str], override_installed: bool) -> JudgeSource
+```
+Where a starting service's judge comes from. `CUSTOM` when `get_judge` is overridden, else
+`ENVIRONMENT` when any `RUBRIC_JUDGE_*` variable is present, an optional one included, else
+`NONE`, which is compare-only mode.
+
+| Source | At startup | `GET /health` |
+|---|---|---|
+| `ENVIRONMENT` | `JudgeConfig.from_env()`, then one `check()`. Any failure stops the service, uvicorn exits with code 3 | `ok` while `judge.health` is healthy, `503` `failing` otherwise |
+| `CUSTOM` | nothing is built or checked | `ok` `custom` |
+| `NONE` | a warning is logged | `ok` `none`. `POST /evaluate` and `POST /evaluate/run` answer `503` with `WITHOUT_A_JUDGE` |
+
+```python
+def get_judge(request: Request) -> Judge
+```
+The FastAPI dependency every endpoint takes its judge from: the one `OpenAIJudge` the service
+built and proved at startup, so one `max_concurrent` budget is shared by every request. Raises
+`HTTPException` `503` in compare-only mode. A program that embeds the app brings its own judge
+by overriding it **before** the app starts, which is what makes the source `CUSTOM`.
+
+```python
+app.dependency_overrides[get_judge] = lambda: my_own_judge   # before startup
 ```
 
-It raises `RuntimeError` when the judge cannot be configured. That happens while the service
-starts, so uvicorn exits with code 3 and the service never answers a request.
+```python
+def health_report(source: JudgeSource, judge_health: JudgeHealth | None,
+                  monitor_alive: bool) -> HealthReport
+async def prove_the_judge_periodically(judge: OpenAIJudge,
+                                       sleep: Callable[[float], Awaitable[None]] = asyncio.sleep) -> None
+```
+`health_report` decides the body of `GET /health`, and a periodic check that crashed counts as
+unhealthy. `prove_the_judge_periodically` is the background task the service runs when
+`health_interval_seconds` is positive. It checks whenever the evidence in `judge.health` is
+older than the interval, logs a failed check instead of raising it, and lets only a bug end it.
 
 ## Exceptions
 
@@ -542,7 +589,7 @@ starts, so uvicorn exits with code 3 and the service never answers a request.
 | `POST` | `/evaluate` | a `Case` | a `CaseResult` |
 | `POST` | `/evaluate/run` | a `Run` | a `RunResult` |
 | `POST` | `/compare` | a `RunComparison` | a `RunComparisonResult` |
-| `GET` | `/health` | none | `{"status": "ok"}` |
+| `GET` | `/health` | none | a `HealthReport`, `200` or `503` |
 
 The JSON shapes are exactly the models above. The service is stateless, with no catalog, no run
 ids and no persistence.
@@ -721,11 +768,19 @@ runs, so they stay real output.
 
 ### `GET /health`
 
-Answers `{"status": "ok"}`. A service that answers has a complete judge configuration, because
-an unconfigured one refuses to start. The judge endpoint is not asked, so an outage there never
-takes the container down. `POST /evaluate` is what fails then, with a `503`. `POST /compare`
-needs no judge at all and answers correctly while the endpoint is down. The Docker image's
-`HEALTHCHECK` asks this endpoint.
+Answers a `HealthReport`, and never calls the judge itself. The Docker image's `HEALTHCHECK`
+asks this endpoint.
+
+| Field | Type | Range | Meaning |
+|---|---|---|---|
+| `status` | `str` | `ok`, `unhealthy` | `ok` with a `200`, `unhealthy` with a `503` |
+| `judge` | `str` | `ok`, `failing`, `custom`, `none` | `ok` or `failing` for a judge from the environment, `custom` for one installed in code, `none` in compare-only mode |
+
+The judge turns `failing` when the endpoint refuses a call with `401`, `403` or `404`, when a
+periodic check fails, or when the periodic check crashed. It turns `ok` again with the next
+answered call. An outage answered with `503` per request does not change it. The cause of a
+`failing` judge is in the server log and never in the body. `POST /compare` needs no judge at
+all and answers correctly in every one of these states.
 
 ## Errors
 
@@ -757,11 +812,14 @@ The `422` body carries only `loc`, `msg` and `type`. The rejected value is never
 | `run_metrics()` or `label_metrics()` over cases judged on different scales, since raw grades in two units do not average | `ValueError` naming every scale found | none, unreachable over HTTP: `RunResult` refuses such a run first |
 | `judge_prompt(scale)` for a scale with no `level_descriptions`, or `OpenAIJudge(config, scale=…)` with such a scale and no `system_prompt` | `ValueError` naming the scale | none, raised at construction time and not per request |
 | A judge returning a score above the `scale` it declares | `ValueError` out of `evaluate_case()` naming the criterion, a bug in the judge and not an outage | `500` |
-| Judge not configured: a required `RUBRIC_JUDGE_*` variable missing, or any of them, required or optional, exported empty or as nothing but whitespace | `RuntimeError` naming every offending variable and which of the two it is | none, the service does not start: uvicorn exits with code 3 |
-| A numeric `RUBRIC_JUDGE_*` variable that does not parse or is out of range | `pydantic.ValidationError` naming the setting | none, the service does not start: uvicorn exits with code 3 |
+| Judge not configured: a required `RUBRIC_JUDGE_*` variable missing while another one is set, or any of them, required or optional, exported empty or as nothing but whitespace | `RuntimeError` naming every offending variable and which of the two it is | none, the service does not start: uvicorn exits with code 3 |
+| A numeric `RUBRIC_JUDGE_*` variable that does not parse or is out of range, including a `RUBRIC_JUDGE_HEALTH_INTERVAL` from 1 to 59 | `pydantic.ValidationError` naming the setting | none, the service does not start: uvicorn exits with code 3 |
+| The startup `check()` refused by the endpoint, for a wrong key, model, URL or parameter | the `openai` SDK's own exception, unretried | none, the service does not start: uvicorn exits with code 3 |
+| The startup `check()` unanswered within `RUBRIC_JUDGE_MAX_ATTEMPTS` | `JudgeUnavailableError` | none, the service does not start: uvicorn exits with code 3 |
+| No `RUBRIC_JUDGE_*` variable at all, and a request to `POST /evaluate` or `POST /evaluate/run` | none, the library needs no service | `503` with `WITHOUT_A_JUDGE`, before the body is validated |
 | Judge endpoint unreachable, timed out, rate limited or answering `5xx` | retried up to `RUBRIC_JUDGE_MAX_ATTEMPTS` times with a doubling wait, then `JudgeUnavailableError`. The whole run is dropped | `503` |
 | Judge reply unparseable after `RUBRIC_JUDGE_MAX_ATTEMPTS` tries, with no JSON, broken JSON, or a grade off the scale | `UnusableReplyError`, a `ValueError`, per attempt, then `JudgeUnavailableError` naming the last complaint | `503` |
 | Judge reply carrying no content at all, or a response with no choice, from a truncation, a content filter or a tool-call path | `JudgeUnavailableError` naming the endpoint's `finish_reason`, not retried | `503` |
-| Judge endpoint rejecting the key, the model or the request | the `openai` SDK's own exception, unretried, because repeating it would not help | `500` |
+| Judge endpoint rejecting the key, the model or the request | the `openai` SDK's own exception, unretried, because repeating it would not help. A `401`, `403` or `404` also marks `judge.health` unhealthy | `500`, and `GET /health` answers `503` after a `401`, `403` or `404` |
 | A bug in the program | propagates as itself | `500` |
 | Request cancelled by a client disconnect or a shutdown | `asyncio.CancelledError` propagates | none |

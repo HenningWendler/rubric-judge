@@ -10,7 +10,7 @@ Seven modules, each with one job. A request walks straight down through the firs
 
 | Step | File | Responsibility |
 |---|---|---|
-| 1 | [api.py](../src/rubric_judge/api.py) | FastAPI endpoints. Validate the body, inject the judge, hand back JSON. No domain logic |
+| 1 | [api.py](../src/rubric_judge/api.py) | FastAPI endpoints. Decide the judge source and prove the judge at startup, report health, validate the body, inject the judge, hand back JSON. No domain logic |
 | 2 | [evaluation.py](../src/rubric_judge/evaluation.py) | `evaluate_case()` and `evaluate_run()`, which fan out over the rubric and fold the results |
 | 3 | [judge.py](../src/rubric_judge/judge.py) | `Judge` protocol, OpenAI-compatible client, reply parsing, retries, throttle, environment config |
 | 4 | [prompt.py](../src/rubric_judge/prompt.py) | Every word the judge is told, written from the scale |
@@ -145,9 +145,9 @@ field tables in [REFERENCE.md](REFERENCE.md). One text, never three, so they can
 ## Tests
 
 ```bash
-.venv/bin/python -m pytest              # 362 tests, no Docker needed
-.venv/bin/python -m pytest -m docker    # the 3 tests that build and run the image
-.venv/bin/python -m pytest -m ""        # all 365
+.venv/bin/python -m pytest              # 395 tests, no Docker needed
+.venv/bin/python -m pytest -m docker    # the 5 tests that build and run the image
+.venv/bin/python -m pytest -m ""        # all 400
 ```
 
 No real LLM is ever called. The mocking happens at two levels, with a third helper for the
@@ -167,15 +167,25 @@ because the criteria are judged concurrently and one queue would hand out replie
 order. The end-to-end tests hand a real `OpenAIJudge` an `AsyncOpenAI` client whose transport is
 that stub and drive the whole chain: the HTTP request, the real `openai` SDK writing the call
 and reading the reply, the parsing, and the weighted fold. That is what proves the wire format
-and the self-healing retry, without a socket. The `client` fixture sets placeholder
-`RUBRIC_JUDGE_*` values from `JUDGE_ENVIRONMENT`, because the app refuses to start without
-them, and your own exported variables never reach a test.
+and the self-healing retry, without a socket. The `client` fixture starts the app with a
+`FakeJudge` installed as a custom judge, so no test depends on your own exported variables or
+on a reachable endpoint.
+
+`StubOpenAIServer` in [../tests/conftest.py](../tests/conftest.py) is the one double with a real
+socket. A service configured from the environment proves its judge with one call before it
+serves, and a uvicorn process or a container can only be pointed at a URL. It answers every
+completion with a grade of 2, and its `status` makes it refuse like an endpoint with a revoked
+key. `clean_environment` removes every `RUBRIC_JUDGE_*` variable, so a test alone decides which
+of the three judge sources the service starts with. `FakeTime` in
+[../tests/test_api.py](../tests/test_api.py) replaces the health clock and the monitor's sleep,
+so a periodic check a day apart runs at once.
 
 [../tests/test_deployment.py](../tests/test_deployment.py) starts the service the two ways it
 really runs. Uvicorn runs as a subprocess in the default run. The image is built and run only
-under `-m docker`. Both are checked the same way: without configuration they must exit and
-name the missing variables, and configured they must answer `/health`. The container must also
-report `healthy` through its own `HEALTHCHECK` and must not run as root.
+under `-m docker`, and reaches the stub through `host.docker.internal`. Both are checked the
+same way. A half-written configuration and a refused key must exit with code 3, a proven judge
+must answer `/health` with `ok`, and no variable at all must start compare-only mode. The
+container must also report `healthy` through its own `HEALTHCHECK` and must not run as root.
 
 `run_of` in [../tests/conftest.py](../tests/conftest.py) builds a finished `RunResult` straight
 from judge scores. `run_of({1: 2, 2: 0}, {21: 1})` is a two-case run, and
@@ -187,12 +197,12 @@ numbers it asserts on.
 |---|---|
 | [test_metrics.py](../tests/test_metrics.py) | the scoring formula, float extremes, every run metric |
 | [test_evaluation.py](../tests/test_evaluation.py) | fan-out, ordering, failure policy, run aggregation |
-| [test_judge.py](../tests/test_judge.py) | the parser reply by reply, both retry loops, what is not retried, the concurrency limit |
+| [test_judge.py](../tests/test_judge.py) | the parser reply by reply, both retry loops, what is not retried, the concurrency limit, `check()` and which failures flip `health` |
 | [test_comparison.py](../tests/test_comparison.py) | deltas and their direction, the three statuses, ordering, every refusal, and the stored documents in [../examples](../examples) against what the library recomputes from them |
 | [test_prompt.py](../tests/test_prompt.py) | the prompt a scale generates, held against the hand-written original in [../tests/judge_prompt_en.txt](../tests/judge_prompt_en.txt) |
 | [test_scale.py](../tests/test_scale.py) | what a valid scale is, and what it does to a grade, a run and a comparison |
 | [test_labels.py](../tests/test_labels.py) | what a valid label is, which cases a filter and a bucket select, and what a relabelled case does to a comparison |
-| [test_api.py](../tests/test_api.py) | validation, wiring, the startup refusal, serialization, and the end-to-end chain |
+| [test_api.py](../tests/test_api.py) | validation, wiring, the three judge sources at startup, `/health` and its flips, the periodic check, serialization, and the end-to-end chain |
 | [test_deployment.py](../tests/test_deployment.py) | a real uvicorn process, and the Docker image under `-m docker` |
 
 The documents in [../examples](../examples) are real responses of this app driven by a judge
