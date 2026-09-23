@@ -254,11 +254,17 @@ class JudgeConfig(DocumentedModel):
         for every variable alike, required or optional — one condition cannot mean "your key
         is missing" on one line and "take the default" on the next.
 
+        Whitespace around a value is dropped before anything else is decided. `docker run
+        --env-file` passes a trailing space through verbatim where `uvicorn --env-file`
+        strips it, and an endpoint URL ending in two spaces answers every call with a 404.
+        A value of nothing but whitespace is therefore empty, and refused as such.
+
         Args:
             environment: Variable name to value, `os.environ` in production and a plain dict
                 anywhere else. Names outside the `RUBRIC_JUDGE_*` set above are ignored,
                 so the whole process environment can be handed in. Values are the strings
-                they are exported as; an empty one is refused rather than read as "unset".
+                they are exported as, surrounding whitespace ignored; an empty one is refused
+                rather than read as "unset".
 
         Returns:
             A validated `JudgeConfig`. Numeric variables are parsed and range-checked by
@@ -290,23 +296,24 @@ class JudgeConfig(DocumentedModel):
             "max_concurrent": "RUBRIC_JUDGE_MAX_CONCURRENT",
         }
         required_fields = {"endpoint", "api_key", "model"}
+        trimmed = {
+            variable: environment[variable].strip()
+            for variable in variable_per_field.values()
+            if variable in environment
+        }
         unusable = [
             f"{variable} is missing"
             for field, variable in variable_per_field.items()
-            if field in required_fields and variable not in environment
-        ] + [
-            f"{variable} is empty"
-            for variable in variable_per_field.values()
-            if environment.get(variable) == ""
-        ]
+            if field in required_fields and variable not in trimmed
+        ] + [f"{variable} is empty" for variable, value in trimmed.items() if value == ""]
         if unusable:
             raise RuntimeError(f"Unusable environment variables: {', '.join(unusable)}")
 
         return cls.model_validate(
             {
-                field: environment[variable]
+                field: trimmed[variable]
                 for field, variable in variable_per_field.items()
-                if variable in environment
+                if variable in trimmed
             }
         )
 

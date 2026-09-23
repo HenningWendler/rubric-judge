@@ -605,6 +605,25 @@ def test_an_empty_required_environment_variable_is_refused():
         JudgeConfig.from_mapping({**REQUIRED_ENVIRONMENT, "RUBRIC_JUDGE_API_KEY": ""})
 
 
+def test_whitespace_around_an_environment_value_is_dropped():
+    """`docker run --env-file` keeps a trailing space that `uvicorn --env-file` strips; the
+    same file must configure the same judge either way, not a URL that answers 404."""
+    config = JudgeConfig.from_mapping(
+        {
+            **REQUIRED_ENVIRONMENT,
+            "RUBRIC_JUDGE_ENDPOINT": "http://x/v1  ",
+            "RUBRIC_JUDGE_MODEL": " m",
+        }
+    )
+    assert config.endpoint == "http://x/v1"
+    assert config.model == "m"
+
+
+def test_a_value_of_only_whitespace_is_refused_as_empty():
+    with pytest.raises(RuntimeError, match="RUBRIC_JUDGE_API_KEY is empty"):
+        JudgeConfig.from_mapping({**REQUIRED_ENVIRONMENT, "RUBRIC_JUDGE_API_KEY": "   "})
+
+
 def test_a_non_numeric_environment_value_names_the_offending_setting():
     with pytest.raises(ValueError, match="temperature"):
         JudgeConfig.from_mapping(
