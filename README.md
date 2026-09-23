@@ -302,6 +302,7 @@ variables serve both entry points.
 | `RUBRIC_JUDGE_HEALTH_INTERVAL` | int, `0` or 60 or more | no, `0` | Seconds a running service lets its judge go without an answered call before it proves it with one small call, for example `86400` for once a day. `0` never checks. See [A judge that stops working](#a-judge-that-stops-working) |
 | `RUBRIC_JUDGE_HEALTH_RETRIES` | int, 0 or more | no, `3` | How often that periodic check is repeated after an outage before the service reports unhealthy. `0` reports it after the first failed check |
 | `RUBRIC_JUDGE_HEALTH_FIRST_PAUSE` | int, 1 or more | no, `300` | Seconds before the first of those retries. Each further pause doubles, so the default waits 5, 10 and 20 minutes |
+| `RUBRIC_JUDGE_ACCESS_TOKEN` | string | no, none | Read by the HTTP service only. Once set, every endpoint except `/health` needs `Authorization: Bearer <token>`. Unset, the service is open. See [Configuring the service](#configuring-the-service) |
 
 Any OpenAI-compatible endpoint works, including OpenAI, Azure, vLLM, Ollama, Groq and
 OpenRouter, because the official `openai` SDK talks to whatever `base_url` it is given.
@@ -334,7 +335,8 @@ A numeric variable that does not parse is a separate, later failure. It raises a
 The HTTP service also reads the absence of all of them. Set no `RUBRIC_JUDGE_*` variable at
 all and it starts in compare-only mode, which [Configuring the service](#configuring-the-service)
 describes. Any single one, an optional one included, means a judge was intended, and then the
-three required ones have to be there too.
+three required ones have to be there too. `RUBRIC_JUDGE_ACCESS_TOKEN` is the one exception,
+because it locks the service and says nothing about the judge.
 
 The grading scale is deliberately not an environment variable. It belongs to the judge and
 is set in code, which [Another scale](#another-scale) shows.
@@ -800,6 +802,69 @@ curl -sS -X POST http://localhost:8001/evaluate \
 {"detail":"This service was started without a judge. Set RUBRIC_JUDGE_ENDPOINT, RUBRIC_JUDGE_API_KEY and RUBRIC_JUDGE_MODEL and restart it to evaluate."}
 ```
 
+The service is open to anyone who can reach it. Set `RUBRIC_JUDGE_ACCESS_TOKEN` and every
+endpoint except `/health` answers `401` unless the request carries that token as
+`Authorization: Bearer <token>`, the scheme vLLM and the OpenAI API use too. `/health` stays
+open so that an orchestrator can probe the service without knowing the token, and `/docs`
+stays open so that you can read it. Pick a long random value, for example with
+`openssl rand -hex 32`, and serve the port over HTTPS, since the token travels in the clear
+otherwise.
+
+```bash
+RUBRIC_JUDGE_ACCESS_TOKEN=s3cret .venv/bin/uvicorn rubric_judge.api:app --env-file .env --port 8001
+```
+
+A request without the token, or with a different one, is refused before its body is
+validated, so a stranger learns nothing about the service. Only a body that is not JSON at all
+is answered `422` first, because the framework parses it before anything else runs.
+
+```bash
+curl -sS -i -X POST http://localhost:8001/compare -H 'Content-Type: application/json' --data '{}'
+```
+
+```
+HTTP/1.1 401 Unauthorized
+date: Wed, 23 Sep 2026 10:11:43 GMT
+server: uvicorn
+www-authenticate: Bearer
+content-length: 70
+content-type: application/json
+
+{"detail":"Send the access token as 'Authorization: Bearer <token>'."}
+```
+
+With the header, the same request goes through. Every example below works against a locked
+service once you add `-H 'Authorization: Bearer <token>'` to it. In `/docs` the Authorize
+button sets the header for you.
+
+```bash
+jq -n \
+  --slurpfile baseline examples/run_result_baseline.json \
+  --slurpfile candidate examples/run_result_candidate.json \
+  '{baseline: $baseline[0], candidate: $candidate[0]}' \
+| curl -sS -X POST http://localhost:8001/compare \
+    -H 'Content-Type: application/json' \
+    -H 'Authorization: Bearer s3cret' --data @- \
+| jq '.metrics_delta.average_score_delta'
+```
+
+```
+0.16666666666666663
+```
+
+The token works in compare-only mode as well. Set to nothing but whitespace, it stops the
+service rather than leaving it open, because an empty line is a lock you meant to set.
+
+```bash
+RUBRIC_JUDGE_ACCESS_TOKEN= .venv/bin/uvicorn rubric_judge.api:app --port 8001
+```
+
+```
+RuntimeError: Unusable environment variables: RUBRIC_JUDGE_ACCESS_TOKEN is empty
+
+ERROR:    Application startup failed. Exiting.
+```
+
 ### Health
 
 ```bash
@@ -1079,6 +1144,7 @@ statuses is in [the reference](docs/REFERENCE.md).
 
 | Status | Situation | Body |
 |---|---|---|
+| `401` | The service was started with `RUBRIC_JUDGE_ACCESS_TOKEN` and the request did not carry it | `{"detail":"Send the access token as 'Authorization: Bearer <token>'."}` |
 | `422` | The document is invalid, here a weight of 0 | `{"detail":[{"loc":["body","criteria",1,"weight"],"msg":"Input should be greater than 0","type":"greater_than"}]}` |
 | `422` | A label filter matching no case | `{"detail":[{"loc":["body"],"msg":"Value error, label_filter [['polizy']] matches no case; labels present in this run: policy (2), procedure (2)","type":"value_error"}]}` |
 | `422` | Two runs that do not describe the same catalog | `{"detail":"the runs are not comparable: case 4, criterion 42: weight 1.0 vs 2.0"}` |
