@@ -68,6 +68,15 @@ def test_uvicorn_without_any_judge_variable_only_compares():
     assert COMPARE_ONLY_WARNING in read_log()
 
 
+def test_uvicorn_refuses_an_empty_access_token():
+    refused_start = _run_to_exit(
+        _uvicorn_command(_free_port()), {"RUBRIC_JUDGE_ACCESS_TOKEN": " "}
+    )
+
+    assert refused_start.returncode == UVICORN_STARTUP_FAILED
+    assert "RUBRIC_JUDGE_ACCESS_TOKEN is empty" in refused_start.stderr
+
+
 # --- the Docker image ------------------------------------------------------------------------
 
 

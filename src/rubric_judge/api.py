@@ -7,6 +7,7 @@ means lives in `evaluation.py` and below.
 import asyncio
 import logging
 import os
+import secrets
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager, suppress
 from enum import StrEnum
@@ -15,10 +16,12 @@ from typing import Annotated, Literal
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from openai import OpenAIError
 
 from rubric_judge import comparison, evaluation
 from rubric_judge.judge import (
+    ACCESS_TOKEN_VARIABLE,
     JUDGE_VARIABLE_PREFIX,
     Judge,
     JudgeConfig,
@@ -43,6 +46,15 @@ COMPARE_ONLY_REFUSAL = (
     "RUBRIC_JUDGE_API_KEY and RUBRIC_JUDGE_MODEL and restart it to evaluate."
 )
 """What `POST /evaluate` and `POST /evaluate/run` answer, with a 503, in compare-only mode."""
+
+ACCESS_TOKEN_REFUSAL = "Send the access token as 'Authorization: Bearer <token>'."
+"""What every `POST` endpoint answers, with a 401, to a caller without the access token."""
+
+_bearer_credentials = HTTPBearer(
+    auto_error=False,
+    description=f"Required only when the service was started with {ACCESS_TOKEN_VARIABLE}.",
+)
+"""Reads `Authorization: Bearer <token>`, and makes Swagger UI offer its Authorize button."""
 
 
 class JudgeSource(StrEnum):
@@ -84,16 +96,17 @@ def judge_source(environment: Mapping[str, str], override_installed: bool) -> Ju
     Any `RUBRIC_JUDGE_*` variable, even an optional one, means a judge was intended, so only
     an environment without a single one starts in compare-only mode. A half-written
     configuration is then refused rather than mistaken for a service meant to only compare.
+    `RUBRIC_JUDGE_ACCESS_TOKEN` is the exception: it guards the service, not the judge.
 
     Args:
         environment: Variable name to value, `os.environ` at startup and a plain dict in a
-            test. Names outside `RUBRIC_JUDGE_*` are ignored.
+            test. Names outside `RUBRIC_JUDGE_*`, and the access token, are ignored.
         override_installed: Whether a program embedding the app has overridden `get_judge`
             before startup. It wins over the environment.
 
     Returns:
         `CUSTOM` when an override is installed, else `ENVIRONMENT` when any
-        `RUBRIC_JUDGE_*` variable is present, else `NONE`.
+        `RUBRIC_JUDGE_*` variable other than the access token is present, else `NONE`.
 
     Example:
         judge_source({"RUBRIC_JUDGE_TEMPERATURE": "0.0"}, override_installed=False)
@@ -101,9 +114,98 @@ def judge_source(environment: Mapping[str, str], override_installed: bool) -> Ju
     """
     if override_installed:
         return JudgeSource.CUSTOM
-    if any(name.startswith(JUDGE_VARIABLE_PREFIX) for name in environment):
+    if any(
+        name.startswith(JUDGE_VARIABLE_PREFIX) and name != ACCESS_TOKEN_VARIABLE
+        for name in environment
+    ):
         return JudgeSource.ENVIRONMENT
     return JudgeSource.NONE
+
+
+def access_token(environment: Mapping[str, str]) -> str | None:
+    """Read the token every caller must send, or learn that the service is open.
+
+    The token is optional because a service behind an authenticating proxy, or on a laptop,
+    needs none. Set to the empty string it is refused rather than read as "open", since that
+    is a half-finished line, and an operator who wrote it meant to lock the service.
+
+    Args:
+        environment: Variable name to value, `os.environ` at startup and a plain dict in a
+            test. Only `RUBRIC_JUDGE_ACCESS_TOKEN` is read, with surrounding whitespace
+            dropped as for every other variable.
+
+    Returns:
+        The token, or `None` when the variable is absent and every endpoint is open.
+
+    Raises:
+        RuntimeError: The variable is set to nothing but whitespace.
+
+    Example:
+        access_token({"RUBRIC_JUDGE_ACCESS_TOKEN": " s3cret "})   # "s3cret"
+        access_token({})                                          # None
+    """
+    if ACCESS_TOKEN_VARIABLE not in environment:
+        return None
+    token = environment[ACCESS_TOKEN_VARIABLE].strip()
+    if token == "":
+        raise RuntimeError(f"Unusable environment variables: {ACCESS_TOKEN_VARIABLE} is empty")
+    return token
+
+
+def is_authorized(expected_token: str | None, presented_token: str | None) -> bool:
+    """Decide whether a caller may use the service.
+
+    The comparison takes the same time however much of the token matched, so the token cannot
+    be guessed one character at a time from response times.
+
+    Args:
+        expected_token: The token the service was started with, `None` for an open service.
+        presented_token: The token the caller sent as a bearer credential, `None` when it
+            sent none or used another scheme.
+
+    Returns:
+        True for an open service, and otherwise exactly when both tokens are equal.
+
+    Example:
+        is_authorized("s3cret", "s3cret")   # True
+        is_authorized("s3cret", None)       # False
+    """
+    if expected_token is None:
+        return True
+    if presented_token is None:
+        return False
+    return secrets.compare_digest(presented_token.encode(), expected_token.encode())
+
+
+async def require_access_token(
+    request: Request,
+    credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(_bearer_credentials)],
+) -> None:
+    """Refuse a caller without the access token, before its request body is validated.
+
+    FastAPI parses the JSON body before any dependency runs, so a body that is not JSON at all
+    is still answered 422 first. Limiting the size of a body is the reverse proxy's job.
+
+    Args:
+        request: The request being served, which carries the token the app started with.
+        credentials: The bearer credential the caller sent, `None` when it sent none.
+
+    Raises:
+        HTTPException: 401 with `WWW-Authenticate: Bearer`, when the service was started
+            with a token and the caller sent no token or a different one.
+
+    Example:
+        @app.post("/export", dependencies=[Depends(require_access_token)])
+        async def export() -> dict[str, str]:   # locked exactly like the built-in endpoints
+            return {"status": "ok"}
+    """
+    presented_token = credentials.credentials if credentials is not None else None
+    if not is_authorized(request.app.state.access_token, presented_token):
+        raise HTTPException(
+            status_code=401,
+            detail=ACCESS_TOKEN_REFUSAL,
+            headers={"WWW-Authenticate": "Bearer"},
+        )
 
 
 def health_report(
@@ -277,8 +379,9 @@ async def _start_with_a_proven_judge(app: FastAPI) -> AsyncIterator[None]:
         Control to the server once the judge is proven, for as long as the service runs.
 
     Raises:
-        RuntimeError: A judge was intended but its configuration is incomplete. The message
-            names every missing or empty variable. Uvicorn reports it and exits with code 3.
+        RuntimeError: A judge was intended but its configuration is incomplete, or the
+            access token is empty. The message names every missing or empty variable.
+            Uvicorn reports it and exits with code 3.
         ValidationError: A numeric `RUBRIC_JUDGE_*` variable does not parse or is out of
             range.
         JudgeUnavailableError: The endpoint did not answer within `max_attempts`.
@@ -300,6 +403,7 @@ async def _start_with_a_proven_judge(app: FastAPI) -> AsyncIterator[None]:
         app.state.judge = OpenAIJudge(JudgeConfig.from_env())
         await app.state.judge.check()
         app.state.health_monitor = _start_monitor_if_configured(app.state.judge)
+    app.state.access_token = access_token(os.environ)
     yield
     await _stop(app.state.health_monitor)
 
@@ -336,7 +440,7 @@ async def _stop(monitor: asyncio.Task[None] | None) -> None:
         await monitor
 
 
-app = FastAPI(title="rubric-judge", version="0.1.0", lifespan=_start_with_a_proven_judge)
+app = FastAPI(title="rubric-judge", version="0.2.0", lifespan=_start_with_a_proven_judge)
 
 
 @app.exception_handler(RequestValidationError)
@@ -422,6 +526,8 @@ async def health(request: Request, response: Response) -> HealthReport:
     **200** `{"status": "ok", "judge": "custom"}` for a judge installed in code, whose health
     is the embedding program's to watch.
 
+    Never needs the access token, so an orchestrator can probe a locked service.
+
     Args:
         request: The request being served, which carries the app's judge and its health.
         response: The response being built, whose status turns 503 when unhealthy.
@@ -445,7 +551,11 @@ async def health(request: Request, response: Response) -> HealthReport:
     return report
 
 
-@app.post("/evaluate", summary="Score one answer against its rubric")
+@app.post(
+    "/evaluate",
+    summary="Score one answer against its rubric",
+    dependencies=[Depends(require_access_token)],
+)
 async def evaluate_case(case: Case, judge: Annotated[Judge, Depends(get_judge)]) -> CaseResult:
     """Score one answer against its rubric — one LLM call per criterion, run in parallel.
 
@@ -471,6 +581,11 @@ async def evaluate_case(case: Case, judge: Annotated[Judge, Depends(get_judge)])
     Any `labels` you send come back untouched on the result. They are never shown to the
     judge and cannot move a score — they exist to slice a run (see `POST /evaluate/run`).
     A requirement the answer must actually meet belongs in `criteria`.
+
+    **401** if the service was started with `RUBRIC_JUDGE_ACCESS_TOKEN` and the request does
+    not carry it as `Authorization: Bearer <token>`. This is checked before the body is
+    validated, so a stranger learns nothing about the service. Only a body that is not JSON at
+    all is answered 422 first.
 
     **422** if the body is invalid — an empty rubric, duplicate criterion ids, a blank
     `content`, or a weight that is not positive and finite. Validation happens before the
@@ -519,7 +634,11 @@ async def evaluate_case(case: Case, judge: Annotated[Judge, Depends(get_judge)])
     return await evaluation.evaluate_case(judge, case)
 
 
-@app.post("/evaluate/run", summary="Score a catalog of answers and aggregate the run")
+@app.post(
+    "/evaluate/run",
+    summary="Score a catalog of answers and aggregate the run",
+    dependencies=[Depends(require_access_token)],
+)
 async def evaluate_run(run: Run, judge: Annotated[Judge, Depends(get_judge)]) -> RunResult:
     """Score a whole catalog of answers in one request and get metrics over the run.
 
@@ -544,6 +663,11 @@ async def evaluate_run(run: Run, judge: Annotated[Judge, Depends(get_judge)]) ->
     Synchronous: the response arrives when the last selected case is done. Sizing the request
     is therefore yours to do — the whole catalog is one HTTP timeout, whether or not a
     `label_filter` narrows what is judged.
+
+    **401** if the service was started with `RUBRIC_JUDGE_ACCESS_TOKEN` and the request does
+    not carry it as `Authorization: Bearer <token>`. This is checked before the body is
+    validated, so a stranger learns nothing about the service. Only a body that is not JSON at
+    all is answered 422 first.
 
     **422** on the single-case rules, plus an empty `cases` or duplicate case ids. One
     invalid case rejects the whole run: a run that is partly judged and partly refused
@@ -589,7 +713,11 @@ async def evaluate_run(run: Run, judge: Annotated[Judge, Depends(get_judge)]) ->
     return await evaluation.evaluate_run(judge, run)
 
 
-@app.post("/compare", summary="Hold two finished runs against each other")
+@app.post(
+    "/compare",
+    summary="Hold two finished runs against each other",
+    dependencies=[Depends(require_access_token)],
+)
 async def compare_runs(run_comparison: RunComparison) -> RunComparisonResult:
     """Compare two runs of the same catalog — did your change help, where, and what did it cost.
 
@@ -613,6 +741,11 @@ async def compare_runs(run_comparison: RunComparison) -> RunComparisonResult:
     Every `case_results` entry has to name the `scale` it was judged on; a run that dropped
     the field is refused rather than read as the bundled `0–2`, because a 0–10 run silently
     reinterpreted that way would subtract cleanly from a real `0–2` one and answer `200`.
+
+    **401** if the service was started with `RUBRIC_JUDGE_ACCESS_TOKEN` and the request does
+    not carry it as `Authorization: Bearer <token>`. This is checked before the body is
+    validated, so a stranger learns nothing about the service. Only a body that is not JSON at
+    all is answered 422 first.
 
     **422** if a body is invalid, or if the two runs are not comparable — a different grading
     scale, different case ids, different criteria within a case, different weights, or a case

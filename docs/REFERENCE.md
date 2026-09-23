@@ -347,6 +347,8 @@ One whole comparison.
 | `WEAKEST_CASES_REPORTED` | `5` | How many cases `RunMetrics.weakest_cases_above_zero` names. A shortlist to look at next, not a complete ranking |
 | `MINIMUM_HEALTH_INTERVAL_SECONDS` | `60` | The shortest `health_interval_seconds` apart from `0`. Every check is a paid call. From `rubric_judge.judge` |
 | `COMPARE_ONLY_REFUSAL` | the `503` detail | What `POST /evaluate` and `POST /evaluate/run` answer in compare-only mode. From `rubric_judge.api` |
+| `ACCESS_TOKEN_REFUSAL` | the `401` detail | What every endpoint except `GET /health` answers to a request without the access token. From `rubric_judge.api` |
+| `ACCESS_TOKEN_VARIABLE` | `"RUBRIC_JUDGE_ACCESS_TOKEN"` | The one `RUBRIC_JUDGE_*` variable that configures the HTTP service instead of the judge. From `rubric_judge.judge` |
 | `SCORE_EQUALITY_TOLERANCE` | `1e-9` | How close two scores must be to count as unchanged in a comparison. Far above the float noise two runs accumulate summing the same weights in a different order, and far below the smallest difference a rubric can actually produce |
 
 ## Functions
@@ -543,7 +545,8 @@ before any of that is decided, because `docker run --env-file` passes it through
 --env-file` strips it, so a value of nothing but spaces counts as empty. Names without the
 `RUBRIC_JUDGE_` prefix are ignored, so the whole process environment can be handed in. A name
 with it that no field reads, such as `RUBRIC_JUDGE_HEALTH_INTERVALL`, is refused as unknown,
-because a typo would otherwise fall back to the default unnoticed.
+because a typo would otherwise fall back to the default unnoticed. `RUBRIC_JUDGE_ACCESS_TOKEN`
+is known and refused when empty, but no field reads it, because it belongs to the HTTP service.
 
 The functions below come from `rubric_judge.api` and decide how the HTTP service starts.
 
@@ -552,7 +555,8 @@ def judge_source(environment: Mapping[str, str], override_installed: bool) -> Ju
 ```
 Where a starting service's judge comes from. `CUSTOM` when `get_judge` is overridden, else
 `ENVIRONMENT` when any `RUBRIC_JUDGE_*` variable is present, an optional one included, else
-`NONE`, which is compare-only mode.
+`NONE`, which is compare-only mode. `RUBRIC_JUDGE_ACCESS_TOKEN` does not count, since it locks
+the service and says nothing about the judge.
 
 | Source | At startup | `GET /health` |
 |---|---|---|
@@ -570,6 +574,27 @@ by overriding it **before** the app starts, which is what makes the source `CUST
 
 ```python
 app.dependency_overrides[get_judge] = lambda: my_own_judge   # before startup
+```
+
+```python
+def access_token(environment: Mapping[str, str]) -> str | None
+def is_authorized(expected_token: str | None, presented_token: str | None) -> bool
+async def require_access_token(request: Request,
+                               credentials: HTTPAuthorizationCredentials | None) -> None
+```
+`access_token` reads `RUBRIC_JUDGE_ACCESS_TOKEN` at startup, without surrounding whitespace.
+`None` means the variable is absent and the service is open. A value of nothing but whitespace
+raises `RuntimeError`. `is_authorized` is `True` for an open service and otherwise exactly when
+the presented token equals the expected one, compared in constant time. `require_access_token`
+is the FastAPI dependency on `POST /evaluate`, `POST /evaluate/run` and `POST /compare` that
+answers `401` with `WWW-Authenticate: Bearer` when `is_authorized` says no. It runs before the
+body is validated and before `get_judge`, so a caller without the token learns nothing else.
+Only a body that is not JSON at all is answered `422` first, because FastAPI parses the body
+before any dependency runs.
+
+```python
+is_authorized("s3cret", "s3cret")   # True
+is_authorized("s3cret", None)       # False
 ```
 
 ```python
@@ -607,6 +632,9 @@ It logs every failed attempt instead of raising it, and only a bug ends it.
 
 The JSON shapes are exactly the models above. The service is stateless, with no catalog, no run
 ids and no persistence.
+
+Started with `RUBRIC_JUDGE_ACCESS_TOKEN`, the three `POST` endpoints need
+`Authorization: Bearer <token>`. `GET /health`, `/docs` and `/openapi.json` never do.
 
 ### `POST /evaluate`
 
@@ -831,6 +859,8 @@ The `422` body carries only `loc`, `msg` and `type`. The rejected value is never
 | A numeric `RUBRIC_JUDGE_*` variable that does not parse or is out of range, including a `RUBRIC_JUDGE_HEALTH_INTERVAL` from 1 to 59 | `pydantic.ValidationError` naming the setting | none, the service does not start: uvicorn exits with code 3 |
 | The startup `check()` refused by the endpoint, for a wrong key, model, URL or parameter | the `openai` SDK's own exception, unretried | none, the service does not start: uvicorn exits with code 3 |
 | The startup `check()` unanswered within `RUBRIC_JUDGE_MAX_ATTEMPTS` | `JudgeUnavailableError` | none, the service does not start: uvicorn exits with code 3 |
+| `RUBRIC_JUDGE_ACCESS_TOKEN` exported empty or as nothing but whitespace | `RuntimeError` naming it | none, the service does not start: uvicorn exits with code 3 |
+| The service started with `RUBRIC_JUDGE_ACCESS_TOKEN`, and a request to any `POST` endpoint without `Authorization: Bearer` and that token | none, the library needs no service | `401` with `ACCESS_TOKEN_REFUSAL` and `WWW-Authenticate: Bearer`, before the body is validated and before compare-only mode answers |
 | No `RUBRIC_JUDGE_*` variable at all, and a request to `POST /evaluate` or `POST /evaluate/run` | none, the library needs no service | `503` with `COMPARE_ONLY_REFUSAL`, before the body is validated |
 | Judge endpoint unreachable, timed out, rate limited or answering `5xx` | retried up to `RUBRIC_JUDGE_MAX_ATTEMPTS` times with a doubling wait, then `JudgeUnavailableError`. The whole run is dropped | `503` |
 | Judge reply unparseable after `RUBRIC_JUDGE_MAX_ATTEMPTS` tries, with no JSON, broken JSON, or a grade off the scale | `UnusableReplyError`, a `ValueError`, per attempt, then `JudgeUnavailableError` naming the last complaint | `503` |

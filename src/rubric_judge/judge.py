@@ -78,9 +78,16 @@ MINIMUM_HEALTH_INTERVAL_SECONDS = 60
 check is a paid call, so an interval of a few seconds would bill one each time."""
 
 JUDGE_VARIABLE_PREFIX = "RUBRIC_JUDGE_"
-"""What every environment variable configuring the judge starts with. Any name carrying it is
-read as meant for the judge: refused by `JudgeConfig.from_mapping` when no field reads it, and
-enough for the HTTP service to expect a judge at all."""
+"""What every environment variable of this project starts with. Any name carrying it, apart
+from `ACCESS_TOKEN_VARIABLE`, is read as meant for the judge: refused by
+`JudgeConfig.from_mapping` when no field reads it, and enough for the HTTP service to expect a
+judge at all."""
+
+ACCESS_TOKEN_VARIABLE = "RUBRIC_JUDGE_ACCESS_TOKEN"
+"""The one `RUBRIC_JUDGE_*` variable that configures the HTTP service instead of the judge: the
+token its callers must send. It is known here so that `JudgeConfig.from_mapping` does not refuse
+it as a typo, and it does not count as a judge being intended, so a service that only compares
+can still require it."""
 
 _VARIABLE_PER_FIELD = {
     "endpoint": "RUBRIC_JUDGE_ENDPOINT",
@@ -345,7 +352,8 @@ class JudgeConfig(DocumentedModel):
         `MAX_TOKENS`, `MAX_ATTEMPTS`, `MAX_CONCURRENT`, `HEALTH_INTERVAL`, `HEALTH_RETRIES`
         and `HEALTH_FIRST_PAUSE`, each prefixed `RUBRIC_JUDGE_`. An optional variable that is
         absent is not passed on, so the field defaults above stay the single source of truth
-        for it.
+        for it. `ACCESS_TOKEN` belongs to the HTTP service: it is accepted here and refused
+        when empty like every other variable, but no field reads it.
 
         A variable set to the *empty* string is a half-finished configuration and is refused
         for every variable alike, required or optional — one condition cannot mean "your key
@@ -426,7 +434,7 @@ def _empty_variables(value_per_variable: Mapping[str, str]) -> list[str]:
 
 def _unknown_variables(value_per_variable: Mapping[str, str]) -> list[str]:
     """Name each `RUBRIC_JUDGE_*` name no field reads, because it is nearly always a typo."""
-    known_variables = set(_VARIABLE_PER_FIELD.values())
+    known_variables = {*_VARIABLE_PER_FIELD.values(), ACCESS_TOKEN_VARIABLE}
     return [
         f"{variable} is unknown"
         for variable in value_per_variable

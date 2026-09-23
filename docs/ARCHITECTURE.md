@@ -168,8 +168,8 @@ order. The end-to-end tests hand a real `OpenAIJudge` an `AsyncOpenAI` client wh
 that stub and drive the whole chain: the HTTP request, the real `openai` SDK writing the call
 and reading the reply, the parsing, and the weighted fold. That is what proves the wire format
 and the self-healing retry, without a socket. The `client` fixture starts the app with a
-`FakeJudge` installed as a custom judge, so no test depends on your own exported variables or
-on a reachable endpoint.
+`FakeJudge` installed as a custom judge and without any `RUBRIC_JUDGE_*` variable, the access
+token included, so no test depends on your own exported variables or on a reachable endpoint.
 
 `StubOpenAIServer` in [../tests/conftest.py](../tests/conftest.py) is the one double with a real
 socket. A service configured from the environment proves its judge with one call before it
@@ -227,8 +227,9 @@ python3.12 -m venv /tmp/freeze && /tmp/freeze/bin/pip install .
 ## Scope
 
 Implemented: evaluating one case or a whole catalog with run metrics, slicing a run by label,
-and comparing two finished runs against each other, as a library or over HTTP.
+and comparing two finished runs against each other, as a library or over HTTP, the latter
+optionally locked with one bearer token.
 
-Not implemented: rubric catalog files, a CLI, negation in a `label_filter` (so "table but not
+Not implemented: rubric catalog files, a CLI, users, roles or several tokens, negation in a `label_filter` (so "table but not
 images" cannot be written), streaming progress for long runs, and self-consistency, meaning
 judging each criterion several times and reporting how far the grades spread.

@@ -187,14 +187,14 @@ def clean_environment(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture
-def client() -> Iterator[TestClient]:
+def client(clean_environment: None) -> Iterator[TestClient]:
     """HTTP client against the real app; `use_judge()` swaps in a fake for one test."""
     with _client_of_started_app() as client:
         yield client
 
 
 @pytest.fixture
-def status_reporting_client() -> Iterator[TestClient]:
+def status_reporting_client(clean_environment: None) -> Iterator[TestClient]:
     """HTTP client that reports a server fault as its status code, like a real client would,
     instead of re-raising the server-side error into the test."""
     with _client_of_started_app(raise_server_exceptions=False) as client:
@@ -205,8 +205,9 @@ def status_reporting_client() -> Iterator[TestClient]:
 def _client_of_started_app(**client_options: Any) -> Iterator[TestClient]:
     """The app started with a custom judge installed, so no test depends on the developer's
     environment or on a reachable endpoint, and reset afterwards so no override leaks into
-    the next test. A judge that knows no criterion fails any call it gets; a test that needs
-    grades installs its own with `use_judge()`."""
+    the next test. Its callers take `clean_environment`, because the access token is read from
+    the environment even beside a custom judge. A judge that knows no criterion fails any call
+    it gets; a test that needs grades installs its own with `use_judge()`."""
     use_judge(FakeJudge({}))
     with TestClient(app, **client_options) as client:
         yield client

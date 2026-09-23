@@ -26,10 +26,13 @@ from tests.conftest import (
 
 from rubric_judge import JudgeUnavailableError, RunResult
 from rubric_judge.api import (
+    ACCESS_TOKEN_REFUSAL,
     COMPARE_ONLY_REFUSAL,
     JudgeSource,
+    access_token,
     app,
     health_report,
+    is_authorized,
     judge_source,
     prove_the_judge_periodically,
     retry_pauses_seconds,
@@ -299,6 +302,169 @@ def test_compare_only_answers_503_before_the_body_is_validated(clean_environment
         evaluate_run = client.post("/evaluate/run", json={})
 
     assert (evaluate.status_code, evaluate_run.status_code) == (503, 503)
+
+
+# --- access token ----------------------------------------------------------------------------
+
+
+def _bearer(token: str) -> dict[str, str]:
+    return {"Authorization": f"Bearer {token}"}
+
+
+def test_a_locked_service_refuses_every_endpoint_but_health_without_the_token(
+    clean_environment, monkeypatch
+):
+    monkeypatch.setenv("RUBRIC_JUDGE_ACCESS_TOKEN", "s3cret")
+
+    with TestClient(app) as client:
+        health = client.get("/health")
+        refusals = [
+            client.post("/evaluate", json=CASE),
+            client.post("/evaluate/run", json=RUN),
+            client.post("/compare", json=_runs(run_of({1: 0}), run_of({1: 2}))),
+        ]
+
+    assert health.status_code == 200
+    for refusal in refusals:
+        assert (refusal.status_code, refusal.json()["detail"]) == (401, ACCESS_TOKEN_REFUSAL)
+        assert refusal.headers["WWW-Authenticate"] == "Bearer"
+
+
+def test_the_token_alone_leaves_the_service_in_compare_only_mode(clean_environment, monkeypatch):
+    """The token guards the service, not the judge, so it must not read as a half-written
+    judge configuration."""
+    monkeypatch.setenv("RUBRIC_JUDGE_ACCESS_TOKEN", "s3cret")
+    body = _runs(run_of({1: 0}), run_of({1: 2}))
+
+    with TestClient(app) as client:
+        health = client.get("/health").json()
+        compare = client.post("/compare", json=body, headers=_bearer("s3cret"))
+
+    assert health == {"status": "ok", "judge": "none"}
+    assert compare.status_code == 200
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [
+        {"Authorization": "Bearer wrong"},
+        {"Authorization": "Bearer s3cretX"},
+        {"Authorization": "Bearer "},
+        {"Authorization": "Bearer"},
+        {"Authorization": "Bearer s3crét".encode("latin-1")},
+        {"Authorization": "Basic czNjcmV0"},
+        {"Authorization": "s3cret"},
+        {"X-API-Key": "s3cret"},
+    ],
+)
+def test_anything_but_the_right_bearer_token_is_refused(clean_environment, monkeypatch, headers):
+    monkeypatch.setenv("RUBRIC_JUDGE_ACCESS_TOKEN", "s3cret")
+
+    with TestClient(app) as client:
+        response = client.post("/compare", json={}, headers=headers)
+
+    assert response.status_code == 401
+
+
+@pytest.mark.parametrize("path", ["/health", "/docs", "/openapi.json"])
+def test_health_and_the_api_docs_stay_open_on_a_locked_service(
+    clean_environment, monkeypatch, path
+):
+    monkeypatch.setenv("RUBRIC_JUDGE_ACCESS_TOKEN", "s3cret")
+
+    with TestClient(app) as client:
+        assert client.get(path).status_code == 200
+
+
+def test_the_api_docs_mark_exactly_the_locked_endpoints_for_the_authorize_button(client):
+    paths = client.get("/openapi.json").json()["paths"]
+
+    locked = {path for path, methods in paths.items() for method in methods.values()
+              if method.get("security") == [{"HTTPBearer": []}]}
+
+    assert locked == {"/evaluate", "/evaluate/run", "/compare"}
+
+
+def test_a_caller_without_the_token_learns_nothing_about_its_body_or_the_judge(
+    clean_environment, monkeypatch
+):
+    """An invalid body would be a 422 and a missing judge a 503. Both would tell a stranger
+    something about the service, so the token is checked first."""
+    monkeypatch.setenv("RUBRIC_JUDGE_ACCESS_TOKEN", "s3cret")
+
+    with TestClient(app) as client:
+        response = client.post("/evaluate", json={"id": 1})
+
+    assert response.status_code == 401
+
+
+def test_only_a_body_that_is_not_json_at_all_is_answered_before_the_token(
+    clean_environment, monkeypatch
+):
+    """FastAPI parses the body before any dependency runs. The docs promise exactly this
+    much and no more, so a change in the framework shows up here."""
+    monkeypatch.setenv("RUBRIC_JUDGE_ACCESS_TOKEN", "s3cret")
+    json_body = {"content-type": "application/json"}
+
+    with TestClient(app) as client:
+        not_json = client.post("/evaluate", content="{not json", headers=json_body)
+
+    assert not_json.status_code == 422
+
+
+def test_the_token_reaches_a_judge_configured_from_the_environment(
+    clean_environment, monkeypatch, stub_openai_server
+):
+    """The token is a known `RUBRIC_JUDGE_*` name, so a full judge configuration beside it is
+    not refused as carrying a typo."""
+    for variable, value in judge_environment(stub_openai_server.endpoint_seen_from()).items():
+        monkeypatch.setenv(variable, value)
+    monkeypatch.setenv("RUBRIC_JUDGE_ACCESS_TOKEN", "s3cret")
+
+    with TestClient(app) as client:
+        refused = client.post("/evaluate", json=CASE)
+        served = client.post("/evaluate", json=CASE, headers=_bearer("s3cret"))
+
+    assert (refused.status_code, served.status_code) == (401, 200)
+
+
+def test_an_empty_token_stops_the_service_instead_of_opening_it(clean_environment, monkeypatch):
+    monkeypatch.setenv("RUBRIC_JUDGE_ACCESS_TOKEN", "  ")
+
+    with pytest.raises(RuntimeError, match="RUBRIC_JUDGE_ACCESS_TOKEN is empty"):
+        with TestClient(app):
+            pass
+
+
+def test_an_empty_token_is_named_together_with_the_judge_variables_missing(
+    clean_environment, monkeypatch
+):
+    monkeypatch.setenv("RUBRIC_JUDGE_MODEL", "stub-model")
+    monkeypatch.setenv("RUBRIC_JUDGE_ACCESS_TOKEN", "")
+
+    with pytest.raises(RuntimeError) as refusal:
+        with TestClient(app):
+            pass
+
+    assert "RUBRIC_JUDGE_ACCESS_TOKEN is empty" in str(refusal.value)
+    assert "RUBRIC_JUDGE_ENDPOINT is missing" in str(refusal.value)
+
+
+def test_the_token_is_read_without_surrounding_whitespace():
+    assert access_token({"RUBRIC_JUDGE_ACCESS_TOKEN": " s3cret\n"}) == "s3cret"
+
+
+def test_without_the_variable_the_service_is_open():
+    assert access_token({}) is None
+    assert is_authorized(None, None)
+
+
+def test_a_token_is_only_accepted_when_it_matches_exactly():
+    assert is_authorized("s3cret", "s3cret")
+    assert not is_authorized("s3cret", "s3cre")
+    assert not is_authorized("s3cret", "s3cret ")
+    assert not is_authorized("s3cret", None)
+    assert not is_authorized("s3cret", "ſ3cret")   # no crash on non-ASCII input
 
 
 def test_a_judge_installed_before_startup_needs_no_environment(clean_environment):
@@ -896,7 +1062,9 @@ def test_a_rubric_larger_than_the_concurrency_limit_is_scored_completely(client,
     assert body["criterion_results"][7]["reasoning"] == "Covered by criterion 08."
 
 
-def test_two_requests_in_two_event_loops_score_a_large_rubric_identically(stub_endpoint):
+def test_two_requests_in_two_event_loops_score_a_large_rubric_identically(
+    clean_environment, stub_endpoint
+):
     """The regression that started this: one shared judge, two `TestClient` blocks — two
     event loops — and a rubric larger than the concurrency limit.
 
