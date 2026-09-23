@@ -19,6 +19,7 @@ from openai import OpenAIError
 
 from rubric_judge import comparison, evaluation
 from rubric_judge.judge import (
+    JUDGE_VARIABLE_PREFIX,
     Judge,
     JudgeConfig,
     JudgeHealth,
@@ -37,7 +38,7 @@ from rubric_judge.models import (
 
 logger = logging.getLogger(__name__)
 
-WITHOUT_A_JUDGE = (
+COMPARE_ONLY_REFUSAL = (
     "This service was started without a judge. Set RUBRIC_JUDGE_ENDPOINT, "
     "RUBRIC_JUDGE_API_KEY and RUBRIC_JUDGE_MODEL and restart it to evaluate."
 )
@@ -100,7 +101,7 @@ def judge_source(environment: Mapping[str, str], override_installed: bool) -> Ju
     """
     if override_installed:
         return JudgeSource.CUSTOM
-    if any(name.startswith("RUBRIC_JUDGE_") for name in environment):
+    if any(name.startswith(JUDGE_VARIABLE_PREFIX) for name in environment):
         return JudgeSource.ENVIRONMENT
     return JudgeSource.NONE
 
@@ -159,7 +160,7 @@ def get_judge(request: Request) -> Judge:
     """
     judge: OpenAIJudge | None = request.app.state.judge
     if judge is None:
-        raise HTTPException(status_code=503, detail=WITHOUT_A_JUDGE)
+        raise HTTPException(status_code=503, detail=COMPARE_ONLY_REFUSAL)
     return judge
 
 
@@ -307,7 +308,19 @@ def _start_monitor_if_configured(judge: OpenAIJudge) -> asyncio.Task[None] | Non
     """The periodic check as a background task, or `None` when the interval is 0."""
     if judge.config.health_interval_seconds == 0:
         return None
-    return asyncio.create_task(prove_the_judge_periodically(judge))
+    monitor = asyncio.create_task(prove_the_judge_periodically(judge))
+    monitor.add_done_callback(_log_a_crash_of)
+    return monitor
+
+
+def _log_a_crash_of(monitor: asyncio.Task[None]) -> None:
+    """Log why the periodic check died the moment it does, because `/health` only says that."""
+    if not monitor.cancelled() and monitor.exception() is not None:
+        logger.error(
+            "The periodic judge health check crashed, /health reports unhealthy until a "
+            "restart",
+            exc_info=monitor.exception(),
+        )
 
 
 async def _stop(monitor: asyncio.Task[None] | None) -> None:
@@ -401,6 +414,7 @@ async def health(request: Request, response: Response) -> HealthReport:
     **503** `{"status": "unhealthy", "judge": "failing"}` once the endpoint refused the key,
     the model or the URL, or a periodic check found it unreachable. The cause is in the
     server log, never in the body. A judge call that gets answered makes it healthy again.
+    A periodic check that crashed is a bug and stays `failing` until the service restarts.
 
     **200** `{"status": "ok", "judge": "none"}` in compare-only mode, started without any
     `RUBRIC_JUDGE_*` variable, where only `POST /compare` works.
@@ -472,7 +486,7 @@ async def evaluate_case(case: Case, judge: Annotated[Judge, Depends(get_judge)])
     `RUBRIC_JUDGE_*` variable. The detail names the variables to set.
 
     **500** if the judge endpoint rejects the configured key or model, or the program is
-    broken. `GET /health` turns unhealthy with it.
+    broken. A rejected key or model also turns `GET /health` unhealthy.
 
     Args:
         case: The case to score: `id`, `answer`, at least one `criteria` entry with a

@@ -316,6 +316,18 @@ RuntimeError: Unusable environment variables: RUBRIC_JUDGE_API_KEY is missing,
 RUBRIC_JUDGE_MODEL is missing, RUBRIC_JUDGE_MAX_TOKENS is empty
 ```
 
+A misspelled name is refused too. Every variable starting with `RUBRIC_JUDGE_` has to be one
+of the table above, because a typo read as nothing would quietly fall back to the default. Here
+the periodic check would have stayed off while you believed it ran once a day.
+
+```bash
+RUBRIC_JUDGE_HEALTH_INTERVALL=86400 .venv/bin/python -c "from rubric_judge import JudgeConfig; JudgeConfig.from_env()"
+```
+
+```
+RuntimeError: Unusable environment variables: RUBRIC_JUDGE_HEALTH_INTERVALL is unknown
+```
+
 A numeric variable that does not parse is a separate, later failure. It raises a
 `pydantic.ValidationError` naming the setting, not the `RuntimeError` above.
 
@@ -744,11 +756,11 @@ on. Generated, interactive API docs are served at `/docs`. The container from
 [With Docker](#with-docker) serves the same API on the same port, so every example below
 works against it unchanged.
 
-The service proves its judge before it serves. It builds the judge from the variables and
-sends it one small call with the configured model and temperature, which costs at most 16
-reply tokens. A missing or empty variable, a refused key, an unknown model and an endpoint that
-does not answer within `RUBRIC_JUDGE_MAX_ATTEMPTS` each stop uvicorn with exit code 3, and the
-traceback it prints ends with the cause. Here only the model is set.
+The service proves its judge before it serves. It builds the judge from the variables and sends
+it one small call with the configured model and temperature, which costs at most 16 reply
+tokens. A missing, empty or unknown variable, a refused key, an unknown model and an endpoint
+that does not answer within `RUBRIC_JUDGE_MAX_ATTEMPTS` each stop uvicorn with exit code 3, and
+the traceback it prints ends with the cause. Here only the model is set.
 
 ```bash
 RUBRIC_JUDGE_MODEL=gpt-5.4-mini .venv/bin/uvicorn rubric_judge.api:app --port 8001
@@ -803,7 +815,7 @@ curl -sS http://localhost:8001/health
 | Status | Body | Meaning |
 |---|---|---|
 | `200` | `{"status":"ok","judge":"ok"}` | The judge answered its last call |
-| `503` | `{"status":"unhealthy","judge":"failing"}` | The endpoint refused the key, the model or the URL, or a periodic check found it unreachable. The cause is in the server log and never in the body |
+| `503` | `{"status":"unhealthy","judge":"failing"}` | The endpoint refused the key, the model or the URL, or a periodic check found it unreachable or crashed. The cause is in the server log and never in the body. A crashed check stays unhealthy until a restart |
 | `200` | `{"status":"ok","judge":"none"}` | Compare-only mode, started without any `RUBRIC_JUDGE_*` variable |
 | `200` | `{"status":"ok","judge":"custom"}` | A judge installed in code by overriding `get_judge`, see [the reference](docs/REFERENCE.md#functions). Its health is yours to watch |
 
@@ -1483,8 +1495,11 @@ its traffic alone, and a key revoked while nobody calls goes unnoticed until the
 
 The longest an outage can take to show is therefore the interval, plus four attempts of 60
 seconds and 35 minutes of pauses, plus the 90 seconds Docker takes to see three failed probes
-in a row. The startup check does not wait like this. It retries within seconds and stops the
-service, so a container started during an outage exits and your restart policy tries again.
+in a row. The startup check does not wait like this. It makes `RUBRIC_JUDGE_MAX_ATTEMPTS`
+attempts, pausing 0.5 and then 1 second between the default 3, and then stops the service, so a
+container started during an outage exits and your restart policy tries again. Each attempt waits
+at most 60 seconds, so an endpoint that accepts the connection and never answers holds the start
+for about three minutes with the default of 3 attempts.
 
 ### Concurrency
 

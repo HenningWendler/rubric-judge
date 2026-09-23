@@ -641,6 +641,33 @@ def test_whitespace_around_an_environment_value_is_dropped():
     assert config.model == "m"
 
 
+def test_a_misspelled_judge_variable_is_refused_rather_than_ignored():
+    """Ignored, `RUBRIC_JUDGE_HEALTH_INTERVALL` would start a service that never checks its
+    judge while its operator believes it does."""
+    with pytest.raises(RuntimeError, match="RUBRIC_JUDGE_HEALTH_INTERVALL is unknown"):
+        JudgeConfig.from_mapping(
+            {**REQUIRED_ENVIRONMENT, "RUBRIC_JUDGE_HEALTH_INTERVALL": "86400"}
+        )
+
+
+def test_an_unknown_judge_variable_is_named_together_with_a_missing_one():
+    with pytest.raises(RuntimeError) as refusal:
+        JudgeConfig.from_mapping(
+            {"RUBRIC_JUDGE_ENDPOINT": "http://x/v1", "RUBRIC_JUDGE_MODLE": "m",
+             "RUBRIC_JUDGE_API_KEY": "k"}
+        )
+
+    assert str(refusal.value) == (
+        "Unusable environment variables: RUBRIC_JUDGE_MODEL is missing, "
+        "RUBRIC_JUDGE_MODLE is unknown"
+    )
+
+
+def test_names_without_the_judge_prefix_are_left_alone():
+    config = JudgeConfig.from_mapping({**REQUIRED_ENVIRONMENT, "PATH": "/usr/bin", "RUBRIC_X": "1"})
+    assert config.model == REQUIRED_ENVIRONMENT["RUBRIC_JUDGE_MODEL"]
+
+
 def test_a_value_of_only_whitespace_is_refused_as_empty():
     with pytest.raises(RuntimeError, match="RUBRIC_JUDGE_API_KEY is empty"):
         JudgeConfig.from_mapping({**REQUIRED_ENVIRONMENT, "RUBRIC_JUDGE_API_KEY": "   "})
@@ -782,6 +809,28 @@ async def test_only_the_health_check_carries_its_own_timeout():
     await judge.score("answer", CRITERION)
 
     assert timeouts_sent == [60.0, NOT_GIVEN]
+
+
+async def test_the_check_is_sent_with_the_judges_model_and_temperature_and_16_tokens():
+    """The check proves what `score` will send, so a model that refuses the configured
+    temperature is found at startup, and it costs at most 16 reply tokens whatever
+    `max_tokens` allows a judge call."""
+    requests_sent: list[dict[str, Any]] = []
+
+    async def create(**request: Any) -> type:
+        requests_sent.append(request)
+        return _completion("OK")
+
+    config = JudgeConfig(
+        model="m-check", endpoint="http://x/v1", api_key="k", temperature=0.7, max_tokens=768
+    )
+    judge = OpenAIJudge(config, client=_client_answering(SimpleNamespace(create=create)))
+
+    await judge.check()
+
+    [request] = requests_sent
+    assert (request["model"], request["temperature"]) == ("m-check", 0.7)
+    assert request["max_completion_tokens"] == 16
 
 
 @pytest.mark.parametrize(

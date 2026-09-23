@@ -346,7 +346,7 @@ One whole comparison.
 | `DEFAULT_SCALE` | `Scale(maximum=2, presence_threshold=0.5, level_descriptions={2: …, 1: …, 0: …})` | The scale the bundled prompt is written from and the one `OpenAIJudge` grades on unless you give it another. The three level descriptions are part of the scale's identity, so `Scale(maximum=2, presence_threshold=0.5)` is a different, undescribed scale and is not equal to it |
 | `WEAKEST_CASES_REPORTED` | `5` | How many cases `RunMetrics.weakest_cases_above_zero` names. A shortlist to look at next, not a complete ranking |
 | `MINIMUM_HEALTH_INTERVAL_SECONDS` | `60` | The shortest `health_interval_seconds` apart from `0`. Every check is a paid call. From `rubric_judge.judge` |
-| `WITHOUT_A_JUDGE` | the `503` detail | What `POST /evaluate` and `POST /evaluate/run` answer in compare-only mode. From `rubric_judge.api` |
+| `COMPARE_ONLY_REFUSAL` | the `503` detail | What `POST /evaluate` and `POST /evaluate/run` answer in compare-only mode. From `rubric_judge.api` |
 | `SCORE_EQUALITY_TOLERANCE` | `1e-9` | How close two scores must be to count as unchanged in a comparison. Far above the float noise two runs accumulate summing the same weights in a different order, and far below the smallest difference a rubric can actually produce |
 
 ## Functions
@@ -535,12 +535,15 @@ def JudgeConfig.from_mapping(environment: Mapping[str, str]) -> JudgeConfig
 ```
 `from_env()` reads the `RUBRIC_JUDGE_*` variables out of `os.environ`. `from_mapping()` applies
 the same rules to any mapping you hand it, settings loaded from a file or a plain dict in a
-test. Both raise `RuntimeError` naming every missing or empty variable at once, and
+test. Both raise `RuntimeError` naming every missing, empty or unknown variable at once, and
 `pydantic.ValidationError` when a numeric variable does not parse or is out of range. An
 optional variable that is absent falls back to the field default. An optional variable set to
 the empty string is refused like a missing required one. Whitespace around a value is dropped
-before any of that is decided, because `docker run --env-file` passes it through where
-`uvicorn --env-file` strips it, so a value of nothing but spaces counts as empty.
+before any of that is decided, because `docker run --env-file` passes it through where `uvicorn
+--env-file` strips it, so a value of nothing but spaces counts as empty. Names without the
+`RUBRIC_JUDGE_` prefix are ignored, so the whole process environment can be handed in. A name
+with it that no field reads, such as `RUBRIC_JUDGE_HEALTH_INTERVALL`, is refused as unknown,
+because a typo would otherwise fall back to the default unnoticed.
 
 The functions below come from `rubric_judge.api` and decide how the HTTP service starts.
 
@@ -555,7 +558,7 @@ Where a starting service's judge comes from. `CUSTOM` when `get_judge` is overri
 |---|---|---|
 | `ENVIRONMENT` | `JudgeConfig.from_env()`, then one `check()`. Any failure stops the service, uvicorn exits with code 3 | `ok` while `judge.health` is healthy, `503` `failing` otherwise |
 | `CUSTOM` | nothing is built or checked | `ok` `custom` |
-| `NONE` | a warning is logged | `ok` `none`. `POST /evaluate` and `POST /evaluate/run` answer `503` with `WITHOUT_A_JUDGE` |
+| `NONE` | a warning is logged | `ok` `none`. `POST /evaluate` and `POST /evaluate/run` answer `503` with `COMPARE_ONLY_REFUSAL` |
 
 ```python
 def get_judge(request: Request) -> Judge
@@ -788,11 +791,11 @@ asks this endpoint.
 | `judge` | `str` | `ok`, `failing`, `custom`, `none` | `ok` or `failing` for a judge from the environment, `custom` for one installed in code, `none` in compare-only mode |
 
 The judge turns `failing` when the endpoint refuses a call with `401`, `403` or `404`, when a
-periodic check fails on every attempt of its retry schedule or is rejected, or when the
-periodic check crashed. It turns `ok` again with the next
-answered call. An outage answered with `503` per request does not change it. The cause of a
-`failing` judge is in the server log and never in the body. `POST /compare` needs no judge at
-all and answers correctly in every one of these states.
+periodic check fails on every attempt of its retry schedule or is rejected. It turns `ok` again
+with the next answered call. A periodic check that crashed is a bug, is logged at once and keeps
+the judge `failing` until the service restarts. An outage answered with `503` per request does
+not change it. The cause of a `failing` judge is in the server log and never in the body. `POST
+/compare` needs no judge at all and answers correctly in every one of these states.
 
 ## Errors
 
@@ -824,11 +827,11 @@ The `422` body carries only `loc`, `msg` and `type`. The rejected value is never
 | `run_metrics()` or `label_metrics()` over cases judged on different scales, since raw grades in two units do not average | `ValueError` naming every scale found | none, unreachable over HTTP: `RunResult` refuses such a run first |
 | `judge_prompt(scale)` for a scale with no `level_descriptions`, or `OpenAIJudge(config, scale=…)` with such a scale and no `system_prompt` | `ValueError` naming the scale | none, raised at construction time and not per request |
 | A judge returning a score above the `scale` it declares | `ValueError` out of `evaluate_case()` naming the criterion, a bug in the judge and not an outage | `500` |
-| Judge not configured: a required `RUBRIC_JUDGE_*` variable missing while another one is set, or any of them, required or optional, exported empty or as nothing but whitespace | `RuntimeError` naming every offending variable and which of the two it is | none, the service does not start: uvicorn exits with code 3 |
+| Judge not configured: a required `RUBRIC_JUDGE_*` variable missing while another one is set, any of them, required or optional, exported empty or as nothing but whitespace, or a `RUBRIC_JUDGE_*` name no setting reads | `RuntimeError` naming every offending variable and which of the three it is | none, the service does not start: uvicorn exits with code 3 |
 | A numeric `RUBRIC_JUDGE_*` variable that does not parse or is out of range, including a `RUBRIC_JUDGE_HEALTH_INTERVAL` from 1 to 59 | `pydantic.ValidationError` naming the setting | none, the service does not start: uvicorn exits with code 3 |
 | The startup `check()` refused by the endpoint, for a wrong key, model, URL or parameter | the `openai` SDK's own exception, unretried | none, the service does not start: uvicorn exits with code 3 |
 | The startup `check()` unanswered within `RUBRIC_JUDGE_MAX_ATTEMPTS` | `JudgeUnavailableError` | none, the service does not start: uvicorn exits with code 3 |
-| No `RUBRIC_JUDGE_*` variable at all, and a request to `POST /evaluate` or `POST /evaluate/run` | none, the library needs no service | `503` with `WITHOUT_A_JUDGE`, before the body is validated |
+| No `RUBRIC_JUDGE_*` variable at all, and a request to `POST /evaluate` or `POST /evaluate/run` | none, the library needs no service | `503` with `COMPARE_ONLY_REFUSAL`, before the body is validated |
 | Judge endpoint unreachable, timed out, rate limited or answering `5xx` | retried up to `RUBRIC_JUDGE_MAX_ATTEMPTS` times with a doubling wait, then `JudgeUnavailableError`. The whole run is dropped | `503` |
 | Judge reply unparseable after `RUBRIC_JUDGE_MAX_ATTEMPTS` tries, with no JSON, broken JSON, or a grade off the scale | `UnusableReplyError`, a `ValueError`, per attempt, then `JudgeUnavailableError` naming the last complaint | `503` |
 | Judge reply carrying no content at all, or a response with no choice, from a truncation, a content filter or a tool-call path | `JudgeUnavailableError` naming the endpoint's `finish_reason`, not retried | `503` |

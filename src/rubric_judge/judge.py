@@ -77,6 +77,28 @@ MINIMUM_HEALTH_INTERVAL_SECONDS = 60
 """The shortest `JudgeConfig.health_interval_seconds` there is, apart from 0 for "never". Every
 check is a paid call, so an interval of a few seconds would bill one each time."""
 
+JUDGE_VARIABLE_PREFIX = "RUBRIC_JUDGE_"
+"""What every environment variable configuring the judge starts with. Any name carrying it is
+read as meant for the judge: refused by `JudgeConfig.from_mapping` when no field reads it, and
+enough for the HTTP service to expect a judge at all."""
+
+_VARIABLE_PER_FIELD = {
+    "endpoint": "RUBRIC_JUDGE_ENDPOINT",
+    "api_key": "RUBRIC_JUDGE_API_KEY",
+    "model": "RUBRIC_JUDGE_MODEL",
+    "temperature": "RUBRIC_JUDGE_TEMPERATURE",
+    "max_tokens": "RUBRIC_JUDGE_MAX_TOKENS",
+    "max_attempts": "RUBRIC_JUDGE_MAX_ATTEMPTS",
+    "max_concurrent": "RUBRIC_JUDGE_MAX_CONCURRENT",
+    "health_interval_seconds": "RUBRIC_JUDGE_HEALTH_INTERVAL",
+    "health_check_retries": "RUBRIC_JUDGE_HEALTH_RETRIES",
+    "health_check_first_pause_seconds": "RUBRIC_JUDGE_HEALTH_FIRST_PAUSE",
+}
+"""The one list of `JudgeConfig` fields the environment sets, and the variable each is read from."""
+
+_REQUIRED_FIELDS = ("endpoint", "api_key", "model")
+"""The fields a judge cannot be built without. A tuple, so the refusal names them in this order."""
+
 
 class JudgeUnavailableError(Exception):
     """The judge produced no usable reply, so the run it was part of is invalid.
@@ -321,8 +343,9 @@ class JudgeConfig(DocumentedModel):
 
         Reads `ENDPOINT`, `API_KEY`, `MODEL` (all required) plus `TEMPERATURE`,
         `MAX_TOKENS`, `MAX_ATTEMPTS`, `MAX_CONCURRENT`, `HEALTH_INTERVAL`, `HEALTH_RETRIES`
-        and `HEALTH_FIRST_PAUSE`, each prefixed `RUBRIC_JUDGE_`. An optional variable that is absent is not passed on, so the
-        field defaults above stay the single source of truth for it.
+        and `HEALTH_FIRST_PAUSE`, each prefixed `RUBRIC_JUDGE_`. An optional variable that is
+        absent is not passed on, so the field defaults above stay the single source of truth
+        for it.
 
         A variable set to the *empty* string is a half-finished configuration and is refused
         for every variable alike, required or optional — one condition cannot mean "your key
@@ -333,21 +356,26 @@ class JudgeConfig(DocumentedModel):
         strips it, and an endpoint URL ending in two spaces answers every call with a 404.
         A value of nothing but whitespace is therefore empty, and refused as such.
 
+        A `RUBRIC_JUDGE_*` name outside the set above is refused as unknown. It is nearly
+        always a typo, and `RUBRIC_JUDGE_HEALTH_INTERVALL` read as nothing would start a
+        service that never checks its judge while its operator believes it does.
+
         Args:
             environment: Variable name to value, `os.environ` in production and a plain dict
-                anywhere else. Names outside the `RUBRIC_JUDGE_*` set above are ignored,
-                so the whole process environment can be handed in. Values are the strings
-                they are exported as, surrounding whitespace ignored; an empty one is refused
-                rather than read as "unset".
+                anywhere else. Names without the `RUBRIC_JUDGE_` prefix are ignored, so the
+                whole process environment can be handed in. Values are the strings they are
+                exported as, surrounding whitespace ignored; an empty one is refused rather
+                than read as "unset".
 
         Returns:
             A validated `JudgeConfig`. Numeric variables are parsed and range-checked by
             Pydantic, so a typo cannot turn into a silently odd setting.
 
         Raises:
-            RuntimeError: A required variable is missing, or any variable is set to the empty
-                string. The message names *all* of them at once and says which of the two
-                each one is — fixing configuration one error per restart is misery.
+            RuntimeError: A required variable is missing, any variable is set to the empty
+                string, or a `RUBRIC_JUDGE_*` name is unknown. The message names *all* of
+                them at once and says which of the three each one is, because fixing
+                configuration one error per restart is misery.
             ValidationError: A numeric variable does not parse or is out of range. The
                 message names the offending setting.
 
@@ -360,43 +388,50 @@ class JudgeConfig(DocumentedModel):
                 }
             ).max_attempts   # 3, the field default
         """
-        variable_per_field = {
-            "endpoint": "RUBRIC_JUDGE_ENDPOINT",
-            "api_key": "RUBRIC_JUDGE_API_KEY",
-            "model": "RUBRIC_JUDGE_MODEL",
-            "temperature": "RUBRIC_JUDGE_TEMPERATURE",
-            "max_tokens": "RUBRIC_JUDGE_MAX_TOKENS",
-            "max_attempts": "RUBRIC_JUDGE_MAX_ATTEMPTS",
-            "max_concurrent": "RUBRIC_JUDGE_MAX_CONCURRENT",
-            "health_interval_seconds": "RUBRIC_JUDGE_HEALTH_INTERVAL",
-            "health_check_retries": "RUBRIC_JUDGE_HEALTH_RETRIES",
-            "health_check_first_pause_seconds": "RUBRIC_JUDGE_HEALTH_FIRST_PAUSE",
-        }
-        required_fields = {"endpoint", "api_key", "model"}
         trimmed_value_per_variable = {
-            variable: environment[variable].strip()
-            for variable in variable_per_field.values()
-            if variable in environment
+            name: value.strip()
+            for name, value in environment.items()
+            if name.startswith(JUDGE_VARIABLE_PREFIX)
         }
-        unusable = [
-            f"{variable} is missing"
-            for field, variable in variable_per_field.items()
-            if field in required_fields and variable not in trimmed_value_per_variable
-        ] + [
-            f"{variable} is empty"
-            for variable, value in trimmed_value_per_variable.items()
-            if value == ""
-        ]
+        unusable = (
+            _missing_required_variables(trimmed_value_per_variable)
+            + _empty_variables(trimmed_value_per_variable)
+            + _unknown_variables(trimmed_value_per_variable)
+        )
         if unusable:
             raise RuntimeError(f"Unusable environment variables: {', '.join(unusable)}")
 
         return cls.model_validate(
             {
                 field: trimmed_value_per_variable[variable]
-                for field, variable in variable_per_field.items()
+                for field, variable in _VARIABLE_PER_FIELD.items()
                 if variable in trimmed_value_per_variable
             }
         )
+
+
+def _missing_required_variables(value_per_variable: Mapping[str, str]) -> list[str]:
+    """Name each required variable that is absent, since a judge cannot be built without it."""
+    return [
+        f"{_VARIABLE_PER_FIELD[field]} is missing"
+        for field in _REQUIRED_FIELDS
+        if _VARIABLE_PER_FIELD[field] not in value_per_variable
+    ]
+
+
+def _empty_variables(value_per_variable: Mapping[str, str]) -> list[str]:
+    """Name each variable set to nothing, a half-finished line rather than a wish for a default."""
+    return [f"{variable} is empty" for variable, value in value_per_variable.items() if value == ""]
+
+
+def _unknown_variables(value_per_variable: Mapping[str, str]) -> list[str]:
+    """Name each `RUBRIC_JUDGE_*` name no field reads, because it is nearly always a typo."""
+    known_variables = set(_VARIABLE_PER_FIELD.values())
+    return [
+        f"{variable} is unknown"
+        for variable in value_per_variable
+        if variable not in known_variables
+    ]
 
 
 def parse_judge_reply(reply: str, scale: Scale) -> JudgeReply:
@@ -827,9 +862,9 @@ class OpenAIJudge:
         """Send the health check exactly once, for a caller with a retry schedule of its own.
 
         The call waits at most `_HEALTH_CHECK_TIMEOUT_SECONDS` for an answer. An answer marks
-        `health` healthy. A failure is only reported and never recorded, except a `401`,
-        `403` or `404`, which every call records, because the caller decides when a run of
-        outages is long enough to call the judge unhealthy.
+        `health` healthy. An outage is only reported and never recorded, because the caller
+        decides when a run of outages is long enough to call the judge unhealthy. A `401`,
+        `403` or `404` is recorded as a failure here, as it is on every call.
 
         Raises:
             JudgeUnavailableError: The endpoint did not answer: unreachable, timed out, rate
