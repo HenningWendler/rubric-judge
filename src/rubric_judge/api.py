@@ -485,7 +485,8 @@ async def evaluate_run(run: Run, judge: Annotated[Judge, Depends(get_judge)]) ->
     **503** if the judge could not answer for a single criterion of a single case — the whole
     run is dropped, not the one case. The metrics average the cases against each other, so a
     run with one fabricated `0` in it reports a number you could not tell from a real one.
-    Nothing is stored here, so a retry costs only the judge calls.
+    Nothing is stored here, so a retry costs only the judge calls. A service started without
+    any `RUBRIC_JUDGE_*` variable answers 503 as well, naming the variables to set.
 
     Concurrency is bounded by the judge, not by the run: every case of this request shares
     one budget, and so does every other request in flight.
